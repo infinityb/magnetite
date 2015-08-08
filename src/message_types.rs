@@ -3,6 +3,12 @@ use byteorder::{BigEndian, ByteOrder};
 
 use super::bitfield::UnmeasuredBitfield;
 
+pub enum Error {
+    Unknown(u8),
+    Truncated,
+    Invalid,
+    LargeBlock,
+}
 
 // keep-alive is implemented with a zero-sized message.
 // It will be intrinsic to the parser.
@@ -75,24 +81,11 @@ impl MessageType {
 
     pub fn read_message(&self, buf: &[u8]) -> Result<Message, Error> {
         use self::MessageType as MT;
-
         match *self {
-            MT::Choke => {
-                assert_eq!(buf.len(), 0);
-                Ok(Message::Choke)
-            },
-            MT::Unchoke => {
-                assert_eq!(buf.len(), 0);
-                Ok(Message::Unchoke)
-            },
-            MT::Interested => {
-                assert_eq!(buf.len(), 0);
-                Ok(Message::Interested)
-            },
-            MT::NotInterested => {
-                assert_eq!(buf.len(), 0);
-                Ok(Message::NotInterested)
-            },
+            MT::Choke => Ok(Message::Choke),
+            MT::Unchoke => Ok(Message::Unchoke),
+            MT::Interested => Ok(Message::Interested),
+            MT::NotInterested => Ok(Message::NotInterested),
             MT::Have => parse_have(buf).map(Message::Have),
             MT::Bitfield => parse_bitfield(buf).map(Message::Bitfield),
             MT::Request => Request::parse(buf).map(Message::Request),
@@ -194,17 +187,12 @@ pub enum Message {
     Port(u16),
 }
 
-pub enum Error {
-    Unknown(u8),
-    Truncated,
-    Invalid,
-    LargeBlock,
-}
-
-fn parse(buf: &[u8]) -> Result<Message, Error> {
-    if buf.len() == 0 {
-        return Err(Error::Truncated);
+impl Message {
+    fn parse(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() == 0 {
+            return Err(Error::Truncated);
+        }
+        let mtype = try!(MessageType::from_u8(buf[0]).ok_or(Error::Invalid));
+        mtype.read_message(&buf[1..])
     }
-    let mtype = try!(MessageType::from_u8(buf[0]).ok_or(Error::Invalid));
-    mtype.read_message(&buf[1..])
 }

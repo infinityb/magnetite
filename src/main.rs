@@ -3,6 +3,9 @@ extern crate byteorder;
 extern crate mio;
 extern crate bytes;
 
+use std::path::PathBuf;
+
+mod slice;
 mod connection;
 mod message_types;
 mod bitfield;
@@ -13,10 +16,21 @@ fn main() {
     println!("Hello, world!");
 }
 
-static pstr: &'static [u8] = b"BitTorrent protocol";
+pub trait Storage {
+    //
+}
+
+/// Lowest common denominator storage
+pub struct DefaultStorage {
+    base_path: PathBuf,
+}
 
 pub struct Torrent {
-    info_hash: [u8; 20],
+    info: connection::TorrentInfo,
     pieces: Bitfield,
+
+    // Dynamic dispatch because disks are expensive anyway.
+    storage: Box<Storage>,
+
     // want_map: HashMap<u32, u32>,
 }

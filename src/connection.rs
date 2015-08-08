@@ -1,8 +1,16 @@
+use std::mem;
 use std::collections::VecDeque;
+use std::io::{self, Cursor, Read};
+
+use byteorder::{ByteOrder, BigEndian, ReadBytesExt};
 use bytes::RingBuf;
 
+use super::slice::Slice;
 use super::bitfield::{UnmeasuredBitfield, Bitfield};
 use super::message_types::Request;
+
+static PROTO_NAME: &'static [u8] = b"BitTorrent protocol";
+
 
 // A block is downloaded by the client when the client is interested in a
 // peer, and that peer is not choking the client. A block is uploaded by a
@@ -52,7 +60,6 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
-    pub fn foo() {}
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -101,6 +108,8 @@ impl Default for Handshake {
 }
 
 impl Handshake {
+    //
+
     pub fn set_pieces(&mut self, bf: UnmeasuredBitfield) -> Result<(), &'static str> {
         assert_eq!(self.state, HandshakeState::Bitfield);
         self.pieces = bf;
@@ -129,3 +138,83 @@ impl Handshake {
         })
     }
 }
+
+// offset is after ``pstr''
+const RESERVED_OFFSET: usize = 0;
+const RESERVED_LEN: usize = 8;
+
+// offset is after ``pstr''
+const INFO_HASH_OFFSET: usize = 8;
+const INFO_HASH_LEN: usize = 20;
+
+// offset is after ``pstr''
+const PEER_ID_OFFSET: usize = 28;
+const PEER_ID_LEN: usize = 20;
+
+// <pstrlen><pstr><reserved><info_hash>[<peer_id>]
+pub struct HeaderBuf(Slice);
+
+impl HeaderBuf {
+    pub fn new(buf: &[u8]) -> Result<&HeaderBuf, &'static str> {
+        let mut length = 1;
+        if buf.len() < length{
+            return Err("truncated");
+        }
+
+        length += buf[0] as usize;
+        if buf.len() < length {
+            return Err("truncated");
+        }
+
+        length += RESERVED_LEN + PEER_ID_LEN;
+        if buf.len() < length {
+            return Err("truncated");
+        }
+
+        // Maybe we have a peer_id too, take a look.
+        length += PEER_ID_LEN;
+        if buf.len() < length {
+            // Nope, no peer_id here.
+            length -= PEER_ID_LEN;
+        }
+
+        Ok(unsafe { mem::transmute(buf[..length]) })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn get_protocol(&self) -> &[u8] {
+        let buf = self.as_bytes();
+        let proto_len = buf[0] as usize;
+        &buf[1..][..proto_len]
+    }
+
+    fn after_protocol(&self) -> &[u8] {
+        let buf = self.as_bytes();
+        let proto_len = buf[0] as usize;
+        &buf[1..][proto_len..]
+    }
+
+    pub fn get_reserved(&self) -> &[u8] {
+        let buf = self.after_protocol();
+        &buf[RESERVED_OFFSET..][..RESERVED_LEN]
+    }
+
+    pub fn get_info_hash(&self) -> &[u8] {
+        let buf = self.after_protocol();
+        &buf[INFO_HASH_OFFSET..][..INFO_HASH_LEN]
+    }
+
+    pub fn get_peer_id(&self) -> Option<&[u8]> {
+        let buf = self.after_protocol();
+        let peer_slice = &buf[PEER_ID_OFFSET..];
+        if peer_slice.len() > PEER_ID_LEN {
+            Some(&peer_slice[..PEER_ID_LEN])
+        } else {
+            None
+        }
+    }
+}
+
