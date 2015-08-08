@@ -1,0 +1,12 @@
+[package]
+name = "metorrent"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+
+[dependencies]
+byteorder = "*"
+mio = "0.4"
+
+[dependencies.bytes]
+git = "https://github.com/carllerche/bytes"
+commit = "b4abd1431a"
