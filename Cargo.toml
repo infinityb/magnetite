@@ -6,7 +6,13 @@ authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 [dependencies]
 byteorder = "*"
 mio = "0.4"
+log = "0.3"
 
 [dependencies.bytes]
 git = "https://github.com/carllerche/bytes"
 commit = "b4abd1431a"
+
+
+[dependencies.sha1]
+git = "https://github.com/mitsuhiko/rust-sha1.git"
+

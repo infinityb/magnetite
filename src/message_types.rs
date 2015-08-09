@@ -197,3 +197,19 @@ impl Message {
         mtype.read_message(&buf[1..])
     }
 }
+
+pub trait RingParser {
+    type Item;
+    type Err;
+
+    fn parse_msg(&mut self) -> Result<Self::Item, Self::Err>;
+}
+
+impl RingParser for ::mio::buf::RingBuf {
+    type Item = Message;
+    type Err = ();
+
+    fn parse_msg(&mut self) -> Result<Self::Item, Self::Err> {
+        unimplemented!();
+    }
+}

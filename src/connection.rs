@@ -7,6 +7,7 @@ use byteorder::{ByteOrder, BigEndian, ReadBytesExt};
 use mio::buf::RingBuf;
 
 use super::util::slice::Slice;
+use super::util::sha1::Sha1;
 use super::bitfield::{UnmeasuredBitfield, Bitfield};
 use super::message_types::{Message, Request};
 
@@ -19,19 +20,32 @@ static PROTO_NAME: &'static [u8] = b"BitTorrent protocol";
 // in the client.
 
 pub struct TorrentInfo {
-    info_hash: [u8; 20],
+    // The peer ID we will use for this torrent.
+    client_id: Sha1,
+    info_hash: Sha1,
 
     // The number of pieces in the torrent
     num_pieces: u32,
 
     // The size of each piece
-    piece_length: u32,
+    piece_len_shl: u8,
+}
+
+impl TorrentInfo {
+    pub fn zero() -> TorrentInfo {
+        TorrentInfo {
+            client_id: Sha1::new([0; 20]),
+            info_hash: Sha1::new([0; 20]),
+            num_pieces: 0,
+            piece_len_shl: 0,
+        }
+    }
 }
 
 /// Holds all the needed information to track a client.
 pub struct ConnectionState {
     torrent_info: TorrentInfo,
-    peer_id: [u8; 20],
+    peer_id: Sha1,
 
     // Ingress peer data
     ingress_buf: RingBuf,
@@ -120,10 +134,10 @@ enum HandshakeState {
 pub struct Handshake {
     // the state of the handshake process
     state: HandshakeState,
+    torrent_info: TorrentInfo,
 
     reserved: [u8; 8],
-    info_hash: [u8; 20],
-    peer_id: [u8; 20],
+    peer_id: Sha1,
 
     // Ingress peer data
     ingress_buf: RingBuf,
@@ -137,9 +151,9 @@ impl Default for Handshake {
     fn default() -> Self {
         Handshake {
             state: HandshakeState::Initial,
+            torrent_info: TorrentInfo::zero(),
             reserved: [0; 8],
-            info_hash: [0; 20],
-            peer_id: [0; 20],
+            peer_id: Sha1::new([0; 20]),
             ingress_buf: RingBuf::new(1 << 17),
             egress_buf: RingBuf::new(1 << 17),
             pieces: UnmeasuredBitfield::empty(),
@@ -156,13 +170,18 @@ impl Handshake {
         let mut discard_header = false;
         let mut state: HeaderMeasurer = Default::default();
         let mut length = 0;
+        let mut finished = false;
         while let Some(byte) = self.ingress_buf.read_byte() {
             if !state.push_byte(byte) {
+                finished = true;
                 break;
             }
             length += 1;
         }
         self.ingress_buf.reset();
+        if finished {
+
+        }
         
         if state.is_valid() {
             let mut buf = Vec::new();
@@ -184,19 +203,24 @@ impl Handshake {
             }
 
             copy_memory(header.get_reserved(), &mut self.reserved);
-            copy_memory(header.get_info_hash(), &mut self.info_hash);
+            
+            copy_memory(header.get_info_hash(),
+                self.torrent_info.info_hash.as_bytes_mut());
+
             if let Some(peer_id) = header.get_peer_id() {
-                copy_memory(peer_id, &mut self.peer_id);
+                copy_memory(peer_id, self.peer_id.as_bytes_mut());
                 self.state = HandshakeState::Bitfield;
                 discard_header = true;
             }
         }
-        
+
         if discard_header {
+            let mut discarded = 0;
             while let Some(byte) = self.ingress_buf.read_byte() {
-                if length <= buf.len() {
+                if length == discarded {
                     break;
                 }
+                discarded += 1;
             }
         }
 
@@ -217,6 +241,26 @@ impl Handshake {
         }
     }
 
+    pub fn get_info_hash(&self) -> Option<Sha1> {
+        if self.state != HandshakeState::Initial {
+            Some(self.torrent_info.info_hash)
+        } else {
+            None
+        }
+    }
+
+    pub fn update_torrent_info(&mut self, info: TorrentInfo) {
+        // Either in PeerId or Bitfield state at this time.
+        assert!(self.get_info_hash().is_some());
+
+        let pre_info_hash = self.torrent_info.info_hash;
+        self.torrent_info = info;
+
+        // Info hash can't change
+        assert_eq!(self.torrent_info.info_hash, pre_info_hash);
+
+    }
+
     pub fn set_pieces(&mut self, bf: UnmeasuredBitfield) -> Result<(), &'static str> {
         assert_eq!(self.state, HandshakeState::Bitfield);
         self.pieces = bf;
@@ -225,13 +269,13 @@ impl Handshake {
     }
 
     /// If this returns an error, the connection must be terminated.
-    pub fn finish(self, info: TorrentInfo) -> Result<ConnectionState, &'static str> {
+    pub fn finish(self) -> Result<ConnectionState, &'static str> {
         if self.state != HandshakeState::Complete {
             return Err("Connection in invalid state for ending handshake");
         }
-        let pieces = try!(self.pieces.measure(info.num_pieces));
+        let pieces = try!(self.pieces.measure(self.torrent_info.num_pieces));
         Ok(ConnectionState {
-            torrent_info: info,
+            torrent_info: self.torrent_info,
             peer_id: self.peer_id,
             ingress_buf: self.ingress_buf,
             egress_buf: self.egress_buf,
@@ -296,13 +340,6 @@ impl HeaderMeasurer {
     pub fn is_valid(&self) -> bool {
         match *self {
             HeaderMeasurer::PeerId(_) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_finished(&self) -> bool {
-        match *self {
-            HeaderMeasurer::PeerId(0) => true,
             _ => false,
         }
     }

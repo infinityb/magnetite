@@ -4,7 +4,9 @@ version = "0.1.0"
 dependencies = [
  "byteorder 0.3.11 (registry+https://github.com/rust-lang/crates.io-index)",
  "bytes 0.2.10 (git+https://github.com/carllerche/bytes)",
+ "log 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "mio 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha1 0.1.1 (git+https://github.com/mitsuhiko/rust-sha1.git)",
 ]
 
 [[package]]
@@ -69,6 +71,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "bitflags 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "sha1"
+version = "0.1.1"
+source = "git+https://github.com/mitsuhiko/rust-sha1.git#b5179ceeb810d2ed54b8c6922f246080dc89c3a8"
+dependencies = [
+ "byteorder 0.3.11 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
