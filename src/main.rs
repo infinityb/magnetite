@@ -5,7 +5,7 @@ extern crate bytes;
 
 use std::path::PathBuf;
 
-mod slice;
+mod util;
 mod connection;
 mod message_types;
 mod bitfield;
