@@ -7,7 +7,7 @@ use bytes::RingBuf;
 
 use super::slice::Slice;
 use super::bitfield::{UnmeasuredBitfield, Bitfield};
-use super::message_types::Request;
+use super::message_types::{Message, Request};
 
 static PROTO_NAME: &'static [u8] = b"BitTorrent protocol";
 
@@ -60,6 +60,43 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
+    pub fn handle(&mut self, msg: &Message) -> Result<(), ()> {
+        match *msg {
+            Message::Choke => {
+                self.peer_choking = true;
+                Ok(())
+            },
+            Message::Unchoke => {
+                self.peer_choking = false;
+                Ok(())
+            },
+            Message::Interested => {
+                self.peer_interested = true;
+                Ok(())
+            },
+            Message::NotInterested => {
+                self.peer_interested = false;
+                Ok(())
+            },
+            Message::Have(piece_num) => {
+                self.pieces.set(piece_num, true);
+                Ok(())
+            },
+            Message::Request(ref req) => {
+                self.peer_pending_requests.push_back(req.clone());
+                Ok(())
+            },
+
+            // This is never emitted after the handshake.
+            // We'll drop the client if they send this.
+            Message::Bitfield(ref _bf) => Err(()),
+
+            // Handle these elsewhere.
+            Message::Piece(ref _piece) => Ok(()),
+            Message::Cancel(ref _cancel) => Ok(()),
+            Message::Port(_port) => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -178,7 +215,7 @@ impl HeaderBuf {
             length -= PEER_ID_LEN;
         }
 
-        Ok(unsafe { mem::transmute(buf[..length]) })
+        Ok(unsafe { mem::transmute(&buf[..length]) })
     }
 
     pub fn as_bytes(&self) -> &[u8] {

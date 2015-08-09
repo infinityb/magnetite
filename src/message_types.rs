@@ -64,7 +64,6 @@ fn parse_port(buf: &[u8]) -> Result<u16, Error> {
     Ok(BigEndian::read_u16(&buf[0..2]))
 }
 
-
 impl MessageType {
     unsafe fn from_u8_unchecked(val: u8) -> MessageType {
         ::std::mem::transmute(val)
@@ -96,6 +95,7 @@ impl MessageType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Request {
     piece_num: u32,
     begin: u32,
@@ -150,6 +150,7 @@ impl Piece {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Cancel {
     piece_num: u32,
     begin: u32,
