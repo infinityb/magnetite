@@ -19,16 +19,17 @@ static PROTO_NAME: &'static [u8] = b"BitTorrent protocol";
 // client when the client is not choking a peer, and that peer is interested
 // in the client.
 
+#[derive(Copy, Clone)]
 pub struct TorrentInfo {
     // The peer ID we will use for this torrent.
-    client_id: Sha1,
-    info_hash: Sha1,
+    pub client_id: Sha1,
+    pub info_hash: Sha1,
 
     // The number of pieces in the torrent
-    num_pieces: u32,
+    pub num_pieces: u32,
 
     // The size of each piece
-    piece_len_shl: u8,
+    pub piece_len_shl: u8,
 }
 
 impl TorrentInfo {
@@ -44,13 +45,13 @@ impl TorrentInfo {
 
 /// Holds all the needed information to track a client.
 pub struct ConnectionState {
-    torrent_info: TorrentInfo,
+    pub torrent_info: TorrentInfo,
     peer_id: Sha1,
 
     // Ingress peer data
-    ingress_buf: RingBuf,
+    pub ingress_buf: RingBuf,
     // Egress peer data
-    egress_buf: RingBuf,
+    pub egress_buf: RingBuf,
 
     // this client is choking the peer
     am_choking: bool,
@@ -139,10 +140,11 @@ pub struct Handshake {
     reserved: [u8; 8],
     peer_id: Sha1,
 
+    wrote_handshake: bool,
     // Ingress peer data
-    ingress_buf: RingBuf,
+    pub ingress_buf: RingBuf,
     // Egress peer data
-    egress_buf: RingBuf,
+    pub egress_buf: RingBuf,
     // the peer has these pieces
     pieces: UnmeasuredBitfield,
 }
@@ -150,6 +152,7 @@ pub struct Handshake {
 impl Default for Handshake {
     fn default() -> Self {
         Handshake {
+            wrote_handshake: false,
             state: HandshakeState::Initial,
             torrent_info: TorrentInfo::zero(),
             reserved: [0; 8],
@@ -162,6 +165,21 @@ impl Default for Handshake {
 }
 
 impl Handshake {
+    pub fn initiate(info_hash: &Sha1, client_id: &Sha1) -> Handshake {
+        use std::io::Write;
+        
+        // None of these can be of invalid length, so this can't panic.
+        let header = HeaderBuf::build(
+            &[0; 8],
+            info_hash.as_bytes(),
+            client_id.as_bytes()).unwrap();
+
+        let handshake = Handshake::default();
+        handshake.egress_buf.write_all(header.as_bytes()).unwrap();
+        handshake.wrote_handshake = true;
+        handshake
+    }
+
     fn try_read_header(&mut self) -> Result<(), &'static str> {
         use std::slice::bytes::copy_memory;
         use ::mio::buf::Buf;
@@ -270,9 +288,24 @@ impl Handshake {
 
     /// If this returns an error, the connection must be terminated.
     pub fn finish(self) -> Result<ConnectionState, &'static str> {
+        use std::io::Write;
+
         if self.state != HandshakeState::Complete {
             return Err("Connection in invalid state for ending handshake");
         }
+
+        // None of these can be of invalid length, so this can't panic.
+        let header = HeaderBuf::build(
+            &[0; 8],
+            self.torrent_info.info_hash.as_bytes(),
+            self.torrent_info.client_id.as_bytes()).unwrap();
+
+        // Buffer should be pretty much empty, so this can't panic.
+        if !self.wrote_handshake {
+            self.egress_buf.write_all(header.as_bytes()).unwrap();
+            self.wrote_handshake = true;
+        }
+
         let pieces = try!(self.pieces.measure(self.torrent_info.num_pieces));
         Ok(ConnectionState {
             torrent_info: self.torrent_info,
@@ -364,6 +397,26 @@ impl HeaderBuf {
         let header_len = try!(Header::new(&buf)).as_bytes().len();
         buf.truncate(header_len);
         Ok(HeaderBuf::new_unchecked(buf))
+    }
+
+    pub fn build(reserved: &[u8], info_hash: &[u8], peer_id: &[u8]) -> Option<HeaderBuf> {
+        if reserved.len() != RESERVED_LEN {
+            return None;
+        }
+        if info_hash.len() != INFO_HASH_LEN {
+            return None;
+        }
+        if peer_id.len() != PEER_ID_LEN {
+            return None;
+        }
+        let buf_len = 20 + RESERVED_LEN + INFO_HASH_LEN + PEER_ID_LEN;
+        let mut buf = Vec::with_capacity(buf_len);
+        buf.push(19);
+        buf.extend(PROTO_NAME);
+        buf.extend(reserved);
+        buf.extend(info_hash);
+        buf.extend(peer_id);
+        Some(HeaderBuf::new(buf).ok().expect("generated invalid header"))
     }
 }
 

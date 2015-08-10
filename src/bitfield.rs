@@ -1,6 +1,9 @@
+use std::fmt;
+
+#[derive(Clone, Debug)]
 pub struct UnmeasuredBitfield(Option<Vec<u8>>);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Bitfield {
     length: u32,
     buf: Vec<u8>,

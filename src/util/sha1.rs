@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct Sha1([u8; 20]);
 
@@ -29,4 +31,14 @@ impl Sha1 {
         let data = repr.data as *const Sha1;
         Ok(unsafe { slice::from_raw_parts(data, repr.len / sha1sz) })
     }
+}
+
+impl fmt::Display for Sha1 {
+    fn fmt(&self, wri: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        for &byte in self.0.iter() {
+            try!(write!(wri, "{:02x}", byte));
+        }
+        Ok(())
+    }
+    
 }
