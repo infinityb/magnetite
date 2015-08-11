@@ -1,11 +1,8 @@
 use std::io::{self};
 use std::slice::bytes::copy_memory;
 
-use super::Storage;
-use super::super::bitfield::Bitfield;
-use super::super::connection::TorrentInfo;
-use super::super::util::sha1::Sha1;
-use super::super::util::piece::PieceLength;
+use ::mt::common::{Bitfield, Storage, TorrentInfo};
+use ::mt::util::{Sha1, PieceLength};
 
 /// Just store the whole torrent in a contiguous chunk of memory.
 pub struct MemoryStorage {

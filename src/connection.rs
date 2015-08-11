@@ -6,10 +6,10 @@ use std::io::{self, Cursor, Read};
 use byteorder::{ByteOrder, BigEndian, ReadBytesExt};
 use mio::buf::RingBuf;
 
-use super::util::slice::Slice;
-use super::util::sha1::Sha1;
-use super::bitfield::{UnmeasuredBitfield, Bitfield};
-use super::message_types::{Message, Request};
+use ::mt::common::{UnmeasuredBitfield, Bitfield, TorrentInfo};
+use ::mt::common::message::{Message, Request};
+use ::mt::util::slice::Slice;
+use ::mt::util::sha1::Sha1;
 
 static PROTO_NAME: &'static [u8] = b"BitTorrent protocol";
 
@@ -19,39 +19,19 @@ static PROTO_NAME: &'static [u8] = b"BitTorrent protocol";
 // client when the client is not choking a peer, and that peer is interested
 // in the client.
 
-#[derive(Copy, Clone)]
-pub struct TorrentInfo {
-    // The peer ID we will use for this torrent.
-    pub client_id: Sha1,
-    pub info_hash: Sha1,
 
-    // The number of pieces in the torrent
-    pub num_pieces: u32,
 
-    // The size of each piece
-    pub piece_len_shl: u8,
-}
-
-impl TorrentInfo {
-    pub fn zero() -> TorrentInfo {
-        TorrentInfo {
-            client_id: Sha1::new([0; 20]),
-            info_hash: Sha1::new([0; 20]),
-            num_pieces: 0,
-            piece_len_shl: 0,
-        }
-    }
+pub struct ConnectionState2 {
+    // Ingress peer data
+    pub ingress_buf: RingBuf,
+    // Egress peer data
+    pub egress_buf: RingBuf,
 }
 
 /// Holds all the needed information to track a client.
 pub struct ConnectionState {
     pub torrent_info: TorrentInfo,
     peer_id: Sha1,
-
-    // Ingress peer data
-    pub ingress_buf: RingBuf,
-    // Egress peer data
-    pub egress_buf: RingBuf,
 
     // this client is choking the peer
     am_choking: bool,
@@ -167,7 +147,7 @@ impl Default for Handshake {
 impl Handshake {
     pub fn initiate(info_hash: &Sha1, client_id: &Sha1) -> Handshake {
         use std::io::Write;
-        
+
         // None of these can be of invalid length, so this can't panic.
         let header = HeaderBuf::build(
             &[0; 8],

@@ -7,6 +7,9 @@ extern crate byteorder;
 extern crate mio;
 extern crate sha1;
 extern crate bytes;
+extern crate metorrent_common;
+extern crate metorrent_middle;
+extern crate metorrent_util;
 
 use std::io;
 use std::path::PathBuf;
@@ -16,26 +19,30 @@ use mio::{TryRead, TryWrite};
 use mio::util::Slab;
 use mio::{EventLoop, EventSet, Token};
 use mio::tcp::{TcpListener, TcpSocket, TcpStream};
-use mio::buf::{Buf, MutBuf};
+use mio::buf::{RingBuf, Buf, MutBuf};
 
-mod util;
+use mt::common::message::Message;
+use mt::common::{Bitfield, Storage};
+use mt::middle::RingParser;
+
 mod connection;
-mod message_types;
-mod bitfield;
 mod storage;
 
-use util::sha1::Sha1;
-use storage::Storage;
-use bitfield::Bitfield;
+use mt::util::Sha1;
 use connection::{Handshake, ConnectionState};
-use message_types::{Message, RingParser};
+
+pub mod mt {
+    pub use super::metorrent_common as common;
+    pub use super::metorrent_middle as middle;
+    pub use super::metorrent_util as util;
+}
 
 fn main() {
     println!("Hello, world!");
 }
 
 struct Torrent {
-    info: connection::TorrentInfo,
+    info: mt::common::TorrentInfo,
     pieces: Bitfield,
 
     // Dynamic dispatch because disks are expensive anyway.

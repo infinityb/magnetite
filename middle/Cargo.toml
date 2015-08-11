@@ -1,0 +1,11 @@
+[package]
+name = "metorrent_middle"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+
+[dependencies]
+byteorder = "*"
+mio = "*"
+
+[dependencies.metorrent_common]
+path = "./../common"

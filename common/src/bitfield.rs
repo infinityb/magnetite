@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{iter, slice};
 
 #[derive(Clone, Debug)]
 pub struct UnmeasuredBitfield(Option<Vec<u8>>);
@@ -72,6 +72,10 @@ impl Bitfield {
         self.buf[byte as usize] = new;
     }
 
+    pub fn len(&self) -> u32 {
+        self.length
+    }
+
     pub fn iter<'a>(&'a self) -> Iter<'a> {
         Iter {
             length: self.length,
@@ -106,9 +110,81 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
+pub struct SeenMap {
+    buf: Vec<u32>,
+}
+
+impl SeenMap {
+    pub fn new(length: u32) -> SeenMap {
+        SeenMap {
+            buf: vec![0; length as usize],
+        }
+    }
+
+    pub fn incr(&mut self, idx: u32) {
+        let count = &mut self.buf[idx as usize];
+        *count = count.saturating_add(1);
+    }
+
+    pub fn decr(&mut self, idx: u32) {
+        let count = &mut self.buf[idx as usize];
+        *count = count.saturating_sub(1);
+    }
+
+    pub fn add(&mut self, bitfield: &Bitfield) {
+        assert_eq!(self.buf.len(), bitfield.len() as usize);
+        for (count, is_set) in self.buf.iter_mut().zip(bitfield.iter()) {
+            if is_set {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn sub(&mut self, bitfield: &Bitfield) {
+        assert_eq!(self.buf.len(), bitfield.len() as usize);
+        for (count, is_set) in self.buf.iter_mut().zip(bitfield.iter()) {
+            if is_set {
+                *count = count.saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn get(&self, idx: u32) -> u32 {
+        self.buf[idx as usize]
+    }
+
+    pub fn iter<'a>(&'a self) -> iter::Cloned<slice::Iter<'a, u32>> {
+        self.buf.iter().cloned()
+    }
+
+    pub fn iter_normalized<'a>(&'a self) -> IterScaled<'a> {
+        let max = self.buf.iter().cloned().max().unwrap_or(0);
+        IterScaled { iter: self.iter(), max: max }
+    }
+}
+
+pub struct IterScaled<'a> {
+    iter: iter::Cloned<slice::Iter<'a, u32>>,
+    max: u32,
+}
+
+impl<'a> Iterator for IterScaled<'a> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        self.iter.next().map(|v| {
+            if self.max == 0 {
+                0.0
+            } else {
+                v as f32 / self.max as f32
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Bitfield;
+    use super::{SeenMap, Bitfield};
 
     #[test]
     fn test_basics() {
@@ -138,5 +214,23 @@ mod tests {
         for (idx, isset) in bitfield.iter().enumerate() {
             assert_eq!(isset, false);
         }
+    }
+
+
+    #[test]
+    fn test_seen_map() {
+        let mut seen_map = SeenMap::new(41);
+
+        let mut bitfield = Bitfield::new_empty(41);
+        bitfield.set(0, true);
+        seen_map.add(&bitfield);
+
+        let mut bitfield = Bitfield::new_empty(41);
+        bitfield.set(1, true);
+        seen_map.add(&bitfield);
+
+        assert_eq!(seen_map.get(0), 1);
+        assert_eq!(seen_map.get(1), 1);
+        assert_eq!(seen_map.get(2), 0);
     }
 }

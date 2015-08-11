@@ -1,5 +1,6 @@
 use std::ops::{Deref, DerefMut};
-use ::mio::buf::{RingBuf, Buf, MutBuf};
+
+use mio::buf::RingBuf;
 
 /// This is not a very good Guard, so you must take care to not call mark().
 pub struct ResetGuard<'a> {

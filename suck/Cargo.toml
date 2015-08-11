@@ -1,5 +1,5 @@
 [package]
-name = "metorrent"
+name = "suck"
 version = "0.1.0"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 
@@ -12,10 +12,10 @@ log = "0.3"
 git = "https://github.com/mitsuhiko/rust-sha1.git"
 
 [dependencies.metorrent_common]
-path = "./common"
+path = "./../common"
 
 [dependencies.metorrent_middle]
-path = "./middle"
+path = "./../middle"
 
 [dependencies.metorrent_util]
-path = "./util"
+path = "./../util"
