@@ -307,7 +307,6 @@ pub enum Bencode {
     Object(BTreeMap<Vec<u8>, Bencode>),
 }
 
-/// Decodes a bencode value from a `std::io::Read`.
 pub fn from_iter<I, T>(iter: I) -> Result<T>
     where I: Iterator<Item=io::Result<u8>>,
           T: de::Deserialize,
@@ -337,16 +336,17 @@ pub fn from_slice<T>(v: &[u8]) -> Result<T>
 
 #[cfg(test)]
 mod tests {
+    use serde::bytes::ByteBuf;
     use std::collections::HashMap;
     use super::from_slice;
 
     #[derive(Deserialize, Debug)]
     struct Document {
-        a: String,
+        a: ByteBuf,
         b: i64,
         c: Vec<i64>,
-        d: Vec<String>,
-        e: HashMap<String, String>,
+        d: Vec<ByteBuf>,
+        e: HashMap<ByteBuf, ByteBuf>,
     }
 
     #[test]
@@ -354,12 +354,26 @@ mod tests {
         // let document = b"d1:a3:eh?1:bl3:beee1:dd1:alldedeeee";
         let document = b"d1:a3:4441:bi444e1:cli123ee1:dl3:foo3:bare1:ed3:foo3:baree";
         let bencode: Document = from_slice(document).expect("error deserializing");
-        assert_eq!(bencode.a, "444");
+        assert_eq!(&*bencode.a, b"444");
         assert_eq!(bencode.b, 444);
         assert_eq!(bencode.c[0], 123);
-        assert_eq!(bencode.d[0], "foo");
-        assert_eq!(bencode.d[1], "bar");
-        assert_eq!(bencode.e["foo"], "bar");
+        assert_eq!(&*bencode.d[0], b"foo");
+        assert_eq!(&*bencode.d[1], b"bar");
+        //assert_eq!(bencode.e[b"foo"], b"bar");
     }
 }
 
+#[cfg(feature="afl")]
+pub mod afl {
+    use std::io::{self, Read};
+    use super::{from_slice, Bencode};
+
+    pub fn bdecode() {
+        let mut buf = Vec::new();
+        io::stdin().take(1 << 20).read_to_end(&mut buf).unwrap();
+        match from_slice::<Bencode>(&*buf) {
+            Ok(bencode) => println!("{:#?}", bencode),
+            Err(err) => println!("erorr: {:?}", err),
+        }
+    }
+}
