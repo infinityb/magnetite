@@ -8,5 +8,6 @@ default = []
 afl = []
 
 [dependencies]
+num = "*"
 serde = "*"
 serde_macros = "*"

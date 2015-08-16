@@ -1,6 +1,7 @@
 #![feature(custom_derive, plugin, result_expect)]
 #![plugin(serde_macros)]
 extern crate serde;
+extern crate num;
 
 use std::io;
 
@@ -126,17 +127,7 @@ impl<Iter> Deserializer<Iter>
                 None => return Err(self.error(ErrorCode::EOFWhileParsingString)),
             }
         }
-        let length = match parser.end() {
-            Ok(val) => val,
-            Err(err) => {
-                return Err(From::from(err))
-            }
-        };
-        if (usize::max_value() as i64) < length {
-            return Err(self.error(ErrorCode::ExcessiveAllocation));
-        }
-
-        let length = length as usize;
+        let length: usize = try!(parser.end());
         if self.max_buf < length {
             return Err(self.error(ErrorCode::ExcessiveAllocation));
         }
