@@ -1,5 +1,3 @@
-use std::num::ParseIntError;
-
 #[inline]
 fn is_digit(val: u8) -> bool {
     b'0' <= val && val <= b'9'
@@ -64,14 +62,6 @@ pub struct NumberParser {
 }
 
 impl NumberParser {
-    pub fn parse_bytes<T>(buf: &[u8]) -> Result<T, NumberError> where T: FromDigits {
-        let mut p = NumberParser::new();
-        for byte in buf.iter() {
-            p.push_byte(*byte);
-        }
-        p.end()
-    }
-
     pub fn with_stop(stop: u8) -> NumberParser {
         NumberParser {
             value_buf: SmallVec20::new(),
@@ -189,56 +179,68 @@ impl_from_digits!(u64);
 impl_from_digits!(isize);
 impl_from_digits!(usize);
 
+#[cfg(test)]
+mod test {
+    use super::{NumberParser, NumberError, FromDigits};
 
-#[test]
-fn test_u8() {
-    type R<T> = Result<T, NumberError>;
-    let res_table: &[(&'static str, R<u8>)] = &[
-        ("-2e", Err(NumberError::InvalidByte)),
-        ("-1e", Err(NumberError::InvalidByte)),
-        ("0e", Ok(0)),
-        ("1e", Ok(1)),
-        ("2e", Ok(2)),
-        ("255e", Ok(255)),
-        ("256e", Err(NumberError::Overflow)),
+    pub fn parse_bytes<T>(buf: &[u8]) -> Result<T, NumberError> where T: FromDigits {
+        let mut p = NumberParser::new();
+        for byte in buf.iter() {
+            p.push_byte(*byte);
+        }
+        p.end()
+    }
 
-        ("01e", Err(NumberError::LeadingZero)),
-        ("10ed", Err(NumberError::Trailing)),
-        ("-0e", Err(NumberError::NegativeZero)),
-        ("111$", Err(NumberError::InvalidByte)),
-    ];
+    #[test]
+    fn test_u8() {
+        type R<T> = Result<T, NumberError>;
+        let res_table: &[(&'static str, R<u8>)] = &[
+            ("-2e", Err(NumberError::InvalidByte)),
+            ("-1e", Err(NumberError::InvalidByte)),
+            ("0e", Ok(0)),
+            ("1e", Ok(1)),
+            ("2e", Ok(2)),
+            ("255e", Ok(255)),
+            ("256e", Err(NumberError::Overflow)),
 
-    for &(ref ser, ref expect) in res_table.iter() {
-        let got = NumberParser::parse_bytes(ser.as_bytes());
-        assert_eq!(&got, expect);
-    }  
-}
+            ("01e", Err(NumberError::LeadingZero)),
+            ("10ed", Err(NumberError::Trailing)),
+            ("-0e", Err(NumberError::NegativeZero)),
+            ("111$", Err(NumberError::InvalidByte)),
+        ];
 
-#[test]
-fn test_i64() {
-    type R<T> = Result<T, NumberError>;
-    let res_table: &[(&'static str, R<i64>)] = &[
-        ("-2e", Ok(-2)),
-        ("-1e", Ok(-1)),
-        ("0e", Ok(0)),
-        ("1e", Ok(1)),
-        ("2e", Ok(2)),
+        for &(ref ser, ref expect) in res_table.iter() {
+            let got = parse_bytes(ser.as_bytes());
+            assert_eq!(&got, expect);
+        }  
+    }
 
-        ("-9223372036854775809e", Err(NumberError::Overflow)),
-        ("-9223372036854775808e", Ok(-9223372036854775808)),
-        ("-9223372036854775807e", Ok(-9223372036854775807)),
-        ("9223372036854775806e", Ok(9223372036854775806)),
-        ("9223372036854775807e", Ok(9223372036854775807)),
-        ("9223372036854775808e", Err(NumberError::Overflow)),
+    #[test]
+    fn test_i64() {
+        type R<T> = Result<T, NumberError>;
+        let res_table: &[(&'static str, R<i64>)] = &[
+            ("-2e", Ok(-2)),
+            ("-1e", Ok(-1)),
+            ("0e", Ok(0)),
+            ("1e", Ok(1)),
+            ("2e", Ok(2)),
 
-        ("01e", Err(NumberError::LeadingZero)),
-        ("10ed", Err(NumberError::Trailing)),
-        ("-0e", Err(NumberError::NegativeZero)),
-        ("111$", Err(NumberError::InvalidByte)),
-    ];
+            ("-9223372036854775809e", Err(NumberError::Overflow)),
+            ("-9223372036854775808e", Ok(-9223372036854775808)),
+            ("-9223372036854775807e", Ok(-9223372036854775807)),
+            ("9223372036854775806e", Ok(9223372036854775806)),
+            ("9223372036854775807e", Ok(9223372036854775807)),
+            ("9223372036854775808e", Err(NumberError::Overflow)),
 
-    for &(ref ser, ref expect) in res_table.iter() {
-        let got = NumberParser::parse_bytes(ser.as_bytes());
-        assert_eq!(&got, expect);
-    }  
+            ("01e", Err(NumberError::LeadingZero)),
+            ("10ed", Err(NumberError::Trailing)),
+            ("-0e", Err(NumberError::NegativeZero)),
+            ("111$", Err(NumberError::InvalidByte)),
+        ];
+
+        for &(ref ser, ref expect) in res_table.iter() {
+            let got = parse_bytes(ser.as_bytes());
+            assert_eq!(&got, expect);
+        }  
+    }
 }

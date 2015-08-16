@@ -16,7 +16,6 @@ pub enum ErrorCode {
     InvalidByte,
     InvalidNumber(NumberError),
     UnknownField(String),
-    MissingField(&'static str),
     TrailingCharacters,
     ExcessiveAllocation,
 }
@@ -54,7 +53,7 @@ impl From<de::value::Error> for Error {
 }
 
 impl de::Error for Error {
-    fn syntax(s: &str) -> Error {
+    fn syntax(_: &str) -> Error {
         Error::SyntaxError(ErrorCode::ExpectedSomeValue)
     }
 

@@ -1,4 +1,4 @@
-#![feature(custom_derive, plugin, result_expect)]
+#![feature(custom_derive, plugin)]
 #![plugin(serde_macros)]
 extern crate serde;
 extern crate num;
@@ -13,7 +13,7 @@ mod value;
 
 pub use self::value::Value;
 use self::error::{Result, Error, ErrorCode};
-use self::number::{NumberParser, NumberError};
+use self::number::NumberParser;
 
 #[inline]
 fn is_digit(val: u8) -> bool {
@@ -93,15 +93,13 @@ impl<Iter> Deserializer<Iter>
         where V: de::Visitor,
     {
         let mut parser = number::NumberParser::new();
-
-        let mut cont = true;
-        while cont {
+        loop {
             match try!(self.next_char()) {
                 Some(byte) => {
                     if parser.push_byte(byte) {
                         break;
                     }
-                }
+                },
                 None => return Err(self.error(ErrorCode::EOFWhileParsingInteger)),
             }
         }
@@ -132,7 +130,7 @@ impl<Iter> Deserializer<Iter>
             return Err(self.error(ErrorCode::ExcessiveAllocation));
         }
         let mut val = Vec::with_capacity(length);
-        for i in 0..length {
+        for _ in 0..length {
             match try!(self.next_char()) {
                 Some(byte) => val.push(byte),
                 None => return Err(self.error(ErrorCode::EOFWhileParsingString)),
@@ -336,7 +334,10 @@ mod tests {
     fn simple_test() {
         // let document = b"d1:a3:eh?1:bl3:beee1:dd1:alldedeeee";
         let document = b"d1:a3:4441:bi444e1:cli123ee1:dl3:foo3:bare1:ed3:foo3:baree";
-        let bencode: Document = from_slice(document).expect("error deserializing");
+        let bencode: Document = match from_slice(document) {
+            Ok(val) => val, 
+            Err(err) => panic!("deserialize error: {:?}", err),
+        };
         assert_eq!(&*bencode.a, b"444");
         assert_eq!(bencode.b, 444);
         assert_eq!(bencode.c[0], 123);
