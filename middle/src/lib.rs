@@ -5,17 +5,26 @@ extern crate metorrent_common;
 mod reset;
 mod conn;
 
-pub use conn::BufferedConn;
+pub use conn::{
+    BufferedConn,
+    BlockingBufferedConn,
+    Protocol,
+};
 
 use byteorder::{BigEndian, ByteOrder};
 use mio::buf::{RingBuf, Buf, MutBuf};
 use metorrent_common::message::{Message, Error};
 
-pub trait RingParser {
-    type Item;
+pub trait RingParser<T> {
     type Err;
 
-    fn parse_msg(&mut self) -> Result<Self::Item, Self::Err>;
+    fn parse(&mut self) -> Result<T, Self::Err>;
+}
+
+pub trait RingAppender<T> {
+    type Err;
+
+    fn append(&mut self, val: &T) -> Result<(), Self::Err>;
 }
 
 fn get_length<B>(ringbuf: &mut B) -> Result<u32, Error> where B: Buf {
@@ -26,11 +35,10 @@ fn get_length<B>(ringbuf: &mut B) -> Result<u32, Error> where B: Buf {
     Ok(BigEndian::read_u32(&lenbuf[..]))
 }
 
-impl RingParser for ::mio::buf::RingBuf {
-    type Item = Message;
+impl RingParser<Message> for RingBuf {
     type Err = Error;
 
-    fn parse_msg(&mut self) -> Result<Self::Item, Self::Err> {
+    fn parse(&mut self) -> Result<Message, Self::Err> {
         let mut guard = reset::ResetGuard::new(self);
 
         let length = try!(get_length(&mut *guard)) as usize;
@@ -47,5 +55,35 @@ impl RingParser for ::mio::buf::RingBuf {
         let message = try!(Message::parse(&buf));
         guard.commit();
         Ok(message)
+    }
+}
+
+pub enum RingAppenderError {
+    Full,
+}
+
+impl RingAppenderError {
+    pub fn is_permanent(&self) -> bool {
+        match *self {
+            RingAppenderError::Full => false,
+        }
+    }
+}
+
+impl RingAppender<Message> for RingBuf {
+    type Err = RingAppenderError;
+
+    fn append(&mut self, msg: &Message) -> Result<(), Self::Err> {
+        let msg = msg.to_bytes();
+        if MutBuf::remaining(self) < msg.len() {
+            return Err(RingAppenderError::Full);
+        }
+        let mut written = 0;
+        while 0 < msg.len() {
+            let wrote = self.write_slice(&msg[written..]);
+            assert!(wrote > 0);
+            written += wrote;
+        }
+        Ok(())
     }
 }

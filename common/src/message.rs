@@ -1,7 +1,8 @@
 use std::fmt;
+use std::io::{self, Read, Write};
 use std::slice::bytes::copy_memory;
 
-use byteorder::{BigEndian, ByteOrder};
+use byteorder::{BigEndian, ByteOrder, WriteBytesExt, ReadBytesExt};
 use super::bitfield::UnmeasuredBitfield;
 
 pub enum Error {
@@ -9,6 +10,11 @@ pub enum Error {
     Truncated,
     Invalid,
     LargeBlock,
+}
+
+trait BitTorrentMessage {
+    fn write_len(&self) -> usize;
+    fn write(&self, wri: &mut io::Cursor<Vec<u8>>);
 }
 
 // keep-alive is implemented with a zero-sized message.
@@ -103,44 +109,61 @@ pub struct Request {
     length: u32,
 }
 
+impl BitTorrentMessage for Request {
+    fn write_len(&self) -> usize { 12 }
+
+    fn write(&self, wri: &mut io::Cursor<Vec<u8>>) {
+        use byteorder::WriteBytesExt;
+        wri.write_u32::<BigEndian>(self.piece_num).unwrap();
+        wri.write_u32::<BigEndian>(self.begin).unwrap();
+        wri.write_u32::<BigEndian>(self.length).unwrap();
+    }
+}
+
 impl Request {
     fn parse(buf: &[u8]) -> Result<Self, Error> {
+        use byteorder::ReadBytesExt;
         if buf.len() < 12 {
             return Err(Error::Truncated);
         }
         if buf.len() != 12 {
             return Err(Error::Invalid);
         }
+        let mut rdr = io::Cursor::new(buf);
         Ok(Request {
-            piece_num: BigEndian::read_u32(&buf[0..4]),
-            begin: BigEndian::read_u32(&buf[4..8]),
-            length: BigEndian::read_u32(&buf[8..12]),
+            piece_num: rdr.read_u32::<BigEndian>().unwrap(),
+            begin: rdr.read_u32::<BigEndian>().unwrap(),
+            length: rdr.read_u32::<BigEndian>().unwrap(),
         })
     }
 }
 
+const PIECE_LENGTH_SHL: usize = 17;
+
+#[derive(Clone)]
 pub struct Piece {
     piece_num: u32,
     begin: u32,
-    length: usize,
-    block: [u8; 0x4000],
-}
-
-impl Clone for Piece {
-    fn clone(&self) -> Piece {
-        Piece {
-            piece_num: self.piece_num,
-            begin: self.begin,
-            length: self.length,
-            block: self.block,
-        }
-    }
+    block: Vec<u8>,
 }
 
 impl fmt::Debug for Piece {
     fn fmt(&self, wri: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(wri, "Piece {{ {}, {}, {}, ... }}",
-            self.piece_num, self.begin, self.length)
+            self.piece_num, self.begin, self.block.len())
+    }
+}
+
+impl BitTorrentMessage for Piece {
+    fn write_len(&self) -> usize {
+        8 + self.block.len()
+    }
+
+    fn write(&self, wri: &mut io::Cursor<Vec<u8>>) {
+        use byteorder::WriteBytesExt;
+        wri.write_u32::<BigEndian>(self.piece_num).unwrap();
+        wri.write_u32::<BigEndian>(self.begin).unwrap();
+        wri.get_mut().extend(&self.block);
     }
 }
 
@@ -154,16 +177,15 @@ impl Piece {
         let length = buf.len() - 8;
 
         let data = &buf[8..];
-        let mut block = [0; 0x4000];
-        if block.len() < data.len() {
+        let mut block = Vec::new();
+        if (1 << PIECE_LENGTH_SHL) < data.len() {
             return Err(Error::LargeBlock);
         }
-        copy_memory(data, &mut block);
+        block.extend(data);
 
         Ok(Piece {
             piece_num: piece_num,
             begin: begin,
-            length: length,
             block: block,
         })
     }
@@ -192,6 +214,17 @@ impl Cancel {
     }
 }
 
+impl BitTorrentMessage for Cancel {
+    fn write_len(&self) -> usize { 12 }
+
+    fn write(&self, wri: &mut io::Cursor<Vec<u8>>) {
+        use byteorder::WriteBytesExt;
+        wri.write_u32::<BigEndian>(self.piece_num).unwrap();
+        wri.write_u32::<BigEndian>(self.begin).unwrap();
+        wri.write_u32::<BigEndian>(self.length).unwrap();
+    }
+}
+
 #[derive(Debug)]
 pub enum Message {
     Choke,
@@ -206,6 +239,13 @@ pub enum Message {
     Port(u16),
 }
 
+fn tiny_message(msg_type: MessageType) -> Vec<u8> {
+    let mut wri = io::Cursor::new(Vec::with_capacity(5));
+    wri.write_u32::<BigEndian>(1).unwrap();
+    wri.write(&[msg_type as u8]).unwrap();
+    wri.into_inner()
+}
+
 impl Message {
     pub fn parse(buf: &[u8]) -> Result<Self, Error> {
         if buf.len() == 0 {
@@ -213,5 +253,60 @@ impl Message {
         }
         let mtype = try!(MessageType::from_u8(buf[0]).ok_or(Error::Invalid));
         mtype.read_message(&buf[1..])
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match *self {
+            Message::Choke => tiny_message(MessageType::Choke),
+            Message::Unchoke => tiny_message(MessageType::Unchoke),
+            Message::Interested => tiny_message(MessageType::Interested),
+            Message::NotInterested => tiny_message(MessageType::NotInterested),
+            Message::Have(val) => {
+                let mut wri = io::Cursor::new(Vec::with_capacity(9));
+                wri.write_u32::<BigEndian>(5).unwrap();
+                wri.write(&[MessageType::Have as u8]).unwrap();
+                wri.write_u32::<BigEndian>(val).unwrap();
+                wri.into_inner()
+            },
+            Message::Bitfield(ref bf) => {
+                bf.as_bytes().map(|by| {
+                    let mut out = Vec::with_capacity(1 + by.len());
+                    out.push(MessageType::Bitfield as u8);
+                    out.extend(by);
+                    out
+                }).unwrap_or(Vec::new())
+            },
+            Message::Request(req) => {
+                let msg_length = 1 + BitTorrentMessage::write_len(&req);
+                let mut wri = io::Cursor::new(Vec::with_capacity(4 + msg_length));
+                wri.write_u32::<BigEndian>(msg_length as u32).unwrap();
+                wri.write(&[MessageType::Request as u8]).unwrap();
+                BitTorrentMessage::write(&req, &mut wri);
+                wri.into_inner()
+            },
+            Message::Piece(ref piece) => {
+                let msg_length = 1 + BitTorrentMessage::write_len(piece);
+                let mut wri = io::Cursor::new(Vec::with_capacity(4 + msg_length));
+                wri.write_u32::<BigEndian>(msg_length as u32).unwrap();
+                wri.write(&[MessageType::Request as u8]).unwrap();
+                BitTorrentMessage::write(piece, &mut wri);
+                wri.into_inner()
+            },
+            Message::Cancel(can) => {
+                let msg_length = 1 + BitTorrentMessage::write_len(&can);
+                let mut wri = io::Cursor::new(Vec::with_capacity(4 + msg_length));
+                wri.write_u32::<BigEndian>(msg_length as u32).unwrap();
+                wri.write(&[MessageType::Request as u8]).unwrap();
+                BitTorrentMessage::write(&can, &mut wri);
+                wri.into_inner()
+            },
+            Message::Port(port) => {
+                let mut wri = io::Cursor::new(Vec::with_capacity(7));
+                wri.write_u32::<BigEndian>(3).unwrap();
+                wri.write(&[MessageType::Port as u8]).unwrap();
+                wri.write_u16::<BigEndian>(port).unwrap();
+                wri.into_inner()
+            },
+        }
     }
 }

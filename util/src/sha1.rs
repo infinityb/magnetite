@@ -4,6 +4,10 @@ use std::fmt;
 pub struct Sha1([u8; 20]);
 
 impl Sha1 {
+    pub fn zero() -> Sha1 {
+        Sha1([0; 20])
+    }
+
     pub fn new(inner: [u8; 20]) -> Sha1 {
         Sha1(inner)
     }

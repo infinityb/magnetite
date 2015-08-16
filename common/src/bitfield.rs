@@ -38,6 +38,10 @@ impl UnmeasuredBitfield {
             None => Ok(Bitfield::new_empty(length)),
         }
     }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        self.0.as_ref().map(|v| &**v)
+    }
 }
 
 impl Bitfield {
