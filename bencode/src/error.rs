@@ -18,6 +18,7 @@ pub enum ErrorCode {
     UnknownField(String),
     MissingField(&'static str),
     TrailingCharacters,
+    ExcessiveAllocation,
 }
 
 #[derive(Debug)]

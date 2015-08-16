@@ -22,6 +22,7 @@ fn is_digit(val: u8) -> bool {
 pub struct Deserializer<Iter: Iterator<Item=io::Result<u8>>> {
     rdr: Iter,
     ch: Option<u8>,
+    max_buf: usize,
 }
 
 impl<Iter> Deserializer<Iter>
@@ -33,6 +34,7 @@ impl<Iter> Deserializer<Iter>
         Deserializer {
             rdr: rdr,
             ch: None,
+            max_buf: 1 << 24,
         }
     }
 
@@ -130,7 +132,15 @@ impl<Iter> Deserializer<Iter>
                 return Err(From::from(err))
             }
         };
-        let mut val = Vec::with_capacity(length as usize);
+        if (usize::max_value() as i64) < length {
+            return Err(self.error(ErrorCode::ExcessiveAllocation));
+        }
+
+        let length = length as usize;
+        if self.max_buf < length {
+            return Err(self.error(ErrorCode::ExcessiveAllocation));
+        }
+        let mut val = Vec::with_capacity(length);
         for i in 0..length {
             match try!(self.next_char()) {
                 Some(byte) => val.push(byte),
