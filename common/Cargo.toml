@@ -5,6 +5,13 @@ authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 
 [dependencies]
 byteorder = "*"
+serde = "*"
+time = "*"
+url = "*"
+sha1 = "*"
+
+[dependencies.bencode]
+path = "../bencode"
 
 [dependencies.metorrent_util]
 path = "../util"
