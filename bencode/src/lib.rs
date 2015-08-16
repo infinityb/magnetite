@@ -2,16 +2,15 @@
 #![plugin(serde_macros)]
 extern crate serde;
 
-use std::result;
-use std::io::{self, Write};
-use std::iter::Peekable;
-use std::collections::BTreeMap;
+use std::io;
 
 use serde::de;
 
 mod error;
 mod number;
+mod value;
 
+pub use self::value::Value;
 use self::error::{Result, Error, ErrorCode};
 use self::number::{NumberParser, NumberError};
 
@@ -23,7 +22,6 @@ fn is_digit(val: u8) -> bool {
 pub struct Deserializer<Iter: Iterator<Item=io::Result<u8>>> {
     rdr: Iter,
     ch: Option<u8>,
-    str_buf: Vec<u8>,
 }
 
 impl<Iter> Deserializer<Iter>
@@ -35,7 +33,6 @@ impl<Iter> Deserializer<Iter>
         Deserializer {
             rdr: rdr,
             ch: None,
-            str_buf: Vec::with_capacity(128),
         }
     }
 
@@ -189,15 +186,11 @@ impl<Iter> de::Deserializer for Deserializer<Iter>
 
 struct SeqVisitor<'a, Iter: 'a + Iterator<Item=io::Result<u8>>> {
     de: &'a mut Deserializer<Iter>,
-    first: bool,
 }
 
 impl<'a, Iter: Iterator<Item=io::Result<u8>>> SeqVisitor<'a, Iter> {
     fn new(de: &'a mut Deserializer<Iter>) -> Self {
-        SeqVisitor {
-            de: de,
-            first: true,
-        }
+        SeqVisitor { de: de }
     }
 }
 
@@ -232,15 +225,11 @@ impl<'a, Iter> de::SeqVisitor for SeqVisitor<'a, Iter>
 
 struct MapVisitor<'a, Iter: 'a + Iterator<Item=io::Result<u8>>> {
     de: &'a mut Deserializer<Iter>,
-    first: bool,
 }
 
 impl<'a, Iter: Iterator<Item=io::Result<u8>>> MapVisitor<'a, Iter> {
     fn new(de: &'a mut Deserializer<Iter>) -> Self {
-        MapVisitor {
-            de: de,
-            first: true,
-        }
+        MapVisitor { de: de }
     }
 }
 
@@ -299,13 +288,6 @@ impl<'a, Iter> de::MapVisitor for MapVisitor<'a, Iter>
     }
 }
 
-#[derive(Deserialize, PartialEq, Eq, Debug)]
-pub enum Bencode {
-    Integer(String),
-    Bytes(Vec<u8>),
-    Array(Vec<Bencode>),
-    Object(BTreeMap<Vec<u8>, Bencode>),
-}
 
 pub fn from_iter<I, T>(iter: I) -> Result<T>
     where I: Iterator<Item=io::Result<u8>>,
@@ -366,12 +348,12 @@ mod tests {
 #[cfg(feature="afl")]
 pub mod afl {
     use std::io::{self, Read};
-    use super::{from_slice, Bencode};
+    use super::{from_slice, Value};
 
     pub fn bdecode() {
         let mut buf = Vec::new();
         io::stdin().take(1 << 20).read_to_end(&mut buf).unwrap();
-        match from_slice::<Bencode>(&*buf) {
+        match from_slice::<Value>(&*buf) {
             Ok(bencode) => println!("{:#?}", bencode),
             Err(err) => println!("erorr: {:?}", err),
         }
