@@ -10,8 +10,10 @@ use serde::de;
 mod error;
 mod number;
 mod value;
+pub mod ser;
 
 pub use self::value::Value;
+use self::ser::Serializer;
 use self::error::{Result, Error, ErrorCode};
 use self::number::NumberParser;
 
@@ -86,7 +88,7 @@ impl<Iter> Deserializer<Iter>
     }
 
     fn error(&mut self, reason: ErrorCode) -> Error {
-        Error::SyntaxError(reason)
+        Error::SyntaxError(reason, 0, 0)
     }
 
     fn parse_integer<V>(&mut self, mut visitor: V) -> Result<V::Value>
@@ -164,7 +166,7 @@ impl<Iter> Deserializer<Iter>
         };
         match value {
             Ok(value) => Ok(value),
-            Err(Error::SyntaxError(code)) => Err(self.error(code)),
+            Err(Error::SyntaxError(code, _, _)) => Err(self.error(code)),
             Err(err) => Err(err),
         }
     }
@@ -253,7 +255,7 @@ impl<'a, Iter> de::MapVisitor for MapVisitor<'a, Iter>
                 Ok(Some(try!(de::Deserialize::deserialize(self.de))))
             }
             Some(_) => {
-                Err(self.de.error(ErrorCode::KeyMustBeAString))
+                Err(self.de.error(ErrorCode::KeyMustBeABytes))
             }
             None => {
                 Err(self.de.error(ErrorCode::EOFWhileParsingValue))
@@ -315,13 +317,38 @@ pub fn from_slice<T>(v: &[u8]) -> Result<T>
     from_iter(v.iter().map(|byte| Ok(*byte)))
 }
 
+
+/// Encode the specified struct into a bencode `[u8]` writer.
+#[inline]
+pub fn to_writer<W, T>(writer: &mut W, value: &T) -> Result<()>
+    where W: io::Write,
+          T: serde::ser::Serialize,
+{
+    let mut ser = Serializer::new(writer);
+    try!(value.serialize(&mut ser));
+    Ok(())
+}
+
+/// Encode the specified struct into a bencode `[u8]` buffer.
+#[inline]
+pub fn to_vec<T>(value: &T) -> Result<Vec<u8>>
+    where T: serde::ser::Serialize,
+{
+    // We are writing to a Vec, which doesn't fail. So we can ignore
+    // the error.
+    let mut writer = Vec::with_capacity(128);
+    try!(to_writer(&mut writer, value));
+    Ok(writer)
+}
+
+
 #[cfg(test)]
 mod tests {
     use serde::bytes::ByteBuf;
     use std::collections::HashMap;
-    use super::from_slice;
+    use super::{from_slice, to_vec};
 
-    #[derive(Deserialize, Debug)]
+    #[derive(Serialize, Deserialize, Debug)]
     struct Document {
         a: ByteBuf,
         b: i64,
@@ -343,7 +370,9 @@ mod tests {
         assert_eq!(bencode.c[0], 123);
         assert_eq!(&*bencode.d[0], b"foo");
         assert_eq!(&*bencode.d[1], b"bar");
-        //assert_eq!(bencode.e[b"foo"], b"bar");
+
+        let rebencoded = to_vec(&bencode).unwrap();
+        assert_eq!(&rebencoded[..], &document[..]);
     }
 }
 

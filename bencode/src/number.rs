@@ -144,7 +144,7 @@ impl NumberParser {
     }
 }
 
-pub trait FromDigits {
+pub trait FromDigits: Sized {
     fn from_digits(digits: &[u8]) -> Result<Self, NumberError>;
 }
 

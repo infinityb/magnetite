@@ -1,4 +1,4 @@
-use serde::de;
+use serde::{ser, de};
 use serde::bytes::ByteBuf;
 use std::collections::BTreeMap;
 
@@ -7,7 +7,20 @@ pub enum Value {
     Integer(i64),
     Bytes(Vec<u8>),
     Array(Vec<Value>),
-    Object(BTreeMap<Vec<u8>, Value>),
+    Dict(BTreeMap<Vec<u8>, Value>),
+}
+
+impl ser::Serialize for Value {
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
+        where S: ser::Serializer,
+    {
+        match *self {
+            Value::Integer(v) => serializer.visit_i64(v),
+            Value::Bytes(ref v) => serializer.visit_bytes(&v),
+            Value::Array(ref v) => v.serialize(serializer),
+            Value::Dict(ref v) => v.serialize(serializer),
+        }
+    }
 }
 
 impl de::Deserialize for Value {
@@ -43,7 +56,7 @@ impl de::Deserialize for Value {
                 // FIXME: eliminate intermediate data structure.
                 let values = values.into_iter().map(|(k, v)| (k.into(), v)).collect();
 
-                Ok(Value::Object(values))
+                Ok(Value::Dict(values))
             }
 
             #[inline]
@@ -68,6 +81,8 @@ mod tests {
             Ok(val) => val, 
             Err(err) => panic!("deserialize error: {:?}", err),
         };
+
+
         println!("{:#?}", val);
     }
 }

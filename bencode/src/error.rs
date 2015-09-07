@@ -12,7 +12,8 @@ pub enum ErrorCode {
     EOFWhileParsingList,
     EOFWhileParsingDict,
     EOFWhileParsingString,
-    KeyMustBeAString,
+    KeyMustBeABytes,
+    UnsupportedType,
     InvalidByte,
     InvalidNumber(NumberError),
     UnknownField(String),
@@ -22,14 +23,20 @@ pub enum ErrorCode {
 
 #[derive(Debug)]
 pub enum Error {
-    SyntaxError(ErrorCode),
+    SyntaxError(ErrorCode, usize, usize),
     IoError(io::Error),
     MissingFieldError(&'static str),
 }
 
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Error {
+        Error::IoError(error)
+    }
+}
+
 impl From<NumberError> for Error {
     fn from(e: NumberError) -> Error {
-        Error::SyntaxError(ErrorCode::InvalidNumber(e))
+        Error::SyntaxError(ErrorCode::InvalidNumber(e), 0, 0)
     }
 }
 
@@ -37,13 +44,13 @@ impl From<de::value::Error> for Error {
     fn from(error: de::value::Error) -> Error {
         match error {
             de::value::Error::SyntaxError => {
-                Error::SyntaxError(ErrorCode::ExpectedSomeValue)
+                Error::SyntaxError(ErrorCode::ExpectedSomeValue, 0, 0)
             }
             de::value::Error::EndOfStreamError => {
                 de::Error::end_of_stream()
             }
             de::value::Error::UnknownFieldError(field) => {
-                Error::SyntaxError(ErrorCode::UnknownField(field))
+                Error::SyntaxError(ErrorCode::UnknownField(field), 0, 0)
             }
             de::value::Error::MissingFieldError(field) => {
                 de::Error::missing_field(field)
@@ -54,15 +61,15 @@ impl From<de::value::Error> for Error {
 
 impl de::Error for Error {
     fn syntax(_: &str) -> Error {
-        Error::SyntaxError(ErrorCode::ExpectedSomeValue)
+        Error::SyntaxError(ErrorCode::ExpectedSomeValue, 0, 0)
     }
 
     fn end_of_stream() -> Error {
-        Error::SyntaxError(ErrorCode::UnexpectedEOF)
+        Error::SyntaxError(ErrorCode::UnexpectedEOF, 0, 0)
     }
 
     fn unknown_field(field: &str) -> Error {
-        Error::SyntaxError(ErrorCode::UnknownField(field.to_string()))
+        Error::SyntaxError(ErrorCode::UnknownField(field.to_string()), 0, 0)
     }
 
     fn missing_field(field: &'static str) -> Error {
@@ -70,5 +77,5 @@ impl de::Error for Error {
     }
 }
 
-
+/// Helper alias for `Result` objects that return a Bencode `Error`.
 pub type Result<T> = result::Result<T, Error>;
