@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 #[derive(PartialEq, Eq, Debug)]
 pub enum Value {
     Integer(i64),
-    Bytes(Vec<u8>),
+    Bytes(ByteBuf),
     Array(Vec<Value>),
-    Dict(BTreeMap<Vec<u8>, Value>),
+    Dict(BTreeMap<ByteBuf, Value>),
 }
 
 impl ser::Serialize for Value {
@@ -61,7 +61,7 @@ impl de::Deserialize for Value {
 
             #[inline]
             fn visit_byte_buf<E>(&mut self, value: Vec<u8>) -> Result<Self::Value, E> {
-                Ok(Value::Bytes(value))
+                Ok(Value::Bytes(From::from(value)))
             }
         }
 

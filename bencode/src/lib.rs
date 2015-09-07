@@ -1,4 +1,6 @@
 #![feature(custom_derive, plugin)]
+#![feature(core_intrinsics)]
+
 #![plugin(serde_macros)]
 extern crate serde;
 extern crate num;

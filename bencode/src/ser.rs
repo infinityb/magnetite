@@ -1,6 +1,7 @@
 use std::io;
 
 use serde::ser;
+use serde::bytes::ByteBuf;
 
 use super::error::{Error, ErrorCode, Result};
 
@@ -232,7 +233,7 @@ impl<'a, W> ser::Serializer for MapKeySerializer<'a, W>
         Err(Error::SyntaxError(ErrorCode::KeyMustBeABytes, 0, 0))
     }
 
-    fn visit_seq<V>(&mut self, _visitor: V) -> Result<()>
+    fn visit_seq<V>(&mut self, mut visitor: V) -> Result<()>
         where V: ser::SeqVisitor,
     {
         Err(Error::SyntaxError(ErrorCode::KeyMustBeABytes, 0, 0))
