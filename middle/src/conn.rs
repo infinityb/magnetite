@@ -143,7 +143,7 @@ impl<T> BlockingBufferedConn<T> where T: Protocol {
         let mut emptied_ctr = 0;
         loop {
             let remaining = Buf::remaining(&self.egress_buf) as u64;
-            let copied = try!(copy(&mut self.ingress_buf, &mut self.conn, remaining));
+            let copied = try!(copy(&mut self.egress_buf, &mut self.conn, remaining));
             if copied != 0 {
                 emptied_ctr = 0;
             } else {

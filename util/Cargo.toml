@@ -2,3 +2,6 @@
 name = "metorrent_util"
 version = "0.1.0"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+
+[dependencies]
+rand = "*"

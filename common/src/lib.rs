@@ -11,14 +11,16 @@ mod bitfield;
 mod storage;
 mod torrent;
 mod torrentinfo;
+mod torrentfile;
 mod handshake;
 pub mod message;
 
 pub use self::bitfield::{
-	Bitfield,
-	UnmeasuredBitfield,
+    Bitfield,
+    UnmeasuredBitfield,
 };
 pub use self::storage::Storage;
 pub use self::torrent::Torrent;
 pub use self::torrentinfo::TorrentInfo;
+pub use self::torrentfile::get_info_hash;
 pub use self::handshake::{Handshake, HandshakeBuf};

@@ -8,6 +8,7 @@ byteorder = "*"
 mio = "0.4"
 log = "0.3"
 sha1 = "*"
+rand = "*"
 
 [dependencies.metorrent_common]
 path = "./../common"

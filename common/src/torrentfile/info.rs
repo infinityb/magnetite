@@ -2,6 +2,8 @@ use serde;
 use serde::de;
 use std::str::FromStr;
 use super::EnumErr;
+use std::path::PathBuf;
+use metorrent_util::Sha1;
 
 const CANNOT_DETERMINE_TORRENT_TYPE: &'static str = 
     "Cannot determine torrent type: both files and length";
@@ -52,6 +54,15 @@ impl InfoKey {
     }
 }
 
+impl serde::de::Deserialize for InfoKey {
+    fn deserialize<D>(deserializer: &mut D) -> Result<InfoKey, D::Error>
+        where D: serde::Deserializer,
+    {
+        deserializer.visit(InfoKeyVisitor)
+    }
+}
+
+
 struct InfoKeyVisitor;
 
 impl serde::de::Visitor for InfoKeyVisitor {
@@ -71,14 +82,13 @@ enum InfoFileKey {
     Length,
 }
 
-impl FromStr for InfoKey {
+impl FromStr for InfoFileKey {
     type Err = EnumErr;
 
     fn from_str(val: &str) -> Result<Self, EnumErr> {
-        use self::InfoKey::*;
         match val {
-            values::PATH => Ok(Path),
-            values::LENGTH => Ok(Length),
+            values::PATH => Ok(InfoFileKey::Path),
+            values::LENGTH => Ok(InfoFileKey::Length),
             _ => Err(EnumErr::UnknownVariant),
         }   
     }   
@@ -86,11 +96,19 @@ impl FromStr for InfoKey {
 
 impl InfoFileKey {
     pub fn as_str(&self) -> &'static str {
-        use self::InfoKey::*;
+        use self::InfoFileKey::*;
         match *self {
             Path => values::PATH,
             Length => values::LENGTH,          
         }
+    }
+}
+
+impl serde::de::Deserialize for InfoFileKey {
+    fn deserialize<D>(deserializer: &mut D) -> Result<InfoFileKey, D::Error>
+        where D: serde::Deserializer,
+    {
+        deserializer.visit(InfoFileKeyVisitor)
     }
 }
 
@@ -102,22 +120,31 @@ impl serde::de::Visitor for InfoFileKeyVisitor {
     fn visit_str<E>(&mut self, val: &str) -> Result<InfoFileKey, E>
         where E: ::serde::de::Error,
     {   
+        // FIXME: unknown field? We should have a real error here...
         FromStr::from_str(val)
             .map_err(|_| de::Error::unknown_field(val))
     }   
 }
 
-struct InfoFile {
-    path: Vec<String>,
+pub struct InfoFile {
+    path: PathBuf,
     length: u64,
+}
+
+impl serde::de::Deserialize for InfoFile {
+    fn deserialize<D>(deserializer: &mut D) -> Result<InfoFile, D::Error>
+        where D: serde::Deserializer,
+    {
+        deserializer.visit(InfoFileVisitor)
+    }
 }
 
 struct InfoFileVisitor;
 
 impl serde::de::Visitor for InfoFileVisitor {
-    type Value = Change;
+    type Value = InfoFile;
 
-    fn visit_map<V>(&mut self, mut visitor: V) -> Result<Change, V::Error>
+    fn visit_map<V>(&mut self, mut visitor: V) -> Result<InfoFile, V::Error>
         where V: serde::de::MapVisitor
     {   
         use self::InfoFileKey as Field;
@@ -152,12 +179,47 @@ impl serde::de::Visitor for InfoFileVisitor {
 }
 
 enum FilesOrLength {
-    MultiFile { files: Vec<TorrentFile> },
+    MultiFile { files: Vec<InfoFile> },
     SingleFile { length: u64 },
 }
 
 // Wrapping to workaround coherence rules
 struct ShaBuf(Vec<Sha1>);
+
+impl serde::de::Deserialize for ShaBuf {
+    fn deserialize<D>(deserializer: &mut D) -> Result<ShaBuf, D::Error>
+        where D: serde::Deserializer,
+    {
+        deserializer.visit(ShaBufVisitor)
+    }
+}
+
+struct ShaBufVisitor;
+
+impl serde::de::Visitor for ShaBufVisitor {
+    type Value = ShaBuf;
+
+    fn visit_bytes<E>(&mut self, val: &[u8]) -> Result<ShaBuf, E> where E: de::Error {
+        // FIXME: E::syntax? We should have a real error here...
+        match Sha1::from_bytes(val) {
+            Ok(sli) => Ok(ShaBuf(sli.to_vec())),
+            Err(()) => {
+                Err(E::syntax("slice size not multiple of 20"))
+            }
+        }
+    }
+
+    fn visit_byte_buf<E>(&mut self, val: Vec<u8>) -> Result<ShaBuf, E> where E: de::Error {
+        // FIXME: E::syntax? We should have a real error here...
+        match Sha1::from_bytes(&val) {
+            Ok(sli) => Ok(ShaBuf(sli.to_vec())),
+            Err(()) => {
+                Err(E::syntax("slice size not multiple of 20"))
+            }
+        }
+    }
+}
+
 
 struct Info {
     fileinfo: FilesOrLength,
@@ -166,14 +228,22 @@ struct Info {
     name: String,
 }
 
+impl serde::de::Deserialize for Info {
+    fn deserialize<D>(deserializer: &mut D) -> Result<Info, D::Error>
+        where D: serde::Deserializer,
+    {
+        deserializer.visit(InfoVisitor)
+    }
+}
+
 struct InfoVisitor;
 
 impl serde::de::Visitor for InfoVisitor {
-    type Value = Change;
+    type Value = Info;
 
-    fn visit_map<V>(&mut self, mut visitor: V) -> Result<Change, V::Error>
+    fn visit_map<V>(&mut self, mut visitor: V) -> Result<Info, V::Error>
         where V: serde::de::MapVisitor
-    {   
+    {
         use self::InfoKey as Field;
         let mut fileinfo = None;
         let mut piece_length = None;
@@ -215,22 +285,34 @@ impl serde::de::Visitor for InfoVisitor {
 
         let fileinfo = match fileinfo {
             Some(fileinfo) => fileinfo,
-            None => try!(visitor.missing_field("length or files")),
+            None => {
+                let () = try!(visitor.missing_field("length or files"));
+                panic!("must have errored");
+            }
         };
         let piece_length = match piece_length {
             Some(piece_length) => piece_length,
-            None => try!(visitor.missing_field("piece_length")),
+            None => {
+                let () = try!(visitor.missing_field("piece_length"));
+                panic!("must have errored");
+            }
         };
         let pieces = match pieces {
             Some(pieces) => pieces,
-            None => try!(visitor.missing_field("pieces")),
+            None => {
+                let () = try!(visitor.missing_field("pieces"));
+                panic!("must have errored");
+            }
         };
         let name = match name {
             Some(name) => name,
-            None => try!(visitor.missing_field("name")),
+            None => {
+                let () = try!(visitor.missing_field("name"));
+                panic!("must have errored");
+            }
         };
 
-        Ok(InfoFile {
+        Ok(Info {
             fileinfo: fileinfo,
             piece_length: piece_length,
             pieces: pieces,

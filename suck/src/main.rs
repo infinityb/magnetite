@@ -1,16 +1,19 @@
 extern crate mio;
+extern crate rand;
 extern crate metorrent_common;
 extern crate metorrent_middle;
 extern crate metorrent_util;
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::env;
 use std::process;
 use std::ffi::OsString;
 use std::net::{TcpStream, SocketAddr, AddrParseError};
 use std::collections::VecDeque;
+use std::fs::File;
 
 use mio::buf::RingBuf;
+use rand::Rng;
 
 mod mt {
     pub use metorrent_common as common;
@@ -18,6 +21,7 @@ mod mt {
     pub use metorrent_util as util;
 }
 
+use mt::common::get_info_hash;
 use mt::common::message::Message;
 use mt::util::Sha1;
 use mt::middle::Protocol;
@@ -101,6 +105,8 @@ impl ProgramArgs {
 struct BitTorrentProtocol {
     info_hash: Sha1,
     client_id: Sha1,
+    foreign_id: Sha1,
+    handshook: false,
     egress_queue: VecDeque<Message>,
     ingress_queue: VecDeque<Message>,
 }
@@ -162,15 +168,32 @@ fn main2() -> Result<(), RuntimeErr> {
     println!("args = {:#?}", args);
 
     // torrent
+    let mut file = File::open(&args.torrent_file).unwrap();
+    let mut torrent_file = Vec::new();
+    try!(file.read_to_end(&mut torrent_file));
+    drop(file);
+
+    let info_hash = get_info_hash(&torrent_file).ok().unwrap();
+    println!("info_hash: {}", info_hash);
+
 
     // let mut storage = Storage::new();
     let mut conn = TcpStream::connect(&args.peer_addr).unwrap();
     println!("connected");
 
-    //
-
-    let mut proto = BitTorrentProtocol::new();
+    let mut rng = ::rand::thread_rng();
+    let mut client_id = rng.gen();
+    let mut proto = BitTorrentProtocol::new(info_hash, client_id);
     let mut buffered = BlockingBufferedConn::new(proto, conn).unwrap();
+
+    let handshake = mt::common::HandshakeBuf::build(
+        b"\x00\x00\x00\x00\x00\x00\x00\x00",
+        info_hash.as_bytes(),
+        client_id.as_bytes()).unwrap();
+
+    buffered.egress_mut().write_all(handshake.as_bytes()).unwrap();
+    let () = try!(buffered.flush_write());
+    println!("flushed handshake: {:?}", handshake.as_bytes());
 
     loop {
         let () = try!(buffered.populate_read());
@@ -178,8 +201,9 @@ fn main2() -> Result<(), RuntimeErr> {
         //     let msg = format!("peer error: {:?}", err);
         //     return Err(RuntimeErr::PeerError(msg));
         // }
-        while let Some(msg) = buffered.get_mut().pop_msg() {
-            println!("get msg {:?}", msg);
+        match buffered.get_mut().pop_msg() {
+            Some(msg) => println!("get msg {:?}", msg),
+            None => println!("??"),
         }
         // if let Err(err) = proto.try_write(buffered.egress_mut()) {
         //     let msg = format!("peer error: {:?}", err);

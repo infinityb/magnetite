@@ -1,4 +1,5 @@
 use std::fmt;
+use ::rand::{Rand, Rng};
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct Sha1([u8; 20]);
@@ -44,5 +45,12 @@ impl fmt::Display for Sha1 {
         }
         Ok(())
     }
-    
+}
+
+impl Rand for Sha1 {
+    fn rand<R: Rng>(rng: &mut R) -> Self {
+        let mut buf: [u8; 20] = [0; 20];
+        rng.fill_bytes(&mut buf[..]);
+        Sha1(buf)
+    }
 }

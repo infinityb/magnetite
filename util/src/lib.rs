@@ -1,4 +1,5 @@
 #![feature(raw)]
+extern crate rand;
 
 mod slice;
 mod sha1;
