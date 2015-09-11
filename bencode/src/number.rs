@@ -231,6 +231,7 @@ mod test {
             ("9223372036854775806e", Ok(9223372036854775806)),
             ("9223372036854775807e", Ok(9223372036854775807)),
             ("9223372036854775808e", Err(NumberError::Overflow)),
+            ("922337203685477581111e", Err(NumberError::Overflow)),
 
             ("01e", Err(NumberError::LeadingZero)),
             ("10ed", Err(NumberError::Trailing)),
