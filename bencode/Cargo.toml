@@ -2,12 +2,12 @@
 name = "bencode"
 version = "0.0.1"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
 
 [features]
 default = []
 afl = []
 
 [dependencies]
-num = "*"
-serde = "*"
-serde_macros = "*"
+# num = "*"
+serde = "1.0"

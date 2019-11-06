@@ -1,9 +1,10 @@
-metorrent
-=========
+# magnetite
 
-The metal torrent client.
+The ferrous torrent client.
 
-A torrent client written on top of [MIO](https://github.com/carllerche/mio).
+A torrent client written on top of tokio.
+
+https://markuseliasson.se/article/bittorrent-in-python/
 
 License
 =======

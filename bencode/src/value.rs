@@ -68,3 +68,21 @@ impl de::Deserialize for Value {
         deserializer.visit(ValueVisitor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Value;
+    use super::super::from_slice;
+
+    #[test]
+    fn value_test() {
+        let doc = b"d1:ad1:yle1:zi0ee1:bllelleelleleee1:ci-4e1:dllelleellel1:xeeee";
+        let val: Value = match from_slice(doc) {
+            Ok(val) => val, 
+            Err(err) => panic!("deserialize error: {:?}", err),
+        };
+
+
+        println!("{:#?}", val);
+    }
+}

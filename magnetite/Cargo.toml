@@ -1,0 +1,17 @@
+[package]
+name = "magnetite"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+# internal
+bencode = { path = "bencode" }
+
+# external
+tokio = "0.2.0-alpha.6"
+clap = "2.32"
+env_logger = "0.6"
+tracing = "0.1.9"
+tracing-subscriber = "0.1.5"
+failure = "0.1.5"

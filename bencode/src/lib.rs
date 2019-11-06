@@ -1,394 +1,245 @@
-#![feature(custom_derive, plugin)]
-#![feature(core_intrinsics)]
+use std::str;
+use std::borrow::Cow;
+use std::error::Error as StdError;
 
-#![plugin(serde_macros)]
-extern crate serde;
-extern crate num;
-
-use std::io;
-
-use serde::de;
-
-mod error;
-mod number;
-mod value;
-pub mod ser;
-
-pub use self::value::Value;
-use self::ser::Serializer;
-use self::error::{Result, Error, ErrorCode};
-use self::number::NumberParser;
+// use serde::de;
 
 #[inline]
 fn is_digit(val: u8) -> bool {
     b'0' <= val && val <= b'9'
 }
 
-pub struct Deserializer<Iter: Iterator<Item=io::Result<u8>>> {
-    rdr: Iter,
-    ch: Option<u8>,
-    max_buf: usize,
+fn check_is_digits(digits: &[u8]) -> Option<&str> {
+    for d in digits {
+        if !is_digit(*d) {
+            return None;
+        }
+    }
+    Some(str::from_utf8(digits).unwrap())
 }
 
-impl<Iter> Deserializer<Iter>
-    where Iter: Iterator<Item=io::Result<u8>>,
-{
-    /// Creates the bencode parser from an `std::iter::Iterator`.
-    #[inline]
-    pub fn new(rdr: Iter) -> Deserializer<Iter> {
-        Deserializer {
-            rdr: rdr,
-            ch: None,
-            max_buf: 1 << 24,
+#[derive(Debug)]
+pub struct Parser<'de> {
+    scratch_offset: usize,
+    scratch: Vec<u8>,
+    decode_chunk: &'de [u8],
+}
+
+#[derive(Debug)]
+pub enum Node<'a> {
+    DictionaryStart,
+    ArrayStart,
+    ContainerEnd,
+    Integer(Cow<'a, str>),
+    Bytes(Cow<'a, [u8]>),
+}
+
+impl<'a> Node<'a> {
+    fn into_owned(self) -> Node<'static> {
+        match self {
+            Node::DictionaryStart => Node::DictionaryStart,
+            Node::ArrayStart => Node::ArrayStart,
+            Node::ContainerEnd => Node::ContainerEnd,
+            Node::Integer(c) => Node::Integer(Cow::Owned(c.into_owned())),
+            Node::Bytes(c) => Node::Bytes(Cow::Owned(c.into_owned())),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum IResult<T, E> {
+    // we need to split the scratch offset handling off from the protocol decode
+    // so we can avoid filling scratch as much as possible  in order to support zero-copy 
+    Done(T), 
+    // use this information to fill scratch
+    ReadMore(usize),
+    Err(E),
+}
+
+#[derive(Debug)]
+pub struct Tokenizer<'de> {
+    scratch_offset: usize,
+    scratch: Vec<u8>,
+    data: &'de [u8],
+}
+
+impl<'de> Tokenizer<'de> {
+    pub fn new(data: &'de [u8]) -> Tokenizer<'de> {
+        Tokenizer {
+            scratch_offset: 0,
+            scratch: Vec::new(),
+            data,
         }
     }
 
-    fn eat_char(&mut self) {
-        self.ch = None;
+    fn add_data(&mut self, data: &'de [u8]) {
+        // flush remainder of data into scratch buffer.
+        self.scratch.extend(self.data);
+        self.data = data;
     }
 
-    fn next_char(&mut self) -> Result<Option<u8>> {
-        match self.ch.take() {
-            Some(ch) => Ok(Some(ch)),
-            None => {
-                match self.rdr.next() {
-                    Some(Err(err)) => Err(Error::IoError(err)),
-                    Some(Ok(ch)) => Ok(Some(ch)),
-                    None => Ok(None),
-                }
+    pub fn next(&mut self) -> IResult<Node<'de>, Box<dyn StdError>> {
+        fn fixup_scratch<T>(data: &mut Vec<T>, split_point: usize) where T: Copy {
+            let data_valid_length = data.len() - split_point;
+            let (into, from) = data.split_at_mut(split_point);
+            for (o, i) in into.iter_mut().zip(from) {
+                *o = *i;
             }
+            data.truncate(data_valid_length);
         }
-    }
-
-    #[inline]
-    pub fn end(&mut self) -> Result<()> {
-        if try!(self.eof()) {
-            Ok(())
-        } else {
-            Err(self.error(ErrorCode::TrailingCharacters))
-        }
-    }
-
-    fn eof(&mut self) -> Result<bool> {
-        Ok(try!(self.peek()).is_none())
-    }
-
-    fn peek(&mut self) -> Result<Option<u8>> {
-        match self.ch {
-            Some(ch) => Ok(Some(ch)),
-            None => {
-                match self.rdr.next() {
-                    Some(Err(err)) => Err(Error::IoError(err)),
-                    Some(Ok(ch)) => {
-                        self.ch = Some(ch);
-                        Ok(self.ch)
-                    }
-                    None => Ok(None),
-                }
-            }
-        }
-    }
-
-    fn error(&mut self, reason: ErrorCode) -> Error {
-        Error::SyntaxError(reason, 0, 0)
-    }
-
-    fn parse_integer<V>(&mut self, mut visitor: V) -> Result<V::Value>
-        where V: de::Visitor,
-    {
-        let mut parser = number::NumberParser::new();
-        loop {
-            match try!(self.next_char()) {
-                Some(byte) => {
-                    if parser.push_byte(byte) {
-                        break;
-                    }
-                },
-                None => return Err(self.error(ErrorCode::EOFWhileParsingInteger)),
-            }
-        }
-        match parser.end() {
-            Ok(val) => visitor.visit_i64(val),
-            Err(err) => Err(From::from(err)),
-        }
-    }
-
-    fn parse_bytea<V>(&mut self, mut visitor: V) -> Result<V::Value>
-        where V: de::Visitor,
-    {
-        // The prefix (length) parser
-        let mut parser = number::NumberParser::with_stop(b':');
 
         loop {
-            match try!(self.next_char()) {
-                Some(byte) => {
-                    if parser.push_byte(byte) {
-                        break;
+            let buf: &[u8] = &self.data;
+
+            if self.scratch.capacity() / 2 < self.scratch_offset {
+                fixup_scratch(&mut self.scratch, self.scratch_offset);
+                self.scratch_offset = 0;
+            }
+
+            if self.scratch_offset < self.scratch.len() {
+                assert!(self.scratch[self.scratch_offset..].len() > 0);
+                return match parse_next_item(&self.scratch[self.scratch_offset..]) {
+                    IResult::Done((length, value)) => {
+                        self.scratch_offset += length;
+                        // since we're in our scratch space, we need to allocate an owned copy.
+                        IResult::Done(value.into_owned())
                     }
+                    IResult::ReadMore(length) => {
+                        // take the desired amount into scratch and retry.
+                        if length <= self.data.len() {
+                            self.scratch.extend(&self.data[..length]);
+                            self.data = &self.data[length..];
+                            continue;
+                        } else {
+                            IResult::ReadMore(length)
+                        }
+                    }
+                    IResult::Err(err) => IResult::Err(err),
                 }
-                None => return Err(self.error(ErrorCode::EOFWhileParsingString)),
+            } if !buf.is_empty() {
+                return match parse_next_item(buf) {
+                    IResult::Done((length, v)) => {
+                        self.data = &self.data[length..];
+                        IResult::Done(v)
+                    },
+                    IResult::ReadMore(length) => {
+                        self.scratch.extend(self.data);
+                        self.data = &[];
+                        IResult::ReadMore(length)
+                    }
+                    IResult::Err(err) => IResult::Err(err),
+                }
+            } else {
+                return IResult::ReadMore(1);
             }
         }
-        let length: usize = try!(parser.end());
-        if self.max_buf < length {
-            return Err(self.error(ErrorCode::ExcessiveAllocation));
-        }
-        let mut val = Vec::with_capacity(length);
-        for _ in 0..length {
-            match try!(self.next_char()) {
-                Some(byte) => val.push(byte),
-                None => return Err(self.error(ErrorCode::EOFWhileParsingString)),
-            }
-        }
-        visitor.visit_byte_buf(val)
     }
+}
 
-    fn parse_value<V>(&mut self, mut visitor: V) -> Result<V::Value>
-        where V: de::Visitor,
-    {
-
-        let value = match try!(self.peek()) {
-            Some(b'd') => {
-                self.eat_char();
-                visitor.visit_map(MapVisitor::new(self))
+fn parse_next_item<'a>(data: &'a [u8]) -> IResult<(usize, Node<'a>), Box<dyn StdError>> {
+    let mut rem_iter = data.iter();
+    let mut rem_iter_copy = rem_iter.clone();
+    match rem_iter.next().unwrap() {
+        b'd' => IResult::Done((1, Node::DictionaryStart)),
+        b'l' => IResult::Done((1, Node::ArrayStart)),
+        b'e' => IResult::Done((1, Node::ContainerEnd)),
+        b'i' => match rem_iter_copy.position(|x| *x == b'e') {
+            Some(pos) => {
+                let rem_slice = rem_iter.as_slice();
+                let value = check_is_digits(&rem_slice[..pos-1]).expect("xTODO: error handling");
+                rem_iter = rem_slice[pos..].iter();
+                IResult::Done((1 + pos, Node::Integer(Cow::Borrowed(value))))
             },
-            Some(b'i') => {
-                self.eat_char();
-                self.parse_integer(visitor)
+            None => {
+                IResult::ReadMore(1)
+            }
+        }
+        b'0'..=b'9' => match rem_iter.position(|x| *x == b':') {
+            Some(pos) => {
+                let pos = pos + 1; // first byte consumed by match.
+                let (length_prefix, rest) = rem_iter_copy.as_slice().split_at(pos);
+                let rest = &rest[1..]; // skip the b':'
+
+                let str_len = check_is_digits(&length_prefix).expect("yTODO: error handling");
+                let length: usize = str_len.parse().expect("aTODO: error handling");
+
+                if rest.len() < length {
+                    return IResult::ReadMore(length - rest.len());
+                }
+                IResult::Done((pos + length + 1, Node::Bytes(Cow::Borrowed(&rest[..length]))))
             },
-            Some(b'l') => {
-                self.eat_char();
-                visitor.visit_seq(SeqVisitor::new(self))
-            },
-            Some(byte) if is_digit(byte) => {
-                self.parse_bytea(visitor)
-            },
-            Some(_) => return Err(self.error(ErrorCode::InvalidByte)),
-            None => return Err(self.error(ErrorCode::EOFWhileParsingValue)),
-        };
-        match value {
-            Ok(value) => Ok(value),
-            Err(Error::SyntaxError(code, _, _)) => Err(self.error(code)),
-            Err(err) => Err(err),
-        }
-    }
-}
-
-impl<Iter> de::Deserializer for Deserializer<Iter>
-    where Iter: Iterator<Item=io::Result<u8>>,
-{
-    type Error = Error;
-
-    #[inline]
-    fn visit<V>(&mut self, visitor: V) -> Result<V::Value>
-        where V: de::Visitor,
-    {
-        self.parse_value(visitor)
-    }
-}
-
-struct SeqVisitor<'a, Iter: 'a + Iterator<Item=io::Result<u8>>> {
-    de: &'a mut Deserializer<Iter>,
-}
-
-impl<'a, Iter: Iterator<Item=io::Result<u8>>> SeqVisitor<'a, Iter> {
-    fn new(de: &'a mut Deserializer<Iter>) -> Self {
-        SeqVisitor { de: de }
-    }
-}
-
-impl<'a, Iter> de::SeqVisitor for SeqVisitor<'a, Iter>
-    where Iter: Iterator<Item=io::Result<u8>>,
-{
-    type Error = Error;
-
-    fn visit<T>(&mut self) -> Result<Option<T>>
-        where T: de::Deserialize,
-    {
-        match try!(self.de.peek()) {
-            Some(b'e') => return Ok(None),
-            Some(_) => (),
             None => {
-                return Err(self.de.error(ErrorCode::EOFWhileParsingList));
+                IResult::ReadMore(1)
             }
         }
-
-        let value = try!(de::Deserialize::deserialize(self.de));
-        Ok(Some(value))
+        v => panic!("zTODO: error handling - bad byte {}", *v as char),
     }
-
-    fn end(&mut self) -> Result<()> {
-        match try!(self.de.next_char()) {
-            Some(b'e') => Ok(()),
-            Some(_) => Err(self.de.error(ErrorCode::TrailingCharacters)),
-            None => Err(self.de.error(ErrorCode::EOFWhileParsingList))
-        }
-    }
-}
-
-struct MapVisitor<'a, Iter: 'a + Iterator<Item=io::Result<u8>>> {
-    de: &'a mut Deserializer<Iter>,
-}
-
-impl<'a, Iter: Iterator<Item=io::Result<u8>>> MapVisitor<'a, Iter> {
-    fn new(de: &'a mut Deserializer<Iter>) -> Self {
-        MapVisitor { de: de }
-    }
-}
-
-impl<'a, Iter> de::MapVisitor for MapVisitor<'a, Iter>
-    where Iter: Iterator<Item=io::Result<u8>>
-{
-    type Error = Error;
-
-    fn visit_key<K>(&mut self) -> Result<Option<K>>
-        where K: de::Deserialize,
-    {
-        match try!(self.de.peek()) {
-            Some(b'e') => return Ok(None),
-            Some(_) => (),
-            None => {
-                return Err(self.de.error(ErrorCode::EOFWhileParsingDict));
-            }
-        }
-
-        match try!(self.de.peek()) {
-            Some(byte) if is_digit(byte) => {
-                Ok(Some(try!(de::Deserialize::deserialize(self.de))))
-            }
-            Some(_) => {
-                Err(self.de.error(ErrorCode::KeyMustBeABytes))
-            }
-            None => {
-                Err(self.de.error(ErrorCode::EOFWhileParsingValue))
-            }
-        }
-    }
-
-    fn visit_value<V>(&mut self) -> Result<V>
-        where V: de::Deserialize,
-    {
-        Ok(try!(de::Deserialize::deserialize(self.de)))
-    }
-
-    fn end(&mut self) -> Result<()> {
-        match try!(self.de.next_char()) {
-            Some(b'e') => { Ok(()) }
-            Some(_) => {
-                Err(self.de.error(ErrorCode::TrailingCharacters))
-            }
-            None => {
-                Err(self.de.error(ErrorCode::EOFWhileParsingDict))
-            }
-        }
-    }
-
-    fn missing_field<V>(&mut self, _field: &'static str) -> Result<V>
-        where V: de::Deserialize,
-    {
-        let mut de = de::value::ValueDeserializer::into_deserializer(());
-        Ok(try!(de::Deserialize::deserialize(&mut de)))
-    }
-}
-
-
-pub fn from_iter<I, T>(iter: I) -> Result<T>
-    where I: Iterator<Item=io::Result<u8>>,
-          T: de::Deserialize,
-{
-    let mut de = Deserializer::new(iter);
-    let value = try!(de::Deserialize::deserialize(&mut de));
-
-    // Make sure the whole stream has been consumed.
-    try!(de.end());
-    Ok(value)
-}
-
-/// Decodes a bencode value from a `std::io::Read`.
-pub fn from_reader<R, T>(rdr: R) -> Result<T>
-    where R: io::Read,
-          T: de::Deserialize,
-{
-    from_iter(rdr.bytes())
-}
-
-/// Decodes a bencode value from a `&str`.
-pub fn from_slice<T>(v: &[u8]) -> Result<T>
-    where T: de::Deserialize
-{
-    from_iter(v.iter().map(|byte| Ok(*byte)))
-}
-
-
-/// Encode the specified struct into a bencode `[u8]` writer.
-#[inline]
-pub fn to_writer<W, T>(writer: &mut W, value: &T) -> Result<()>
-    where W: io::Write,
-          T: serde::ser::Serialize,
-{
-    let mut ser = Serializer::new(writer);
-    try!(value.serialize(&mut ser));
-    Ok(())
-}
-
-/// Encode the specified struct into a bencode `[u8]` buffer.
-#[inline]
-pub fn to_vec<T>(value: &T) -> Result<Vec<u8>>
-    where T: serde::ser::Serialize,
-{
-    // We are writing to a Vec, which doesn't fail. So we can ignore
-    // the error.
-    let mut writer = Vec::with_capacity(128);
-    try!(to_writer(&mut writer, value));
-    Ok(writer)
 }
 
 
 #[cfg(test)]
-mod tests {
-    use serde::bytes::ByteBuf;
-    use std::collections::HashMap;
-    use super::{from_slice, to_vec};
+mod test {
+    use std::borrow::Cow;
+    use super::{IResult, Node, Tokenizer};
 
-    #[derive(Serialize, Deserialize, Debug)]
-    struct Document {
-        a: ByteBuf,
-        b: i64,
-        c: Vec<i64>,
-        d: Vec<ByteBuf>,
-        e: HashMap<ByteBuf, ByteBuf>,
+    fn allocation_how(node: &Node) -> &'static str {
+        match *node {
+            Node::DictionaryStart
+            | Node::ArrayStart
+            | Node::ContainerEnd => "non-allocating value",
+            
+            Node::Integer(Cow::Owned(_))
+            | Node::Bytes(Cow::Owned(_)) => "allocated",
+
+            Node::Integer(Cow::Borrowed(_))
+            | Node::Bytes(Cow::Borrowed(_)) => "non-allocating borrow: &'de",
+        }
     }
 
     #[test]
-    fn simple_test() {
-        // let document = b"d1:a3:eh?1:bl3:beee1:dd1:alldedeeee";
-        let document = b"d1:a3:4441:bi444e1:cli123ee1:dl3:foo3:bare1:ed3:foo3:baree";
-        let bencode: Document = match from_slice(document) {
-            Ok(val) => val, 
-            Err(err) => panic!("deserialize error: {:?}", err),
-        };
-        assert_eq!(&*bencode.a, b"444");
-        assert_eq!(bencode.b, 444);
-        assert_eq!(bencode.c[0], 123);
-        assert_eq!(&*bencode.d[0], b"foo");
-        assert_eq!(&*bencode.d[1], b"bar");
+    fn test_chunks() {
+        let bufs: &[&[u8]] = &[
+            b"i441",
+            b"e",
+            b"5:quackd5:q",
+            b"uack4:b",
+            b"oop10:some",
+            b"frogs",
+            b"!0:",
+            b"e",
+        ];
 
-        let rebencoded = to_vec(&bencode).unwrap();
-        assert_eq!(&rebencoded[..], &document[..]);
-    }
-}
-
-#[cfg(feature="afl")]
-pub mod afl {
-    use std::io::{self, Read};
-    use super::{from_slice, Value};
-
-    pub fn bdecode() {
-        let mut buf = Vec::new();
-        io::stdin().take(1 << 20).read_to_end(&mut buf).unwrap();
-        match from_slice::<Value>(&*buf) {
-            Ok(bencode) => println!("{:#?}", bencode),
-            Err(err) => println!("erorr: {:?}", err),
+        let mut next_bufs = bufs.iter().cloned();
+        let mut tokenizer = Tokenizer::new(b"");
+        loop {
+            match tokenizer.next() {
+                IResult::Done(ref v) => {
+                    println!("got token {:?}, {}", v, allocation_how(v));
+                },
+                IResult::ReadMore(_) => {
+                    if let Some(next) = next_bufs.next() {
+                        tokenizer.add_data(next);
+                    } else {
+                        break;
+                    }
+                },
+                IResult::Err(err) => panic!("error: {:?}", err),
+            }
         }
     }
+
+    #[test]
+    fn test_one_buffer() {
+        let mut tokenizer = Tokenizer::new(b"i441e5:quackd5:quack4:boop10:somefrogs!0:e");
+        loop {
+            match tokenizer.next() {
+                IResult::Done(ref v) => {
+                    println!("got token {:?}, {}", v, allocation_how(v));
+                },
+                IResult::ReadMore(_) => break,
+                IResult::Err(err) => panic!("error: {:?}", err),
+            }            
+        }
+    }
+
 }
