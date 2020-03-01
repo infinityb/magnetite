@@ -5,11 +5,12 @@ use tracing_subscriber::FmtSubscriber;
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 
 mod cmdlet;
+mod model;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
-fn main() {
+fn main() -> Result<(), failure::Error> {
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
     let matches = App::new(CARGO_PKG_NAME)
@@ -25,9 +26,11 @@ fn main() {
         )
         .subcommand(cmdlet::seed::get_subcommand())
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
+        .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
+        .subcommand(cmdlet::validate_mse_tome::get_subcommand())
         .get_matches();
 
-    let mut verbosity = matches.occurrences_of("v");
+    let verbosity = matches.occurrences_of("v");
     let print_test_logging = 4 < verbosity;
 
     match verbosity {
@@ -53,9 +56,11 @@ fn main() {
     let main_function = match sub_name {
         cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main,
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main,
+        cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main,
+        cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main,
         _ => panic!("bad argument parse"),
     };
-    main_function(args.expect("subcommand args"));
+    main_function(args.expect("subcommand args"))
 }
 
 

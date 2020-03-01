@@ -1,30 +1,13 @@
-use std::fmt;
 use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::collections::{BTreeMap, VecDeque};
-use std::io::{self, Read};
+use std::io::Read;
+use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use failure::{Fail, Fallible};
+use sha1::{Sha1, Digest};
 
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
-
-struct TorrentMeta {
-    announce: String,
-    #[serde(rename="creation date")]
-    creation_date: i64,
-    info: TorrentMetaInfo,
-}
-
-struct TorrentMetaInfo {
-    #[serde(rename="piece length")]
-    piece_length: i64,
-    pieces: i64,
-    name: String,
-    length: i64,
-}
 
 pub fn get_subcommand() -> App<'static, 'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
@@ -40,7 +23,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches) {
+pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
@@ -50,11 +33,23 @@ pub fn main(matches: &clap::ArgMatches) {
     let mut file = File::open(&torrent_file).unwrap();
     file.read_to_end(&mut buffer).unwrap();
 
-    let mut tokenizer = bencode::Tokenizer::new(&buffer[..]);
-    while let bencode::IResult::Done(v) = tokenizer.next() {
-        println!("{:?}", v);
+    let tm: bencode::Value = bencode::from_bytes(&buffer[..]).unwrap();
+    if let bencode::Value::Dict(ref d) = tm {
+        let mut hasher = Sha1::new();
+        let info = bencode::to_bytes(d.get(&b"info"[..]).unwrap()).unwrap();
+        println!("info = {:?}", bencode::BinStr(&info[..]));
+        hasher.input(&info[..]);
+        println!("{:x}", hasher.result());
     }
 
-    // http://bttracker.debian.org:6969/announce
+    // let mut tokenizer = bencode::Tokenizer::new(&buffer[..]);
 
+    // let stdout = io::stdout();
+    // let mut stdout = BufWriter::new(stdout.lock());
+    // while let iresult::IResult::Done(v) = tokenizer.next(false) {
+    //     writeln!(&mut stdout, "{:?}", v).unwrap();
+    // }
+
+    Ok(())
 }
+

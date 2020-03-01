@@ -10,4 +10,6 @@ afl = []
 
 [dependencies]
 # num = "*"
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+iresult = { path = "../iresult" }
+serde_bytes = "0.11.3"
