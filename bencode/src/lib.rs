@@ -5,9 +5,9 @@ use std::fmt::{self, Display, Write};
 use std::num::ParseIntError;
 use std::str::{self, FromStr, Utf8Error};
 
-use serde::de::{self, IntoDeserializer, Visitor};
+use serde::de::{self, IntoDeserializer, Visitor, Unexpected};
 
-use iresult::{IResult, TruncationError};
+use iresult::IResult;
 mod value;
 mod ser;
 
@@ -38,7 +38,7 @@ where
     if deserializer.tokenizer.scratch.is_empty() && deserializer.tokenizer.data.is_empty() {
         Ok(t)
     } else {
-        Err(Error::trailing_characters())
+        Err(Error::trailing_characters(&deserializer.tokenizer))
     }
 }
 
@@ -111,6 +111,7 @@ impl<'a> Node<'a> {
 
 #[derive(Debug)]
 pub struct Tokenizer<'de> {
+    total_offset: u64,
     scratch_offset: usize,
     scratch: Vec<u8>,
     data: &'de [u8],
@@ -119,20 +120,21 @@ pub struct Tokenizer<'de> {
 impl<'de> Tokenizer<'de> {
     pub fn new(data: &'de [u8]) -> Tokenizer<'de> {
         Tokenizer {
+            total_offset: 0,
             scratch_offset: 0,
             scratch: Vec::new(),
             data,
         }
     }
 
-    fn add_data_copying(&mut self, data: &[u8]) {
+    pub fn add_data_copying(&mut self, data: &[u8]) {
         // flush remainder of data into scratch buffer.
         self.scratch.extend(self.data);
         self.scratch.extend(data);
         self.data = &[];
     }
 
-    fn add_data(&mut self, data: &'de [u8]) {
+    pub fn add_data(&mut self, data: &'de [u8]) {
         // flush remainder of data into scratch buffer.
         self.scratch.extend(self.data);
         self.data = data;
@@ -145,6 +147,7 @@ impl<'de> Tokenizer<'de> {
         {
             let data_valid_length = data.len() - split_point;
             let (into, from) = data.split_at_mut(split_point);
+            // FIXME: readability - use copy_from_slice if possible.
             for (o, i) in into.iter_mut().zip(from) {
                 *o = *i;
             }
@@ -164,6 +167,7 @@ impl<'de> Tokenizer<'de> {
                 return match parse_next_item(&self.scratch[self.scratch_offset..]) {
                     IResult::Done((length, value)) => {
                         if !is_peek {
+                            self.total_offset += length as u64;
                             self.scratch_offset += length;
                         }
                         // since we're in our scratch space, we need to allocate an owned copy.
@@ -186,6 +190,7 @@ impl<'de> Tokenizer<'de> {
                 return match parse_next_item(buf) {
                     IResult::Done((length, v)) => {
                         if !is_peek {
+                            self.total_offset += length as u64;
                             self.data = &self.data[length..];
                         }
                         IResult::Done(v)
@@ -215,7 +220,6 @@ fn parse_next_item<'a>(data: &'a [u8]) -> IResult<(usize, Node<'a>), Box<dyn Std
             Some(pos) => {
                 let rem_slice = rem_iter.as_slice();
                 let value = check_is_digits(&rem_slice[..pos - 1]).expect("xTODO: error handling");
-                rem_iter = rem_slice[pos..].iter();
                 IResult::Done((1 + pos, Node::Integer(Cow::Borrowed(value))))
             }
             None => IResult::ReadMore(1),
@@ -243,20 +247,35 @@ fn parse_next_item<'a>(data: &'a [u8]) -> IResult<(usize, Node<'a>), Box<dyn Std
 }
 
 #[derive(Debug)]
-pub struct Error;
+pub struct Error {
+    offset: u64,
+    data: ErrorData,
+}
+
+#[derive(Debug)]
+pub enum ErrorData {
+    Custom(String),
+    Truncated,
+    AntiTruncated,
+    ExpectedString { got: String },
+}
 
 impl serde::ser::Error for Error {
     fn custom<T>(msg: T) -> Self where T: Display {
-        panic!("{}:{}: {}", file!(), line!(), msg);
-        Error
+        Error {
+            offset: u64::max_value(),
+            data: ErrorData::Custom(format!("{}", msg)),
+        }
     }
 }
 
 
 impl Error {
-    fn trailing_characters() -> Error {
-        panic!("{}:{}", file!(), line!());
-        Error
+    fn trailing_characters(tz: &Tokenizer) -> Error {
+        Error {
+            offset: tz.total_offset,
+            data: ErrorData::AntiTruncated,
+        }
     }
 
     fn token_expected(expected: Node, got: Node) -> Error {
@@ -267,27 +286,30 @@ impl Error {
             file!(),
             line!()
         );
-        Error
     }
 
-    fn expected_string() -> Error {
-        panic!("{}:{}", file!(), line!());
-        Error
+    fn expected_string(tz: &Tokenizer, node: &Node) -> Error {
+        Error {
+            offset: tz.total_offset,
+            data: ErrorData::ExpectedString {
+                got: format!("{:?}", node),
+            }
+        }
     }
 
     fn expected_bytes() -> Error {
         panic!("{}:{}", file!(), line!());
-        Error
     }
 
-    fn truncated() -> Error {
-        panic!("{}:{}", file!(), line!());
-        Error
+    fn truncated(tz: &Tokenizer) -> Error {
+        Error {
+            offset: tz.total_offset,
+            data: ErrorData::Truncated,
+        }
     }
 
     fn unexpected_container_end() -> Error {
         panic!("{}:{}", file!(), line!());
-        Error
     }
 }
 
@@ -299,28 +321,27 @@ fn expect_assert(expected: Node, got: Node) -> Result<()> {
     }
 }
 
-impl TruncationError for Error {
-    fn truncated() -> Error {
-        Error
-    }
-}
-
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "error")
+        write!(f, "{:?}", self)
     }
 }
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Error {
-        panic!("{}:{}: {}", file!(), line!(), e);
-        Error
+        Error {
+            offset: u64::max_value(),
+            data: ErrorData::Custom(format!("{}", e)),
+        }
     }
 }
 
 impl From<Box<dyn StdError>> for Error {
     fn from(e: Box<dyn StdError>) -> Error {
-        Error
+        Error {
+            offset: u64::max_value(),
+            data: ErrorData::Custom(format!("{}", e)),
+        }
     }
 }
 
@@ -356,30 +377,34 @@ impl<'de> Deserializer<'de> {
             tokenizer: Tokenizer::new(b),
         }
     }
-
-    fn from_str(s: &'de str) -> Deserializer<'de> {
-        Deserializer {
-            tokenizer: Tokenizer::new(s.as_bytes())
-        }
-    }
 }
 
 impl From<ParseIntError> for Error {
-    fn from(e: ParseIntError) -> Error {
+    fn from(_e: ParseIntError) -> Error {
         unimplemented!();
     }
 }
 
 impl From<Utf8Error> for Error {
-    fn from(e: Utf8Error) -> Error {
+    fn from(_e: Utf8Error) -> Error {
         unimplemented!();
     }
 }
 
 
 impl From<std::string::FromUtf8Error> for Error {
-    fn from(e: std::string::FromUtf8Error) -> Error {
+    fn from(_e: std::string::FromUtf8Error) -> Error {
         unimplemented!();
+    }
+}
+
+pub fn into_result<T, E1>(res: IResult<T, E1>, tz: &Tokenizer) -> std::result::Result<T, Error>
+    where Error: From<E1>
+{
+    match res {
+        IResult::Done(v) => Ok(v),
+        IResult::ReadMore(..) => Err(Error::truncated(tz)),
+        IResult::Err(e) => Err(e.into()),
     }
 }
 
@@ -388,7 +413,8 @@ impl<'de> Deserializer<'de> {
     where
         T: FromStr<Err = ParseIntError>,
     {
-        match self.tokenizer.next(false).into_result::<Error>()? {
+        let res = self.tokenizer.next(false);
+        match into_result(res, &self.tokenizer)? {
             Node::Integer(v) => {
                 let vv: T = v.parse()?;
                 Ok(vv)
@@ -407,8 +433,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        let token = self.tokenizer.next(true).into_result::<Error>()?;
-        match token {
+        let res = self.tokenizer.next(true);
+        match into_result(res, &self.tokenizer)? {
             Node::DictionaryStart => self.deserialize_map(visitor),
             Node::ArrayStart => self.deserialize_seq(visitor),
             Node::ContainerEnd => {
@@ -444,7 +470,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.tokenizer.next(false).into_result::<Error>()? {
+        let res = self.tokenizer.next(false);
+        match into_result(res, &self.tokenizer)? {
             Node::Integer(v) => {
                 if v == "0" {
                     return visitor.visit_bool(false);
@@ -520,7 +547,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.tokenizer.next(false).into_result::<Error>()? {
+        let res = self.tokenizer.next(false);
+        match into_result(res, &self.tokenizer)? {
             Node::Bytes(Cow::Borrowed(data)) => {
                 let str_data = str::from_utf8(data)?;
                 return visitor.visit_borrowed_str(str_data);
@@ -550,7 +578,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.tokenizer.next(false).into_result::<Error>()? {
+        let res = self.tokenizer.next(false);
+        match into_result(res, &self.tokenizer)? {
             Node::Bytes(Cow::Borrowed(data)) => {
                 return visitor.visit_borrowed_bytes(data);
             }
@@ -585,19 +614,23 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             where
                 T: de::DeserializeSeed<'de>,
             {
-                match self.de.tokenizer.next(true).into_result::<Error>()? {
+
+                let res = self.de.tokenizer.next(true);
+                match into_result(res, &self.de.tokenizer)? {
                     Node::ContainerEnd => return Ok(None),
                     _ => seed.deserialize(&mut *self.de).map(Some),
                 }
             }
         }
 
-        let array_start = self.tokenizer.next(false).into_result::<Error>()?;
+        let res = self.tokenizer.next(false);
+        let array_start = into_result(res, &self.tokenizer)?;
         expect_assert(array_start, Node::ArrayStart)?;
 
         let rv = visitor.visit_seq(SeqVisitor { de: &mut self })?;
-
-        let array_end = self.tokenizer.next(false).into_result::<Error>()?;
+        
+        let res = self.tokenizer.next(false);
+        let array_end = into_result(res, &self.tokenizer)?;
         expect_assert(array_end, Node::ContainerEnd)?;
 
         Ok(rv)
@@ -644,10 +677,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             where
                 K: de::DeserializeSeed<'de>,
             {
-                match self.de.tokenizer.next(true).into_result::<Error>()? {
+                let res = self.de.tokenizer.next(true);
+                match into_result(res, &self.de.tokenizer)? {
                     Node::ContainerEnd => return Ok(None),
-                    Node::ArrayStart | Node::DictionaryStart | Node::Integer(..) => {
-                        return Err(Error::expected_string());
+                    n @ Node::ArrayStart
+                    | n @ Node::DictionaryStart
+                    | n @ Node::Integer(..) => {
+                        return Err(Error::expected_string(&self.de.tokenizer, &n));
                     }
                     Node::Bytes(..) => {
                         seed.deserialize(&mut *self.de).map(Some)
@@ -663,16 +699,16 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             }
         }
 
-        let x = 0;
-
-        let token = self.tokenizer.next(false).into_result::<Error>()?;
+        let res = self.tokenizer.next(false);
+        let token = into_result(res, &self.tokenizer)?;
         expect_assert(token, Node::DictionaryStart)?;
         
         let rv = visitor.visit_map(MapVisitor {
             de: &mut self,
         })?;
 
-        let token = self.tokenizer.next(false).into_result::<Error>()?;
+        let res = self.tokenizer.next(false);
+        let token = into_result(res, &self.tokenizer)?;
         expect_assert(token, Node::ContainerEnd)?;
 
         Ok(rv)
@@ -705,7 +741,9 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.tokenizer.next(false).into_result::<Error>()? {
+        let res = self.tokenizer.next(false);
+        let node = into_result(res, &self.tokenizer)?;
+        match node {
             Node::DictionaryStart => {
                 visitor.visit_enum(EnumExtended { de: &mut self })
             }
@@ -717,7 +755,10 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 let data = String::from_utf8(data)?;
                 visitor.visit_enum(IntoDeserializer::into_deserializer(data))
             }
-            Node::ArrayStart | Node::Integer(..) => Err(Error::expected_string()),
+            n @ Node::ArrayStart
+            | n @ Node::Integer(..) => {
+                return Err(Error::expected_string(&self.tokenizer, &n));
+            },
             Node::ContainerEnd => Err(Error::unexpected_container_end()),
         }
     }
@@ -740,7 +781,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        if let Node::Bytes(ref by) = self.tokenizer.next(false).into_result::<Error>()? {
+        let res = self.tokenizer.next(false);
+        if let Node::Bytes(ref by) = into_result(res, &self.tokenizer)? {
             visitor.visit_bytes(&by[..])
         } else {
             Err(Error::expected_bytes())
@@ -799,7 +841,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     }
 
     // Unit struct means a named value containing no data.
-    fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
+    fn deserialize_unit_struct<V>(self, _name: &'static str, _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
@@ -829,10 +871,8 @@ impl<'de, 'a> de::EnumAccess<'de> for EnumExtended<'a, 'de> {
 impl<'de, 'a> de::VariantAccess<'de> for EnumExtended<'a, 'de> {
     type Error = Error;
 
-    // If the `Visitor` expected this variant to be a unit variant, the input
-    // should have been the plain string case handled in `deserialize_enum`.
     fn unit_variant(self) -> Result<()> {
-        Err(Error::expected_string())
+        Err(de::Error::invalid_type(Unexpected::UnitVariant, &"string"))
     }
 
     // Newtype variants are represented in JSON as `{ NAME: VALUE }` so
@@ -844,7 +884,8 @@ impl<'de, 'a> de::VariantAccess<'de> for EnumExtended<'a, 'de> {
         let rv = seed.deserialize(&mut *self.de)?;
 
         // end the container started by `deserialize_enum`
-        let token = self.de.tokenizer.next(false).into_result::<Error>()?;
+        let res = self.de.tokenizer.next(false);
+        let token = into_result(res, &self.de.tokenizer)?;
         expect_assert(token, Node::ContainerEnd)?;
 
         Ok(rv)
@@ -859,7 +900,8 @@ impl<'de, 'a> de::VariantAccess<'de> for EnumExtended<'a, 'de> {
         let rv = de::Deserializer::deserialize_seq(&mut *self.de, visitor)?;
 
         // end the container started by `deserialize_enum`
-        let token = self.de.tokenizer.next(false).into_result::<Error>()?;
+        let res = self.de.tokenizer.next(false);
+        let token = into_result(res, &self.de.tokenizer)?;
         expect_assert(token, Node::ContainerEnd)?;
 
         Ok(rv)
@@ -874,7 +916,8 @@ impl<'de, 'a> de::VariantAccess<'de> for EnumExtended<'a, 'de> {
         let rv = de::Deserializer::deserialize_map(&mut *self.de, visitor)?;
 
         // end the container started by `deserialize_enum`
-        let token = self.de.tokenizer.next(false).into_result::<Error>()?;
+        let res = self.de.tokenizer.next(false);
+        let token = into_result(res, &self.de.tokenizer)?;
         expect_assert(token, Node::ContainerEnd)?;
 
         Ok(rv)
@@ -929,6 +972,33 @@ mod test {
     }
 
     #[test]
+    fn torrent_example_broken() {
+        let bufs: &[&[u8]] = &[
+            b"d",
+            b"8:announce43:udp://tracker.coppersurfer.tk:6969/announce",
+            b"13:announce-list",
+            b"l",
+            b"l",
+            b"4:aaaa",
+            b"e",
+            b"e",
+            b"7:comment4:aaaa",
+            b"10:created by4:aaaa",
+            b"13:creation datei4444e",
+            b"i33ei33e",
+            b"e",
+        ];
+
+        let mut buf = Vec::new();
+        for piece in bufs {
+            buf.extend(*piece);
+        }
+
+        let err = crate::from_bytes::<TorrentMeta>(&buf[..]).unwrap_err();
+        assert_eq!(err.offset, 139);
+    }
+
+    #[test]
     fn torrent_example() {
         let bufs: &[&[u8]] = &[
             b"d",
@@ -967,7 +1037,7 @@ mod test {
                     b"12:piece length",
                     b"i262144e",
                     b"6:pieces",
-                    b"20:00000000000000000000",
+                    b"20:lynnielynnlynnielynn",
                 b"e",
             b"e",
         ];

@@ -65,14 +65,22 @@ impl std::error::Error for BadHandshake {}
 // --
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TorrentID {
-    pub data: [u8; TORRENT_ID_LENGTH],
+pub struct TorrentID(pub [u8; TORRENT_ID_LENGTH]);
+
+impl TorrentID {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0[..]
+    }
+
+    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
+        &mut self.0[..]
+    }
 }
 
 impl fmt::Debug for TorrentID {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("TorrentID")
-            .field("data", &bencode::BinStr(&self.data))
+        f.debug_tuple("TorrentID")
+            .field(&bencode::BinStr(self.as_bytes()))
             .finish()
     }
 }
@@ -91,19 +99,15 @@ impl TorrentID {
     pub const LENGTH: usize = TORRENT_ID_LENGTH;
 
     pub fn zero() -> TorrentID {
-        TorrentID {
-            data: [0; TORRENT_ID_LENGTH],
-        }
+        TorrentID([0; TORRENT_ID_LENGTH])
     }
 
     pub fn from_slice(r: &[u8]) -> Result<TorrentID, failure::Error> {
         if r.len() != TORRENT_ID_LENGTH {
             return Err(failure::format_err!("slice length is {}, must be {}", r.len(), TORRENT_ID_LENGTH));
         }
-        let mut out = TorrentID::zero();
-        for (o, i) in out.data.iter_mut().zip(r.iter()) {
-            *o = *i;
-        }
+        let mut out = Self::zero();
+        out.as_mut_bytes().copy_from_slice(r);
         Ok(out)
     }
 
@@ -119,7 +123,7 @@ impl TorrentID {
             CARGO_PKG_VERSION.as_bytes(),
             b"-",
         ]);
-        TorrentID { data }
+        TorrentID(data)
     }
 
     pub fn generate_peer_id_rng(r: &mut dyn RngCore) -> TorrentID {
@@ -130,7 +134,7 @@ impl TorrentID {
             b"-",
         ]);
         r.fill_bytes(rest);
-        TorrentID { data }
+        TorrentID(data)
     }
 }
 
@@ -149,6 +153,7 @@ pub struct TorrentMeta {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TorrentMetaInfo {
+    #[serde(default)]
     pub files: Vec<TorrentMetaInfoFile>,
     #[serde(rename="piece length")]
     pub piece_length: u64,
@@ -160,7 +165,7 @@ pub struct TorrentMetaInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentMetaInfoFile {
     pub length: u64,
-    // pub path: Vec<String>,
+    pub path: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -196,7 +201,7 @@ impl TorrentMetaWrapped {
         let mut piece_shas = Vec::new();
         for c in meta.info.pieces.chunks(20) {
             let mut tid = TorrentID::zero();
-            tid.data.copy_from_slice(c);
+            tid.as_mut_bytes().copy_from_slice(c);
             piece_shas.push(tid);
         }
 
@@ -243,7 +248,7 @@ impl PeerState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BitField {
     pub bit_length: u32,
     pub data: Box<[u8]>,
@@ -252,6 +257,14 @@ pub struct BitField {
 impl BitField {
     pub fn as_raw_slice(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn count_ones(&self) -> u32 {
+        let mut completed = 0;
+        for by in self.as_raw_slice() {
+            completed += by.count_ones() as u32;
+        }
+        completed
     }
 
     pub fn all(bit_length: u32) -> BitField {
@@ -294,5 +307,12 @@ impl BitField {
         let byte_index = (index / 8) as usize;
         let bit_index = (index % 8) as u8;
         self.data[byte_index] |= 1 << bit_index;
+    }
+
+    pub fn has(&self, index: u32) -> bool {
+        assert!(index < self.bit_length);
+        let byte_index = (index / 8) as usize;
+        let bit_index = (index % 8) as u8;
+        (self.data[byte_index] & (1 << bit_index)) > 0
     }
 }

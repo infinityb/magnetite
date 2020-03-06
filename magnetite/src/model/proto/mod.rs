@@ -207,7 +207,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
         CANCEL_BYTE => {
             if size != 13 {
                 return IResult::Err(funky_size());
-        }
+            }
             let index = BigEndian::read_u32(&mut rest[1..]);
             let begin = BigEndian::read_u32(&mut rest[5..]);
             let length = BigEndian::read_u32(&mut rest[9..]);
@@ -325,13 +325,13 @@ impl Handshake {
         }
         assert_eq!(acc, 28);
 
-        for (i, o) in info_hash.data.iter().zip(&mut scratch_iter) {
+        for (i, o) in info_hash.as_bytes().iter().zip(&mut scratch_iter) {
             acc += 1;
             *o = *i;
         }
         assert_eq!(acc, 48);
 
-        for (i, o) in peer_id.data.iter().zip(&mut scratch_iter) {
+        for (i, o) in peer_id.as_bytes().iter().zip(&mut scratch_iter) {
             acc += 1;
             *o = *i;
         }
@@ -369,10 +369,10 @@ impl Handshake {
         for (o, i) in hs.reserved.iter_mut().zip(reserve_buf) {
             *o = *i;
         }
-        for (o, i) in hs.info_hash.data.iter_mut().zip(info_hash_buf) {
+        for (o, i) in hs.info_hash.as_mut_bytes().iter_mut().zip(info_hash_buf) {
             *o = *i;
         }
-        for (o, i) in hs.peer_id.data.iter_mut().zip(peer_id_buf) {
+        for (o, i) in hs.peer_id.as_mut_bytes().iter_mut().zip(peer_id_buf) {
             *o = *i;
         }
         IResult::Done((HANDSHAKE_SIZE, hs))

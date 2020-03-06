@@ -2,7 +2,6 @@ use std::io::{self, Write};
 
 use serde::ser;
 use serde::{Serialize};
-use serde_bytes::ByteBuf;
 
 use super::{Error, Result};
 
