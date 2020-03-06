@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use serde::ser;
-use serde::{Serialize};
+use serde::Serialize;
 
 use super::{Error, Result};
 
@@ -15,19 +15,20 @@ where
     T: Serialize,
 {
     let mut cur = io::Cursor::new(Vec::new());
-    let mut serializer = Serializer {
-        writer: &mut cur,
-    };
+    let mut serializer = Serializer { writer: &mut cur };
     value.serialize(&mut serializer)?;
     drop(serializer);
     Ok(cur.into_inner())
 }
 
-
 /// A structure for serializing Rust values into Bencode.
-pub struct Serializer<W> { writer: W }
+pub struct Serializer<W> {
+    writer: W,
+}
 
-impl<W> Serializer<W> where W: io::Write
+impl<W> Serializer<W>
+where
+    W: io::Write,
 {
     /// Creates a new Bencode serializer.
     #[inline]
@@ -42,7 +43,11 @@ impl<W> Serializer<W> where W: io::Write
     }
 }
 
-impl<'a, 'wri, W> ser::Serializer for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::Serializer for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     // The output type produced by this `Serializer` during successful
     // serialization. Most serializers that produce text or binary output should
     // set `Ok = ()` and serialize into an `io::Write` or buffer contained
@@ -183,11 +188,7 @@ impl<'a, 'wri, W> ser::Serializer for &'a mut Serializer<W> where W: Write + 'wr
 
     // As is done here, serializers are encouraged to treat newtype structs as
     // insignificant wrappers around the data they contain.
-    fn serialize_newtype_struct<T>(
-        self,
-        _name: &'static str,
-        value: &T,
-    ) -> Result<()>
+    fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
@@ -274,11 +275,7 @@ impl<'a, 'wri, W> ser::Serializer for &'a mut Serializer<W> where W: Write + 'wr
     // omit the field names when serializing structs because the corresponding
     // Deserialize implementation is required to know what the keys are without
     // looking at the serialized data.
-    fn serialize_struct(
-        self,
-        _name: &'static str,
-        len: usize,
-    ) -> Result<Self::SerializeStruct> {
+    fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
         self.serialize_map(Some(len))
     }
 
@@ -298,7 +295,11 @@ impl<'a, 'wri, W> ser::Serializer for &'a mut Serializer<W> where W: Write + 'wr
     }
 }
 
-impl<'a, 'wri, W> ser::SerializeSeq for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeSeq for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 
@@ -316,7 +317,11 @@ impl<'a, 'wri, W> ser::SerializeSeq for &'a mut Serializer<W> where W: Write + '
 }
 
 // Same thing but for tuples.
-impl<'a, 'wri, W> ser::SerializeTuple for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeTuple for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 
@@ -334,7 +339,11 @@ impl<'a, 'wri, W> ser::SerializeTuple for &'a mut Serializer<W> where W: Write +
 }
 
 // Same thing but for tuple structs.
-impl<'a, 'wri, W> ser::SerializeTupleStruct for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeTupleStruct for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 
@@ -351,7 +360,11 @@ impl<'a, 'wri, W> ser::SerializeTupleStruct for &'a mut Serializer<W> where W: W
     }
 }
 
-impl<'a, 'wri, W> ser::SerializeTupleVariant for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeTupleVariant for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 
@@ -376,7 +389,11 @@ impl<'a, 'wri, W> ser::SerializeTupleVariant for &'a mut Serializer<W> where W: 
 // `serialize_entry` method allows serializers to optimize for the case where
 // key and value are both available simultaneously. In JSON it doesn't make a
 // difference so the default behavior for `serialize_entry` is fine.
-impl<'a, 'wri, W> ser::SerializeMap for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeMap for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 
@@ -415,7 +432,11 @@ impl<'a, 'wri, W> ser::SerializeMap for &'a mut Serializer<W> where W: Write + '
 
 // Structs are like maps in which the keys are constrained to be compile-time
 // constant strings.
-impl<'a, 'wri, W> ser::SerializeStruct for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeStruct for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 
@@ -435,7 +456,11 @@ impl<'a, 'wri, W> ser::SerializeStruct for &'a mut Serializer<W> where W: Write 
 
 // Similar to `SerializeTupleVariant`, here the `end` method is responsible for
 // closing both of the curly braces opened by `serialize_struct_variant`.
-impl<'a, 'wri, W> ser::SerializeStructVariant for &'a mut Serializer<W> where W: Write + 'wri, 'wri: 'a {
+impl<'a, 'wri, W> ser::SerializeStructVariant for &'a mut Serializer<W>
+where
+    W: Write + 'wri,
+    'wri: 'a,
+{
     type Ok = ();
     type Error = Error;
 

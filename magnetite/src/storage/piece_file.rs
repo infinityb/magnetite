@@ -1,41 +1,25 @@
-use std::collections::{hash_map, HashMap};
-use std::fmt;
-use std::fs::File;
 use std::io::{Read, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::ops::Range;
 
-use tracing::{event, span, Level};
-use clap::{App, Arg, SubCommand};
-use tokio::net::TcpListener;
-use tokio::runtime::Runtime;
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
-use bytes::BytesMut;
-use iresult::IResult;
-use tokio::fs::File as TokioFile;
-use salsa20::XSalsa20;
-use salsa20::stream_cipher::generic_array::GenericArray;
-use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek};
+use std::sync::Arc;
+
 use bytes::Bytes;
-use sha1::{Sha1, Digest};
+
 use lru::LruCache;
 
-use crate::model::{
-    BitField,
-    ProtocolViolation,
-    TorrentID,
-    StorageEngineCorruption,
-};
+use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek};
+use salsa20::XSalsa20;
+use sha1::{Digest, Sha1};
+use tokio::fs::File as TokioFile;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+use tokio::sync::Mutex;
+
+use crate::model::{BitField, ProtocolViolation, StorageEngineCorruption, TorrentID};
 
 #[derive(Debug)]
 pub enum PieceFileStorageEngineVerifyMode {
     Never,
-    First {
-        verified: BitField,
-    },
+    First { verified: BitField },
     Always,
 }
 
@@ -55,14 +39,18 @@ pub struct PieceFileStorageEngine {
 }
 
 impl PieceFileStorageEngine {
-    pub fn get_piece(&self, piece_id: u32) -> impl std::future::Future<Output=Result<Bytes, failure::Error>> {
+    pub fn get_piece(
+        &self,
+        piece_id: u32,
+    ) -> impl std::future::Future<Output = Result<Bytes, failure::Error>> {
         let lockables = Arc::clone(&self.lockables);
         let piece_shas = Arc::clone(&self.piece_shas);
         let total_length = self.total_length;
         let piece_length = self.piece_length;
 
         async move {
-            let piece_sha: &TorrentID = piece_shas.get(piece_id as usize)
+            let piece_sha: &TorrentID = piece_shas
+                .get(piece_id as usize)
                 .ok_or_else(|| ProtocolViolation)?;
 
             let piece_offset_start = piece_length * u64::from(piece_id);
@@ -71,7 +59,6 @@ impl PieceFileStorageEngine {
                 piece_offset_end = total_length;
             }
 
-            
             let mut locked = lockables.lock().await;
             if let Some(cached) = locked.piece_cache.get(&piece_id) {
                 return Ok(cached.clone());
@@ -83,7 +70,10 @@ impl PieceFileStorageEngine {
                 PieceFileStorageEngineVerifyMode::Always => true,
             };
 
-            locked.piece_file.seek(SeekFrom::Start(piece_offset_start)).await?;
+            locked
+                .piece_file
+                .seek(SeekFrom::Start(piece_offset_start))
+                .await?;
             let mut chonker = vec![0; (piece_offset_end - piece_offset_start) as usize];
             locked.piece_file.read_exact(&mut chonker).await?;
 
@@ -99,7 +89,9 @@ impl PieceFileStorageEngine {
                     return Err(StorageEngineCorruption.into());
                 }
 
-                if let PieceFileStorageEngineVerifyMode::First { ref mut verified } = locked.verify_piece {
+                if let PieceFileStorageEngineVerifyMode::First { ref mut verified } =
+                    locked.verify_piece
+                {
                     verified.set(piece_id, true);
                 }
             }

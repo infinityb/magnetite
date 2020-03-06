@@ -1,17 +1,16 @@
 use std::fs::File;
-use std::path::Path;
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use salsa20::XSalsa20;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher};
+use salsa20::XSalsa20;
 
 use crate::model::{TorrentMeta, TorrentMetaWrapped};
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "assemble-mse-tome";
-
 
 pub fn get_subcommand() -> App<'static, 'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
@@ -51,7 +50,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
+pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
@@ -66,7 +65,7 @@ pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
     let mut buffer = Vec::new();
     let mut file = File::open(&torrent_file).unwrap();
     file.read_to_end(&mut buffer).unwrap();
-    
+
     let wrapped = TorrentMetaWrapped::from_bytes(&buffer).unwrap();
 
     let key = GenericArray::from_slice(secret.as_bytes());
@@ -104,7 +103,9 @@ pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
 }
 
 fn copy_and_encrypt<R, W>(b: &mut [u8], s: &mut XSalsa20, w: &mut W, r: &mut R) -> io::Result<()>
-    where R: Read, W: Write
+where
+    R: Read,
+    W: Write,
 {
     loop {
         let length = r.read(&mut b[..])?;

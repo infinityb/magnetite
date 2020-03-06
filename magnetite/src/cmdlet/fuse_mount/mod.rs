@@ -1,22 +1,23 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
-use std::path::Path;
-use std::time::{UNIX_EPOCH};
-use std::ffi::OsStr;
-use std::sync::Arc;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::ffi::OsString;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use clap::{App, Arg, SubCommand};
-use sha1::{Sha1, Digest};
-use fuse::{FileType, FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
-use libc::{ENOENT, ENOTDIR, c_int};
+use fuse::{
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
+};
+
+use libc::{c_int, ENOENT, ENOTDIR};
+use sha1::Digest;
+use tokio::net::UnixListener;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
-use tokio::net::UnixListener;
-use futures::stream::TryStreamExt;
-use tonic::transport::Server;
 
 use crate::model::TorrentID;
 
@@ -25,14 +26,8 @@ pub mod fuse_api {
 }
 
 use fuse_api::{
-    magnetite_fuse_host_server::{
-        MagnetiteFuseHost,
-        MagnetiteFuseHostServer,
-    },
-    AddTorrentRequest,
-    AddTorrentResponse,
-    RemoveTorrentRequest,
-    RemoveTorrentResponse,
+    magnetite_fuse_host_server::MagnetiteFuseHost, AddTorrentRequest, AddTorrentResponse,
+    RemoveTorrentRequest, RemoveTorrentResponse,
 };
 
 struct Directory {
@@ -81,15 +76,15 @@ const HELLO_TXT_CONTENT: &str = "Hello World!\n";
 const TTL: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl Filesystem for FilesystemImpl {
-    fn init(&mut self, req: &fuse::Request) -> Result<(), c_int> {
+    fn init(&mut self, _req: &fuse::Request) -> Result<(), c_int> {
         Ok(())
     }
 
-    fn lookup(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let mutable = Arc::clone(&self.mutable);
         let name = name.to_owned();
         tokio::spawn(async move {
-            let mut fs = mutable.lock().await;
+            let fs = mutable.lock().await;
             if let Some(pentry) = fs.inodes.get(&parent) {
                 match pentry.data {
                     FileEntryData::Dir(ref dir) => {
@@ -111,10 +106,10 @@ impl Filesystem for FilesystemImpl {
         });
     }
 
-    fn getattr(&mut self, req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         let mutable = Arc::clone(&self.mutable);
         tokio::spawn(async move {
-            let mut fs = mutable.lock().await;
+            let fs = mutable.lock().await;
             if let Some(pentry) = fs.inodes.get(&ino) {
                 reply.attr(&TTL, &pentry.attrs);
                 return;
@@ -123,10 +118,18 @@ impl Filesystem for FilesystemImpl {
         });
     }
 
-    fn read(&mut self, req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyData) {
+    fn read(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        _size: u32,
+        reply: ReplyData,
+    ) {
         let mutable = Arc::clone(&self.mutable);
         tokio::spawn(async move {
-            let mut fs = mutable.lock().await;
+            let fs = mutable.lock().await;
             if let Some(pentry) = fs.inodes.get(&ino) {
                 if let FileEntryData::File(ref _file) = pentry.data {
                     reply.data(&HELLO_TXT_CONTENT.as_bytes()[offset as usize..]);
@@ -137,11 +140,17 @@ impl Filesystem for FilesystemImpl {
         });
     }
 
-    fn readdir(&mut self, req: &Request, ino: u64, fh: u64, offset: i64, mut reply: ReplyDirectory) {
-
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         let mutable = Arc::clone(&self.mutable);
         tokio::spawn(async move {
-            let mut fs = mutable.lock().await;
+            let fs = mutable.lock().await;
             if let Some(pentry) = fs.inodes.get(&ino) {
                 // self and parent are intrinsic
                 if let FileEntryData::Dir(ref dir) = pentry.data {
@@ -197,7 +206,6 @@ pub fn main() -> Result<(), failure::Error> {
     panic!("The `uds` example only works on unix systems!");
 }
 
-
 #[derive(Default)]
 pub struct FuseHost {}
 
@@ -205,14 +213,14 @@ pub struct FuseHost {}
 impl MagnetiteFuseHost for FuseHost {
     async fn add_torrent(
         &self,
-        request: tonic::Request<AddTorrentRequest>,
+        _request: tonic::Request<AddTorrentRequest>,
     ) -> Result<tonic::Response<AddTorrentResponse>, tonic::Status> {
         Ok(tonic::Response::new(fuse_api::AddTorrentResponse {}))
     }
 
     async fn remove_torrent(
         &self,
-        request: tonic::Request<RemoveTorrentRequest>,
+        _request: tonic::Request<RemoveTorrentRequest>,
     ) -> Result<tonic::Response<RemoveTorrentResponse>, tonic::Status> {
         Ok(tonic::Response::new(fuse_api::RemoveTorrentResponse {}))
     }
@@ -227,7 +235,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let mut rt = Runtime::new()?;
     rt.block_on(async {
-        let mut uds = UnixListener::bind(&control_socket)?;
+        let _uds = UnixListener::bind(&control_socket)?;
         tokio::task::spawn_blocking(move || {
             let options = ["-o", "ro", "-o", "fsname=hello"]
                 .iter()
@@ -239,56 +247,62 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 inodes: BTreeMap::new(),
                 inode_seq: 3,
             };
-            fs_impl.inodes.insert(1, FileEntry {
-                info_hash_owner_counter: 1,
-                attrs: FileAttr {
-                    ino: 1,
-                    size: 0,
-                    blocks: 0,
-                    atime: UNIX_EPOCH,
-                    mtime: UNIX_EPOCH,
-                    ctime: UNIX_EPOCH,
-                    crtime: UNIX_EPOCH,
-                    kind: FileType::Directory,
-                    perm: 0o755,
-                    nlink: 2,
-                    uid: 501,
-                    gid: 20,
-                    rdev: 0,
-                    flags: 0,
+            fs_impl.inodes.insert(
+                1,
+                FileEntry {
+                    info_hash_owner_counter: 1,
+                    attrs: FileAttr {
+                        ino: 1,
+                        size: 0,
+                        blocks: 0,
+                        atime: UNIX_EPOCH,
+                        mtime: UNIX_EPOCH,
+                        ctime: UNIX_EPOCH,
+                        crtime: UNIX_EPOCH,
+                        kind: FileType::Directory,
+                        perm: 0o755,
+                        nlink: 2,
+                        uid: 501,
+                        gid: 20,
+                        rdev: 0,
+                        flags: 0,
+                    },
+                    data: FileEntryData::Dir(Directory {
+                        parent: 1,
+                        child_inodes: vec![DirectoryChild {
+                            inode: 2,
+                            ft: FileType::RegularFile,
+                            file_name: "hello.txt".into(),
+                        }],
+                    }),
                 },
-                data: FileEntryData::Dir(Directory {
-                    parent: 1,
-                    child_inodes: vec![DirectoryChild {
-                        inode: 2,
-                        ft: FileType::RegularFile,
-                        file_name: "hello.txt".into(),
-                    }],
-                }),
-            });
-            fs_impl.inodes.insert(2, FileEntry {
-                info_hash_owner_counter: 1,
-                attrs: FileAttr {
-                    ino: 2,
-                    size: 13,
-                    blocks: 1,
-                    atime: UNIX_EPOCH,
-                    mtime: UNIX_EPOCH,
-                    ctime: UNIX_EPOCH,
-                    crtime: UNIX_EPOCH,
-                    kind: FileType::RegularFile,
-                    perm: 0o644,
-                    nlink: 1,
-                    uid: 501,
-                    gid: 20,
-                    rdev: 0,
-                    flags: 0,
+            );
+            fs_impl.inodes.insert(
+                2,
+                FileEntry {
+                    info_hash_owner_counter: 1,
+                    attrs: FileAttr {
+                        ino: 2,
+                        size: 13,
+                        blocks: 1,
+                        atime: UNIX_EPOCH,
+                        mtime: UNIX_EPOCH,
+                        ctime: UNIX_EPOCH,
+                        crtime: UNIX_EPOCH,
+                        kind: FileType::RegularFile,
+                        perm: 0o644,
+                        nlink: 1,
+                        uid: 501,
+                        gid: 20,
+                        rdev: 0,
+                        flags: 0,
+                    },
+                    data: FileEntryData::File(FileData {
+                        info_hash: TorrentID::zero(),
+                        piece_index_start: 0,
+                    }),
                 },
-                data: FileEntryData::File(FileData {
-                    info_hash: TorrentID::zero(),
-                    piece_index_start: 0,
-                })
-            });
+            );
 
             // fs_impl.add_torrent();
 
@@ -296,7 +310,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 mutable: Arc::new(Mutex::new(fs_impl)),
             };
             fuse::mount(fs_impl, &mount_point, &options).unwrap();
-        }).await?;
+        })
+        .await?;
 
         Ok(())
     })
@@ -348,5 +363,3 @@ mod unix {
         }
     }
 }
-
-

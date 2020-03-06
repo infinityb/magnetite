@@ -1,15 +1,15 @@
-use std::io;
 use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Write};
+use std::io;
 use std::num::ParseIntError;
 use std::str::{self, FromStr, Utf8Error};
 
-use serde::de::{self, IntoDeserializer, Visitor, Unexpected};
+use serde::de::{self, IntoDeserializer, Unexpected, Visitor};
 
 use iresult::IResult;
-mod value;
 mod ser;
+mod value;
 
 pub use self::ser::to_bytes;
 pub use self::value::Value;
@@ -27,7 +27,6 @@ fn check_is_digits(digits: &[u8]) -> Option<&str> {
     }
     Some(str::from_utf8(digits).unwrap())
 }
-
 
 pub fn from_bytes<'a, T>(s: &'a [u8]) -> Result<T>
 where
@@ -48,11 +47,17 @@ trait CopyReadChunk {
     fn read_chunk(&mut self, scratch: &mut Vec<u8>) -> io::Result<usize>;
 }
 
-struct CopyReadChunkReader<R> where R: io::Read {
+struct CopyReadChunkReader<R>
+where
+    R: io::Read,
+{
     io: R,
 }
 
-impl<R> CopyReadChunk for CopyReadChunkReader<R> where R: io::Read {
+impl<R> CopyReadChunk for CopyReadChunkReader<R>
+where
+    R: io::Read,
+{
     fn read_chunk(&mut self, scratch: &mut Vec<u8>) -> io::Result<usize> {
         let mut tmp_buf = [0; 4096];
         let read_length = self.io.read(&mut tmp_buf[..])?;
@@ -261,14 +266,16 @@ pub enum ErrorData {
 }
 
 impl serde::ser::Error for Error {
-    fn custom<T>(msg: T) -> Self where T: Display {
+    fn custom<T>(msg: T) -> Self
+    where
+        T: Display,
+    {
         Error {
             offset: u64::max_value(),
             data: ErrorData::Custom(format!("{}", msg)),
         }
     }
 }
-
 
 impl Error {
     fn trailing_characters(tz: &Tokenizer) -> Error {
@@ -293,7 +300,7 @@ impl Error {
             offset: tz.total_offset,
             data: ErrorData::ExpectedString {
                 got: format!("{:?}", node),
-            }
+            },
         }
     }
 
@@ -391,7 +398,6 @@ impl From<Utf8Error> for Error {
     }
 }
 
-
 impl From<std::string::FromUtf8Error> for Error {
     fn from(_e: std::string::FromUtf8Error) -> Error {
         unimplemented!();
@@ -399,7 +405,8 @@ impl From<std::string::FromUtf8Error> for Error {
 }
 
 pub fn into_result<T, E1>(res: IResult<T, E1>, tz: &Tokenizer) -> std::result::Result<T, Error>
-    where Error: From<E1>
+where
+    Error: From<E1>,
 {
     match res {
         IResult::Done(v) => Ok(v),
@@ -614,7 +621,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             where
                 T: de::DeserializeSeed<'de>,
             {
-
                 let res = self.de.tokenizer.next(true);
                 match into_result(res, &self.de.tokenizer)? {
                     Node::ContainerEnd => return Ok(None),
@@ -628,7 +634,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         expect_assert(array_start, Node::ArrayStart)?;
 
         let rv = visitor.visit_seq(SeqVisitor { de: &mut self })?;
-        
+
         let res = self.tokenizer.next(false);
         let array_end = into_result(res, &self.tokenizer)?;
         expect_assert(array_end, Node::ContainerEnd)?;
@@ -680,21 +686,16 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 let res = self.de.tokenizer.next(true);
                 match into_result(res, &self.de.tokenizer)? {
                     Node::ContainerEnd => return Ok(None),
-                    n @ Node::ArrayStart
-                    | n @ Node::DictionaryStart
-                    | n @ Node::Integer(..) => {
+                    n @ Node::ArrayStart | n @ Node::DictionaryStart | n @ Node::Integer(..) => {
                         return Err(Error::expected_string(&self.de.tokenizer, &n));
                     }
-                    Node::Bytes(..) => {
-                        seed.deserialize(&mut *self.de).map(Some)
-                    }
+                    Node::Bytes(..) => seed.deserialize(&mut *self.de).map(Some),
                 }
             }
             fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
             where
                 V: de::DeserializeSeed<'de>,
             {
-
                 seed.deserialize(&mut *self.de)
             }
         }
@@ -702,10 +703,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         let res = self.tokenizer.next(false);
         let token = into_result(res, &self.tokenizer)?;
         expect_assert(token, Node::DictionaryStart)?;
-        
-        let rv = visitor.visit_map(MapVisitor {
-            de: &mut self,
-        })?;
+
+        let rv = visitor.visit_map(MapVisitor { de: &mut self })?;
 
         let res = self.tokenizer.next(false);
         let token = into_result(res, &self.tokenizer)?;
@@ -744,9 +743,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         let res = self.tokenizer.next(false);
         let node = into_result(res, &self.tokenizer)?;
         match node {
-            Node::DictionaryStart => {
-                visitor.visit_enum(EnumExtended { de: &mut self })
-            }
+            Node::DictionaryStart => visitor.visit_enum(EnumExtended { de: &mut self }),
             Node::Bytes(Cow::Borrowed(data)) => {
                 let data = str::from_utf8(data)?;
                 visitor.visit_enum(IntoDeserializer::into_deserializer(data))
@@ -755,10 +752,9 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 let data = String::from_utf8(data)?;
                 visitor.visit_enum(IntoDeserializer::into_deserializer(data))
             }
-            n @ Node::ArrayStart
-            | n @ Node::Integer(..) => {
+            n @ Node::ArrayStart | n @ Node::Integer(..) => {
                 return Err(Error::expected_string(&self.tokenizer, &n));
-            },
+            }
             Node::ContainerEnd => Err(Error::unexpected_container_end()),
         }
     }
@@ -926,19 +922,19 @@ impl<'de, 'a> de::VariantAccess<'de> for EnumExtended<'a, 'de> {
 
 #[cfg(test)]
 mod test {
-    use serde::{Serialize, Deserialize};
     use super::{IResult, Node, Tokenizer};
+    use serde::{Deserialize, Serialize};
     use std::borrow::Cow;
 
     #[derive(Serialize, Deserialize, Debug)]
     struct TorrentMeta {
         announce: String,
-        #[serde(rename="announce-list")]
+        #[serde(rename = "announce-list")]
         announce_list: Vec<Vec<String>>,
         comment: String,
-        #[serde(rename="created by")]
+        #[serde(rename = "created by")]
         created_by: String,
-        #[serde(rename="creation date")]
+        #[serde(rename = "creation date")]
         creation_date: u64,
         info: TorrentMetaInfo,
     }
@@ -946,7 +942,7 @@ mod test {
     #[derive(Serialize, Deserialize, Debug)]
     struct TorrentMetaInfo {
         files: Vec<TorrentMetaInfoFile>,
-        #[serde(rename="piece length")]
+        #[serde(rename = "piece length")]
         piece_length: u64,
         #[serde(with = "serde_bytes")]
         pieces: Vec<u8>,
@@ -999,6 +995,7 @@ mod test {
     }
 
     #[test]
+    #[rustfmt::skip] // keep tree-like structure
     fn torrent_example() {
         let bufs: &[&[u8]] = &[
             b"d",
@@ -1243,5 +1240,3 @@ impl<'a> fmt::Debug for BinStr<'a> {
         f.write_char('"')
     }
 }
-
-

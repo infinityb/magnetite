@@ -3,7 +3,7 @@ use std::io::Read;
 use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 use crate::CARGO_PKG_VERSION;
 
@@ -23,7 +23,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
+pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
@@ -52,4 +52,3 @@ pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
 
     Ok(())
 }
-

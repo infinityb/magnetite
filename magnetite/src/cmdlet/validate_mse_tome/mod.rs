@@ -1,18 +1,17 @@
 use std::fs::File;
-use std::path::Path;
 use std::io::{self, Read};
+use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use salsa20::XSalsa20;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher}; // SyncStreamCipherSeek
-use sha1::{Sha1, Digest};
+use salsa20::XSalsa20;
+use sha1::{Digest, Sha1};
 
 use crate::model::TorrentMeta;
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "validate-mse-tome";
-
 
 pub fn get_subcommand() -> App<'static, 'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
@@ -61,14 +60,12 @@ pub fn hex<'a>(scratch: &'a mut [u8], input: &[u8]) -> Option<&'a str> {
     Some(std::str::from_utf8(&scratch[..input.len() * 2]).unwrap())
 }
 
-pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
+pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
     let target_path = matches.value_of_os("target").unwrap();
     let target_path = Path::new(target_path).to_owned();
-
-    
 
     let mut buffer = Vec::new();
     let mut file = File::open(&torrent_file).unwrap();
@@ -84,7 +81,7 @@ pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
     } else {
         panic!("failed to load torrent file");
     }
-    
+
     let secret = matches.value_of("secret").unwrap();
     let key = GenericArray::from_slice(secret.as_bytes());
     let mut nonce_data = [0; 24];
@@ -101,14 +98,25 @@ pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
 
     let mut info_hash_hex = [0; 40];
     let info_hash_hex_str = hex(&mut info_hash_hex[..], &info_hash).unwrap();
-    println!("validating {} with {}", target_path.display(), info_hash_hex_str);
+    println!(
+        "validating {} with {}",
+        target_path.display(),
+        info_hash_hex_str
+    );
 
     let mut ok_pieces = 0;
     let mut checked_pieces = 0;
     for (idx, sha) in tm.info.pieces.chunks(20).enumerate() {
         let mut hasher = Sha1::new();
-        decrypt_and_sha(&mut buf, &mut cipher, tm.info.piece_length, &mut hasher, &mut input).unwrap();
-        
+        decrypt_and_sha(
+            &mut buf,
+            &mut cipher,
+            tm.info.piece_length,
+            &mut hasher,
+            &mut input,
+        )
+        .unwrap();
+
         let hash = hasher.result();
 
         let mut piece_sha_expect = [0; 40];
@@ -124,23 +132,37 @@ pub fn main(matches: &clap::ArgMatches)  -> Result<(), failure::Error> {
         checked_pieces += 1;
     }
 
-    println!("complete - {} of {} have passed.", ok_pieces, checked_pieces);
+    println!(
+        "complete - {} of {} have passed.",
+        ok_pieces, checked_pieces
+    );
 
     Ok(())
 }
 
-fn decrypt_and_sha<R>(b: &mut [u8], s: &mut XSalsa20, plen: u64, hasher: &mut Sha1, r: &mut R) -> io::Result<()>
-    where R: Read
+fn decrypt_and_sha<R>(
+    b: &mut [u8],
+    s: &mut XSalsa20,
+    plen: u64,
+    hasher: &mut Sha1,
+    r: &mut R,
+) -> io::Result<()>
+where
+    R: Read,
 {
     let mut rem_bytes: usize = plen as usize;
     while rem_bytes > 0 {
-        let rbuflen = if rem_bytes < b.len() { rem_bytes } else { b.len() };
+        let rbuflen = if rem_bytes < b.len() {
+            rem_bytes
+        } else {
+            b.len()
+        };
 
         let length = r.read(&mut b[..rbuflen])?;
         if length == 0 {
             break;
         }
-        
+
         s.apply_keystream(&mut b[..length]);
         hasher.input(&b[..length]);
         rem_bytes -= length;

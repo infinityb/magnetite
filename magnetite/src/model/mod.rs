@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use rand::RngCore;
-use serde::{Serialize, Deserialize};
-use sha1::{Sha1, Digest};
+use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 
 pub mod proto;
 
@@ -47,7 +47,6 @@ impl fmt::Display for StorageEngineCorruption {
 }
 
 impl std::error::Error for StorageEngineCorruption {}
-
 
 // --
 
@@ -104,7 +103,11 @@ impl TorrentID {
 
     pub fn from_slice(r: &[u8]) -> Result<TorrentID, failure::Error> {
         if r.len() != TORRENT_ID_LENGTH {
-            return Err(failure::format_err!("slice length is {}, must be {}", r.len(), TORRENT_ID_LENGTH));
+            return Err(failure::format_err!(
+                "slice length is {}, must be {}",
+                r.len(),
+                TORRENT_ID_LENGTH
+            ));
         }
         let mut out = Self::zero();
         out.as_mut_bytes().copy_from_slice(r);
@@ -118,21 +121,14 @@ impl TorrentID {
 
         let mut data = [0; TORRENT_ID_LENGTH];
         data.copy_from_slice(&hash_result[..]);
-        copy_from_byte_vec_nofill(&mut data, &[
-            b"YM-",
-            CARGO_PKG_VERSION.as_bytes(),
-            b"-",
-        ]);
+        copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
         TorrentID(data)
     }
 
     pub fn generate_peer_id_rng(r: &mut dyn RngCore) -> TorrentID {
         let mut data = [0; TORRENT_ID_LENGTH];
-        let rest = copy_from_byte_vec_nofill(&mut data, &[
-            b"YM-",
-            CARGO_PKG_VERSION.as_bytes(),
-            b"-",
-        ]);
+        let rest =
+            copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
         r.fill_bytes(rest);
         TorrentID(data)
     }
@@ -141,12 +137,12 @@ impl TorrentID {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentMeta {
     pub announce: String,
-    #[serde(rename="announce-list")]
+    #[serde(rename = "announce-list")]
     pub announce_list: Vec<Vec<String>>,
     pub comment: String,
-    #[serde(rename="created by")]
+    #[serde(rename = "created by")]
     pub created_by: String,
-    #[serde(rename="creation date")]
+    #[serde(rename = "creation date")]
     pub creation_date: u64,
     pub info: TorrentMetaInfo,
 }
@@ -155,7 +151,7 @@ pub struct TorrentMeta {
 pub struct TorrentMetaInfo {
     #[serde(default)]
     pub files: Vec<TorrentMetaInfoFile>,
-    #[serde(rename="piece length")]
+    #[serde(rename = "piece length")]
     pub piece_length: u64,
     #[serde(with = "serde_bytes")]
     pub pieces: Vec<u8>,
@@ -176,12 +172,11 @@ pub struct TorrentMetaWrapped {
     pub piece_shas: Arc<Vec<TorrentID>>,
 }
 
-
 impl TorrentMetaWrapped {
     pub fn from_bytes(buffer: &[u8]) -> Result<TorrentMetaWrapped, failure::Error> {
         let unpacked: bencode::Value = bencode::from_bytes(&buffer[..])?;
         let meta: TorrentMeta = bencode::from_bytes(&buffer[..])?;
-        
+
         let info_hash;
         if let bencode::Value::Dict(ref d) = unpacked {
             let mut hasher = Sha1::new();
@@ -232,7 +227,7 @@ struct PeerState {
     am_choked: bool,
     am_interested: bool,
     // A block is uploaded by a client when the client is not choking a peer,
-    // and that peer is interested in the client. 
+    // and that peer is interested in the client.
     peer_choked: bool,
     peer_interested: bool,
 }
@@ -302,7 +297,7 @@ impl BitField {
         }
     }
 
-    pub fn set(&mut self, index: u32, value: bool) {
+    pub fn set(&mut self, index: u32, _value: bool) {
         assert!(index < self.bit_length);
         let byte_index = (index / 8) as usize;
         let bit_index = (index % 8) as u8;

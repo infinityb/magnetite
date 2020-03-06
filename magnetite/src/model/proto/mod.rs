@@ -3,11 +3,11 @@ use bytes::{Bytes, BytesMut};
 
 use iresult::IResult;
 
-use super::{Truncated, BadHandshake, TorrentID};
+use super::{BadHandshake, TorrentID};
 
 // plan:
-// 
-// Try to use `Suggest Piece` from http://bittorrent.org/beps/bep_0006.html to 
+//
+// Try to use `Suggest Piece` from http://bittorrent.org/beps/bep_0006.html to
 // increase cloud cache hits, so we don't have to hit the backend storage
 // system as ahrd.
 
@@ -15,18 +15,17 @@ const RESERVED_SIZE: usize = 8;
 
 // the pstrlen and pstr bytes.
 const HANDSHAKE_PREFIX: &[u8] = b"\x13BitTorrent protocol";
-pub const HANDSHAKE_SIZE: usize = HANDSHAKE_PREFIX.len() +
-    RESERVED_SIZE + TorrentID::LENGTH + TorrentID::LENGTH;
-
+pub const HANDSHAKE_SIZE: usize =
+    HANDSHAKE_PREFIX.len() + RESERVED_SIZE + TorrentID::LENGTH + TorrentID::LENGTH;
 
 #[inline]
 fn too_short() -> failure::Error {
-     failure::format_err!("scratch buffer too short")
+    failure::format_err!("scratch buffer too short")
 }
 
 #[inline]
 fn funky_size() -> failure::Error {
-     failure::format_err!("funky size")
+    failure::format_err!("funky size")
 }
 
 #[derive(Debug)]
@@ -43,7 +42,10 @@ pub enum BytesCow<'a> {
 }
 
 impl<'a> BytesCow<'a> {
-    pub fn as_slice<'z>(&'z self) -> &'z [u8] where 'a: 'z {
+    pub fn as_slice<'z>(&'z self) -> &'z [u8]
+    where
+        'a: 'z,
+    {
         match *self {
             BytesCow::Owned(ref by) => by,
             BytesCow::Borrowed(by) => by,
@@ -73,7 +75,7 @@ pub enum Message<'a> {
     },
     Port {
         dht_port: u16,
-    }
+    },
 }
 
 pub fn serialize_long<'a>(
@@ -123,7 +125,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
         return IResult::ReadMore(4 - from.len());
     }
     let size = BigEndian::read_u32(&from[..]) as usize;
-    let total_size = size + 4;  // with header
+    let total_size = size + 4; // with header
     if from.len() < total_size {
         return IResult::ReadMore(total_size - from.len());
     }
@@ -139,28 +141,28 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
             }
             drop(from.split_to(size + 4));
             IResult::Done(Message::Choke)
-        },
+        }
         UNCHOKE_BYTE => {
             if size != 1 {
                 return IResult::Err(funky_size());
             }
             drop(from.split_to(size + 4));
             IResult::Done(Message::Unchoke)
-        },
+        }
         INTERESTED_BYTE => {
             if size != 1 {
                 return IResult::Err(funky_size());
             }
             drop(from.split_to(size + 4));
             IResult::Done(Message::Interested)
-        },
+        }
         UNINTERESTED_BYTE => {
             if size != 1 {
                 return IResult::Err(funky_size());
             }
             drop(from.split_to(size + 4));
             IResult::Done(Message::Uninterested)
-        },
+        }
         HAVE_BYTE => {
             if size != 5 {
                 return IResult::Err(funky_size());
@@ -169,14 +171,14 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
             drop(rest);
             drop(from.split_to(size + 4));
             IResult::Done(Message::Have { piece_id })
-        },
+        }
         BITFIELD_BYTE => {
             let mut message = from.split_to(size + 4);
             drop(message.split_to(5)); // remove header
             IResult::Done(Message::Bitfield {
                 field_data: BytesCow::Owned(message.freeze()),
             })
-        },
+        }
         REQUEST_BYTE => {
             if size != 13 {
                 return IResult::Err(funky_size());
@@ -191,7 +193,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
                 begin,
                 length,
             }))
-        },
+        }
         PIECE_BYTE => {
             let index = BigEndian::read_u32(&mut rest[1..]);
             let begin = BigEndian::read_u32(&mut rest[5..]);
@@ -203,7 +205,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
                 begin,
                 data: BytesCow::Owned(message.freeze()),
             })
-        },
+        }
         CANCEL_BYTE => {
             if size != 13 {
                 return IResult::Err(funky_size());
@@ -217,7 +219,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
                 begin,
                 length,
             }))
-        },
+        }
         PORT_BYTE => {
             if size != 3 {
                 return IResult::Err(funky_size());
@@ -226,10 +228,8 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
             drop(rest);
             drop(from.split_to(size + 4));
             IResult::Done(Message::Port { dht_port })
-        },
-        other => {
-            IResult::Err(failure::format_err!("bad type byte {:?}", other))
         }
+        other => IResult::Err(failure::format_err!("bad type byte {:?}", other)),
     }
 }
 
@@ -241,7 +241,7 @@ pub fn serialize<'a>(scratch: &'a mut [u8], msg: &Message) -> Result<&'a [u8], f
             }
             BigEndian::write_u32(scratch, 0);
             Ok(&scratch[..4])
-        },
+        }
         Message::Choke => serialize_short(scratch, CHOKE_BYTE, &[]),
         Message::Unchoke => serialize_short(scratch, UNCHOKE_BYTE, &[]),
         Message::Interested => serialize_short(scratch, INTERESTED_BYTE, &[]),
@@ -250,37 +250,41 @@ pub fn serialize<'a>(scratch: &'a mut [u8], msg: &Message) -> Result<&'a [u8], f
             let mut buf = [0; 4];
             BigEndian::write_u32(&mut buf[..], piece_id);
             serialize_short(scratch, HAVE_BYTE, &buf)
-        },
+        }
         Message::Bitfield { ref field_data } => {
             // FIXME: convert to iovec
             serialize_short(scratch, BITFIELD_BYTE, field_data.as_slice())
-        },
+        }
         Message::Request(ref ps) => {
             let mut buf = [0; 12];
             BigEndian::write_u32(&mut buf[0..], ps.index);
             BigEndian::write_u32(&mut buf[4..], ps.begin);
             BigEndian::write_u32(&mut buf[8..], ps.length);
             serialize_short(scratch, REQUEST_BYTE, &buf)
-        },
+        }
         Message::Cancel(ref ps) => {
             let mut buf = [0; 12];
             BigEndian::write_u32(&mut buf[0..], ps.index);
             BigEndian::write_u32(&mut buf[4..], ps.begin);
             BigEndian::write_u32(&mut buf[8..], ps.length);
             serialize_short(scratch, CANCEL_BYTE, &buf)
-        },
-        Message::Piece { index, begin, ref data } => {
+        }
+        Message::Piece {
+            index,
+            begin,
+            ref data,
+        } => {
             // FIXME: convert to iovec
             let mut buf = [0; 8];
             BigEndian::write_u32(&mut buf[0..], index);
             BigEndian::write_u32(&mut buf[4..], begin);
             serialize_long(scratch, PIECE_BYTE, &buf, data.as_slice())
-        },
+        }
         Message::Port { dht_port } => {
             let mut buf = [0; 2];
             BigEndian::write_u16(&mut buf[..], dht_port);
             serialize_short(scratch, PORT_BYTE, &buf)
-        },
+        }
     }
 }
 
@@ -345,9 +349,9 @@ impl Handshake {
             IResult::Done((length, v)) => {
                 drop(data.split_to(length));
                 IResult::Done(v)
-            },
+            }
             IResult::ReadMore(v) => IResult::ReadMore(v),
-            IResult::Err(err) =>IResult::Err(err),
+            IResult::Err(err) => IResult::Err(err),
         }
     }
 

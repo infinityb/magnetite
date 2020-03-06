@@ -1,4 +1,4 @@
-use serde::{ser, de};
+use serde::{de, ser};
 use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,28 +26,19 @@ impl<'a> fmt::Debug for DictDebugger<'a> {
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Value::Integer(v) => {
-                f.debug_tuple("Integer").field(&v).finish()
-            }
-            Value::UInteger(v) => {
-                f.debug_tuple("UInteger").field(&v).finish()
-            }
-            Value::Bytes(ref v) => {
-                f.debug_tuple("Bytes").field(&BinStr(v)).finish()
-            }
-            Value::Array(ref v) => {
-                f.debug_tuple("Array").field(v).finish()
-            }
-            Value::Dict(ref v) => {
-                f.debug_tuple("Dict").field(&DictDebugger(v)).finish()
-            }
+            Value::Integer(v) => f.debug_tuple("Integer").field(&v).finish(),
+            Value::UInteger(v) => f.debug_tuple("UInteger").field(&v).finish(),
+            Value::Bytes(ref v) => f.debug_tuple("Bytes").field(&BinStr(v)).finish(),
+            Value::Array(ref v) => f.debug_tuple("Array").field(v).finish(),
+            Value::Dict(ref v) => f.debug_tuple("Dict").field(&DictDebugger(v)).finish(),
         }
     }
 }
 
 impl ser::Serialize for Value {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: ser::Serializer,
+    where
+        S: ser::Serializer,
     {
         match *self {
             Value::Integer(v) => serializer.serialize_i64(v),
@@ -71,7 +62,8 @@ impl ser::Serialize for Value {
 impl<'de> de::Deserialize<'de> for Value {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Value, D::Error>
-        where D: de::Deserializer<'de>,
+    where
+        D: de::Deserializer<'de>,
     {
         struct ValueVisitor;
 
@@ -94,7 +86,8 @@ impl<'de> de::Deserialize<'de> for Value {
 
             #[inline]
             fn visit_seq<A>(self, mut seq: A) -> Result<Value, A::Error>
-                where A: serde::de::SeqAccess<'de>,
+            where
+                A: serde::de::SeqAccess<'de>,
             {
                 let mut values = Vec::new();
                 while let Some(v) = seq.next_element::<Value>()? {
@@ -105,7 +98,8 @@ impl<'de> de::Deserialize<'de> for Value {
 
             #[inline]
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-                where A: serde::de::MapAccess<'de>, 
+            where
+                A: serde::de::MapAccess<'de>,
             {
                 let mut values: BTreeMap<Vec<u8>, Value> = BTreeMap::new();
                 while let Some(k) = map.next_key::<ByteBuf>()? {
@@ -139,4 +133,3 @@ impl<'de> de::Deserialize<'de> for Value {
         deserializer.deserialize_any(ValueVisitor)
     }
 }
-
