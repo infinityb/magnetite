@@ -1,4 +1,3 @@
-#![feature(libc, slice_concat_ext)] 
 extern crate libc;
 extern crate nix;
 
@@ -77,22 +76,25 @@ impl ops::BitOr for Mode {
     }
 }
 
-pub fn fallocate<F: AsRawFd>(fd: &mut F, mode: Mode, offset: i64, len: i64) -> Result<(), nix::Error> {
-    let rv = unsafe {
-        ffi::fallocate(fd.as_raw_fd(), mode.0, offset, len)
-    };
+pub fn fallocate<F: AsRawFd>(
+    fd: &mut F,
+    mode: Mode,
+    offset: i64,
+    len: i64,
+) -> Result<(), nix::Error> {
+    let rv = unsafe { ffi::fallocate(fd.as_raw_fd(), mode.0, offset, len) };
     match rv {
         0 => Ok(()),
         -1 => Err(nix::Error::last()),
-        _ => panic!("fallocate returned unhandled value: {}", rv)
+        _ => panic!("fallocate returned unhandled value: {}", rv),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{fallocate, Mode};
-    use std::io::{self, Read, Write, Seek, SeekFrom};
     use std::fs::OpenOptions;
+    use std::io::{self, Read, Seek, SeekFrom, Write};
 
     #[test]
     fn it_works() {

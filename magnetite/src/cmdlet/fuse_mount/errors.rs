@@ -39,7 +39,7 @@ impl fmt::Display for NoEntityExists {
 
 impl std::error::Error for NoEntityExists {}
 
-// -- 
+// --
 
 #[derive(Debug)]
 pub struct InvalidPath;
@@ -52,7 +52,7 @@ impl fmt::Display for InvalidPath {
 
 impl std::error::Error for InvalidPath {}
 
-// -- 
+// --
 
 #[derive(Debug)]
 pub struct FilesystemIntegrityError;

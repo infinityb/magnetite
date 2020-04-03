@@ -1,43 +1,42 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::ffi::OsString;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
-use std::collections::HashMap;
-use std::io::Read;
-use std::fs::File;
-use std::path::PathBuf;
 
 use bytes::Bytes;
+use clap::{App, Arg, SubCommand};
+use fuse::{
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, Request,
+};
+use libc::{c_int, EIO, ENOENT, ENOTDIR};
+use lru::LruCache;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::NewStreamCipher;
 use salsa20::XSalsa20;
-use clap::{App, Arg, SubCommand};
-use fuse::{
-    ReplyEmpty, ReplyOpen,
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
-};
-use libc::{c_int, ENOENT, ENOTDIR, EIO};
 use sha1::Digest;
+use slab::Slab;
+use tokio::fs::File as TokioFile;
 use tokio::net::UnixListener;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
-use tokio::fs::File as TokioFile;
-use lru::LruCache;
-use slab::Slab;
 use tracing::{event, Level};
 
 mod errors;
 
-use crate::storage::PieceStorageEngine;
-pub use self::errors::{InvalidRootInode, NotADirectory, NoEntityExists, InvalidPath, FilesystemIntegrityError};
+pub use self::errors::{
+    FilesystemIntegrityError, InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory,
+};
 use crate::model::{BitField, TorrentID, TorrentMetaWrapped};
-use crate::storage::{PieceFileStorageEngine, PieceFileStorageEngineVerifyMode, PieceFileStorageEngineLockables};
-
+use crate::storage::PieceStorageEngine;
+use crate::storage::{
+    PieceFileStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
+};
 
 pub mod fuse_api {
     tonic::include_proto!("magnetite.api.fuse");
@@ -61,8 +60,7 @@ struct DirectoryChild {
     inode: u64,
 }
 
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct FileData {
     // length is in FileAttr#size
     info_hash: TorrentID,
@@ -108,7 +106,7 @@ enum OpenState {
         directory_inode: u64,
         last_sent_inode: u64,
         // next_index: usize,
-    }
+    },
 }
 
 #[derive(Debug)]
@@ -150,7 +148,7 @@ fn sensible_directory_file_entry(parent: u64, ino: u64) -> FileEntry {
         data: FileEntryData::Dir(Directory {
             parent: parent,
             child_inodes: Default::default(),
-        })
+        }),
     }
 }
 
@@ -159,7 +157,10 @@ fn fs_impl_mkdir<T>(
     parent: u64,
     name: T,
     owner: TorrentID,
-) -> Result<u64, failure::Error> where T: AsRef<OsStr> {
+) -> Result<u64, failure::Error>
+where
+    T: AsRef<OsStr>,
+{
     let mut affected_inodes = Vec::new();
 
     let target = fs.inodes.get_mut(&parent).ok_or(NoEntityExists)?;
@@ -171,10 +172,10 @@ fn fs_impl_mkdir<T>(
             if chino.file_name == name.as_ref() {
                 let inode = chino.inode;
                 affected_inodes.push(inode);
-                
+
                 drop(chino);
                 drop(dir);
-                
+
                 for v in affected_inodes {
                     fs.info_hash_damage.insert((owner, v));
                 }
@@ -184,7 +185,7 @@ fn fs_impl_mkdir<T>(
 
         let created_inode = fs.inode_seq;
         fs.inode_seq += 1;
-        
+
         dir.child_inodes.push(DirectoryChild {
             file_name: name.as_ref().to_owned(),
             ft: FileType::Directory,
@@ -193,8 +194,10 @@ fn fs_impl_mkdir<T>(
         affected_inodes.push(created_inode);
         drop(dir);
 
-        fs.inodes.insert(created_inode,
-            sensible_directory_file_entry(parent_inode, created_inode));
+        fs.inodes.insert(
+            created_inode,
+            sensible_directory_file_entry(parent_inode, created_inode),
+        );
 
         for v in affected_inodes {
             fs.info_hash_damage.insert((owner, v));
@@ -209,10 +212,12 @@ fn fs_impl_mkdir<T>(
 impl FilesystemImplMutable {
     #[inline]
     fn traverse_path<I, T>(&self, parent: u64, path_parts: I) -> Result<&FileEntry, failure::Error>
-        where I: Iterator<Item=T>, T: AsRef<OsStr>
+    where
+        I: Iterator<Item = T>,
+        T: AsRef<OsStr>,
     {
-        use std::path::Component;
         use smallvec::SmallVec;
+        use std::path::Component;
 
         let mut entry_path = SmallVec::<[&FileEntry; 16]>::new();
         let root = self.inodes.get(&parent).ok_or(InvalidRootInode)?;
@@ -235,7 +240,9 @@ impl FilesystemImplMutable {
                         for chino in &dir.child_inodes {
                             if chino.file_name == pp {
                                 found_file = true;
-                                let next_node = self.inodes.get(&chino.inode)
+                                let next_node = self
+                                    .inodes
+                                    .get(&chino.inode)
                                     .ok_or(FilesystemIntegrityError)?;
                                 entry_path.push(next_node);
                             }
@@ -269,7 +276,7 @@ impl FilesystemImplMutable {
             let mut parent = 1;
             parent = fs_impl_mkdir(self, parent, &tm.meta.info.name, tm.info_hash)?;
             assert_path.push(parent);
-            
+
             for p in dir_path.components() {
                 parent = fs_impl_mkdir(self, parent, p, tm.info_hash)?;
                 assert_path.push(parent);
@@ -349,7 +356,6 @@ struct FilesystemImpl {
     mutable: Arc<Mutex<FilesystemImplMutable>>,
 }
 
-
 const HELLO_TXT_CONTENT: &str = "Hello World!\n";
 
 const TTL: std::time::Duration = std::time::Duration::from_secs(120);
@@ -374,7 +380,11 @@ impl Filesystem for FilesystemImpl {
                     } else if err.downcast_ref::<NotADirectory>().is_some() {
                         reply.error(ENOTDIR);
                     } else {
-                        event!(Level::ERROR, "Responding with EIO due to unexpected error: {}", err);
+                        event!(
+                            Level::ERROR,
+                            "Responding with EIO due to unexpected error: {}",
+                            err
+                        );
                         reply.error(EIO);
                     }
                 }
@@ -419,7 +429,6 @@ impl Filesystem for FilesystemImpl {
                 }
             }
             if let Some(tf) = target_file {
-
                 let storage_engine = fs.storage_backends.get(&tf.info_hash).unwrap().clone();
                 let piece_file_offset = tf.torrent_rel_offset + offset;
                 let piece_index = (piece_file_offset / storage_engine.get_piece_length()) as u32;
@@ -434,10 +443,14 @@ impl Filesystem for FilesystemImpl {
                 } else {
                     drop(fs);
 
-                    piece_data = storage_engine.get_piece(&tf.info_hash, piece_index as u32).await.unwrap();
+                    piece_data = storage_engine
+                        .get_piece(&tf.info_hash, piece_index as u32)
+                        .await
+                        .unwrap();
 
                     let mut fs = mutable.lock().await;
-                    fs.piece_cache.put((tf.info_hash, piece_index), piece_data.clone());
+                    fs.piece_cache
+                        .put((tf.info_hash, piece_index), piece_data.clone());
                     drop(fs);
                 }
 
@@ -448,7 +461,7 @@ impl Filesystem for FilesystemImpl {
                 reply.data(interesting_data);
             } else {
                 reply.error(ENOENT);
-            }            
+            }
         });
     }
 
@@ -581,55 +594,82 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mut rt = Runtime::new()?;
     let mut sources = Vec::new();
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-0.tome").to_owned(),
         secret: "C3EsrGPe62jQx6U6Z6JTxCcWKSWpA4G2".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-1.tome").to_owned(),
         secret: "RhdmQRQZzbSwbqyKk4T4tzxcQ4BG6V9b".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-2.tome").to_owned(),
         secret: "afqR5ALeMtoyYej9UNTQi7YEM4dtdbjQ".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent")
-            .to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-3.tome").to_owned(),
         secret: "4r86Ky8jQQt3JQncXZGg2zBQsNXbdjb9".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-4.tome").to_owned(),
         secret: "g9e8mSsydbxKsSqgU6oCoaqpVybfrGfN".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-5.tome").to_owned(),
         secret: "bKDMbbPwuQiY7grxjdaEaQSq53hkhuSK".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent")
-            .to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-6.tome").to_owned(),
         secret: "xDY4RGFDtzk5CUM8N77RBeQ7wB9fujej".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-7.tome").to_owned(),
         secret: "qEvcKZiR8ynHC54SeETgrZVjoKGCUke9".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-8.tome").to_owned(),
         secret: "4jJZSpMwrzVSNZBZf9RqaR4UxDYy3QT7".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent")
-            .to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-9.tome").to_owned(),
         secret: "Y2scZxSQpbxktS7fKR9YpL8uzrh2bSSZ".to_string(),
     });
@@ -697,11 +737,16 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         builder.set_crypto(XSalsa20::new(&key, &nonce));
         let storage_engine = builder.build(piece_file);
 
-        println!("loaded {} files from torrent file: {:?}", torrent_meta.meta.info.files.len(), fs_impl.add_torrent(&torrent_meta));
-        fs_impl.storage_backends.insert(torrent_meta.info_hash, storage_engine);
+        println!(
+            "loaded {} files from torrent file: {:?}",
+            torrent_meta.meta.info.files.len(),
+            fs_impl.add_torrent(&torrent_meta)
+        );
+        fs_impl
+            .storage_backends
+            .insert(torrent_meta.info_hash, storage_engine);
         println!("added info_hash: {:?}", info_hash);
     }
-
 
     rt.block_on(async {
         let _uds = UnixListener::bind(&control_socket)?;
@@ -715,7 +760,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             let fs_impl = FilesystemImpl {
                 mutable: Arc::new(Mutex::new(fs_impl)),
             };
-
 
             fuse::mount(fs_impl, &mount_point, &options).unwrap();
         })

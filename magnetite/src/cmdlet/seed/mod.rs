@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::net::SocketAddr;
 use tokio::time::Instant;
-use std::net::IpAddr;
-
 
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
@@ -28,9 +27,12 @@ use crate::model::proto::{
     deserialize, serialize, BytesCow, Handshake, Message, PieceSlice, HANDSHAKE_SIZE,
 };
 use crate::model::MagnetiteError;
-use crate::model::{BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated, BadHandshake};
+use crate::model::{
+    BadHandshake, BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated,
+};
 use crate::storage::{
-    PieceFileStorageEngine, PieceStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
+    PieceFileStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
+    PieceStorageEngine,
 };
 use crate::CARGO_PKG_VERSION;
 
@@ -219,9 +221,7 @@ fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSals
     }
 }
 
-
 struct TorrentDownloadStateManager {
-    
     torrents: HashMap<TorrentID, TorrentDownloadState>,
 }
 
@@ -233,7 +233,12 @@ struct TorrentDownloadState {
 }
 
 impl TorrentDownloadStateManager {
-    fn accept_peer(&self, socket_addr: &IpAddr, peer_id: &TorrentID, info_hash: &TorrentID) -> bool {
+    fn accept_peer(
+        &self,
+        socket_addr: &IpAddr,
+        peer_id: &TorrentID,
+        info_hash: &TorrentID,
+    ) -> bool {
         if let Some(ds) = self.torrents.get(info_hash) {
             match ds.known_peer_ids.get(socket_addr) {
                 Some(Some(pid)) => peer_id == pid,
@@ -251,7 +256,7 @@ async fn start_connection(
     socket: &mut TcpStream,
     rbuf: &mut BytesMut,
     self_pid: &TorrentID,
-    outgoing: Option<&TorrentID>
+    outgoing: Option<&TorrentID>,
 ) -> Result<Handshake, MagnetiteError> {
     let remote_handshake;
     let mut hs_buf = [0; HANDSHAKE_SIZE];
@@ -265,16 +270,21 @@ async fn start_connection(
 
         let addr = socket.peer_addr()?.ip();
 
-        if !ts.accept_peer(&addr, &remote_handshake.peer_id, &remote_handshake.info_hash) {
+        if !ts.accept_peer(
+            &addr,
+            &remote_handshake.peer_id,
+            &remote_handshake.info_hash,
+        ) {
             return Err(BadHandshake::unknown_info_hash(&remote_handshake.info_hash).into());
         }
 
-        let hs = Handshake::serialize_bytes(&mut hs_buf[..], &remote_handshake.info_hash, self_pid, &[]).unwrap();
+        let hs =
+            Handshake::serialize_bytes(&mut hs_buf[..], &remote_handshake.info_hash, self_pid, &[])
+                .unwrap();
         socket.write_all(&hs).await?;
     }
     Ok(remote_handshake)
 }
-
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     struct TorrentFactory {
@@ -302,55 +312,82 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     };
     let mut sources = Vec::new();
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-0.tome").to_owned(),
         secret: "C3EsrGPe62jQx6U6Z6JTxCcWKSWpA4G2".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-1.tome").to_owned(),
         secret: "RhdmQRQZzbSwbqyKk4T4tzxcQ4BG6V9b".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-2.tome").to_owned(),
         secret: "afqR5ALeMtoyYej9UNTQi7YEM4dtdbjQ".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent")
-            .to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-3.tome").to_owned(),
         secret: "4r86Ky8jQQt3JQncXZGg2zBQsNXbdjb9".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-4.tome").to_owned(),
         secret: "g9e8mSsydbxKsSqgU6oCoaqpVybfrGfN".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-5.tome").to_owned(),
         secret: "bKDMbbPwuQiY7grxjdaEaQSq53hkhuSK".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent")
-            .to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-6.tome").to_owned(),
         secret: "xDY4RGFDtzk5CUM8N77RBeQ7wB9fujej".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-7.tome").to_owned(),
         secret: "qEvcKZiR8ynHC54SeETgrZVjoKGCUke9".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent").to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-8.tome").to_owned(),
         secret: "4jJZSpMwrzVSNZBZf9RqaR4UxDYy3QT7".to_string(),
     });
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent")
-            .to_owned(),
+        torrent_file: Path::new(
+            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent",
+        )
+        .to_owned(),
         source_file: Path::new("/Volumes/home/danbooru2019-9.tome").to_owned(),
         secret: "Y2scZxSQpbxktS7fKR9YpL8uzrh2bSSZ".to_string(),
     });

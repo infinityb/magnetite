@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{Read, SeekFrom};
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -13,15 +13,17 @@ use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher, SyncStreamCipher
 use salsa20::XSalsa20;
 use sha1::{Digest, Sha1};
 use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use tokio::sync::{oneshot, broadcast};
-use tokio::sync::Mutex;
 use bytes::BytesMut;
+use tokio::sync::{Mutex, broadcast, oneshot};
 
+use super::{PieceStorageEngine, PieceStorageEngineMut, WriteChunkResponse};
+use crate::model::{
+    BitField, MagnetiteError, ProtocolViolation, StorageEngineCorruption, TorrentID,
+    TorrentMetaWrapped,
+};
 use crate::storage::CompletionEvent;
-use crate::model::{TorrentMetaWrapped, MagnetiteError, BitField, ProtocolViolation, StorageEngineCorruption, TorrentID};
-use super::{WriteChunkResponse, PieceStorageEngine, PieceStorageEngineMut};
 
 pub const DOWNLOAD_CHUNK_SIZE: u32 = 16 * 1024;
 
@@ -133,7 +135,6 @@ impl PieceFileStorageEngineBuilder {
     }
 }
 
-
 impl PieceFileStorageEngine {
     #[inline]
     pub fn get_piece_length(&self) -> u64 {
@@ -181,7 +182,8 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
         piece_id: u32,
         chunk_offset: u32,
         data: Bytes,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>>
+    {
         let info_hash = self.info_hash;
         let lockables = Arc::clone(&self.lockables);
         let piece_shas = Arc::clone(&self.piece_shas);
@@ -196,7 +198,8 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
             }
             let chunk_id = chunk_offset / DOWNLOAD_CHUNK_SIZE;
 
-            let (piece_offset_start, piece_offset_end) = compute_offset(piece_id, piece_length, total_length);
+            let (piece_offset_start, piece_offset_end) =
+                compute_offset(piece_id, piece_length, total_length);
 
             let chunk_count = {
                 let true_piece_length = piece_offset_end - piece_offset_start;
@@ -233,7 +236,7 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
 
                 cr.seek(chunk_offset_start);
                 cr.apply_keystream(&mut to_write_crypto_owned[..]);
-                
+
                 to_write = &to_write_crypto_owned[..];
             } else {
                 to_write = &data[..];
@@ -242,10 +245,13 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
             locked.piece_file.write_all(to_write).await?;
 
             let (finish_tx, finish_rx) = broadcast::channel(1);
-            let prog = locked.in_progress.entry(piece_id).or_insert_with(|| InProgress {
-                chunks: BitField::none(chunk_count),
-                completion: finish_tx,
-            });
+            let prog = locked
+                .in_progress
+                .entry(piece_id)
+                .or_insert_with(|| InProgress {
+                    chunks: BitField::none(chunk_count),
+                    completion: finish_tx,
+                });
 
             prog.chunks.set(chunk_id, true);
 
@@ -272,7 +278,7 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
                 let mut hasher = Sha1::new();
                 hasher.input(&chonker);
                 let sha = hasher.result();
-                
+
                 // if we fail, the bitfield must be reset, so there's no point in keeping
                 // the entry anymore.  We'll regenerate it if needed.  If we've succeeded,
                 // then the piece is no longer in progress.
@@ -285,20 +291,20 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
                 if sha[..] == piece_sha.0[..] {
                     locked.completion.set(piece_id, true);
                     piece_completed = true;
-
                 } else {
                     piece_failed_validation = true;
                 }
             }
 
             drop(locked);
-            
+
             Ok(WriteChunkResponse {
                 piece_completed,
                 piece_failed_validation,
                 completion: finish_rx,
             })
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
@@ -318,13 +324,16 @@ impl PieceStorageEngine for PieceFileStorageEngine {
                 .get(piece_id as usize)
                 .ok_or_else(|| ProtocolViolation)?;
 
-            let (piece_offset_start, piece_offset_end) = compute_offset(piece_id, piece_length, total_length);
+            let (piece_offset_start, piece_offset_end) =
+                compute_offset(piece_id, piece_length, total_length);
 
             let mut locked = lockables.lock().await;
 
             let run_verify = match locked.verify_piece {
                 PieceFileStorageEngineVerifyState::Never => false,
-                PieceFileStorageEngineVerifyState::First { ref verified } => !verified.has(piece_id),
+                PieceFileStorageEngineVerifyState::First { ref verified } => {
+                    !verified.has(piece_id)
+                }
                 PieceFileStorageEngineVerifyState::Always => true,
             };
 
@@ -355,6 +364,7 @@ impl PieceStorageEngine for PieceFileStorageEngine {
             }
 
             Ok(Bytes::from(chonker))
-        }.boxed()
+        }
+        .boxed()
     }
 }

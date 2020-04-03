@@ -1,13 +1,12 @@
-use std::collections::{HashSet, BTreeMap, VecDeque, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use smallvec::SmallVec;
 use smallvec::Array;
+use smallvec::SmallVec;
 
 use crate::model::proto::Message;
-use crate::model::{BitField, TorrentID};
 use crate::model::proto::PieceSlice;
-
+use crate::model::{BitField, TorrentID};
 
 #[derive(Debug)]
 struct PieceSet {
@@ -66,7 +65,7 @@ impl PieceSet {
     fn cleanup_range(&mut self, start_key: u32, length: u32) {
         // we need to find entries that newly overlap with the bulk insertion.
         let new_end = start_key + length;
-        while let Some((k, v)) = self.pieces.range_mut(start_key..start_key+length).next() {
+        while let Some((k, v)) = self.pieces.range_mut(start_key..start_key + length).next() {
             let start = *k;
             let end = *k + *v;
             drop((k, v));
@@ -166,7 +165,6 @@ impl<'a> Iterator for PieceSetIter<'a> {
     }
 }
 
-
 // struct PieceSetRandom<'a> {
 //     piece_set: &'a PieceSet,
 //     indices: rand::seq::index::IndexVecIntoIter,
@@ -180,7 +178,6 @@ impl<'a> Iterator for PieceSetIter<'a> {
 //         self.indices
 //     }
 // }
-
 
 struct SummingBitField {
     damage_counter: u16,
@@ -210,7 +207,6 @@ fn sub_one_clamping_lob_u8(value: u8) -> u8 {
     }
     return value - 1;
 }
-
 
 impl SummingBitField {
     pub fn add_bitfield(&mut self, bf: &BitField) {
@@ -273,7 +269,8 @@ impl DefaultPieceSelectionStrategy {
     }
 
     pub fn get_work<A>(&mut self, bytes: u64, into: &mut SmallVec<A>)
-        where A: Array<Item=(TorrentID, u32, u32)>
+    where
+        A: Array<Item = (TorrentID, u32, u32)>,
     {
         // find the 100 rarest pieces which are of high priority. if we don't
         // yet have 100 pieces, continue the same logic but with normal
@@ -281,7 +278,7 @@ impl DefaultPieceSelectionStrategy {
         let mut submitted_bytes = 0;
         let mut high_p = self.high_priority.iter();
         let mut normal_p = self.normal_priority.iter();
-        
+
         // into.append(())
         // DOWNLOAD_CHUNK_SIZE
         while submitted_bytes < bytes {
@@ -318,7 +315,8 @@ impl SlidingWindowRate {
             total_value += value;
         }
 
-        self.last_value_per_second = (1_000_000 * u128::from(total_value) / (newest.0 - oldest.0).as_micros()) as u64;
+        self.last_value_per_second =
+            (1_000_000 * u128::from(total_value) / (newest.0 - oldest.0).as_micros()) as u64;
     }
 
     pub fn get_rate_per_second(&self) -> u64 {
@@ -392,19 +390,19 @@ impl PeerState {
                         self.peer_bitfield.data = field_data.as_slice().to_vec().into_boxed_slice();
                     }
                 }
-                Message::Piece { data, ..  } => {
+                Message::Piece { data, .. } => {
                     download_acc += data.as_slice().len() as u64;
                 }
-                Message::Request(..)
-                | Message::Cancel(..)
-                | Message::Port { .. } => (),
+                Message::Request(..) | Message::Cancel(..) | Message::Port { .. } => (),
             }
         }
         if have_acc > 0 {
-            self.peer_estimated_download_rate.add_data(Instant::now(), have_acc);
+            self.peer_estimated_download_rate
+                .add_data(Instant::now(), have_acc);
         }
         if download_acc > 0 {
-            self.peer_download_rate.add_data(Instant::now(), download_acc);
+            self.peer_download_rate
+                .add_data(Instant::now(), download_acc);
         }
     }
 }
@@ -425,4 +423,3 @@ pub struct ChunkLocation {
     chunk_offset: u32,
     chunk_length: u32,
 }
-

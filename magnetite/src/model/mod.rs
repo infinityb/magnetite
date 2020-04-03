@@ -1,12 +1,12 @@
-use std::io;
 use std::fmt;
-use std::sync::Arc;
+use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use failure::Fail;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use failure::Fail;
 
 pub mod proto;
 
@@ -59,7 +59,6 @@ impl From<io::Error> for MagnetiteError {
         MagnetiteError::IoError { kind: e.kind() }
     }
 }
-
 
 //
 
@@ -122,7 +121,7 @@ impl BadHandshake {
 
     pub fn unknown_info_hash(ih: &TorrentID) -> BadHandshake {
         BadHandshake {
-            reason: BadHandshakeReason::UnknownInfoHash(*ih)
+            reason: BadHandshakeReason::UnknownInfoHash(*ih),
         }
     }
 }
@@ -152,7 +151,6 @@ impl TorrentID {
 
 impl fmt::Debug for TorrentID {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-
         f.debug_tuple("TorrentID")
             .field(&bencode::HexStr(self.as_bytes()))
             .finish()
@@ -182,7 +180,7 @@ impl TorrentID {
                 return false;
             }
         }
-        return true
+        return true;
     }
 
     pub fn from_slice(r: &[u8]) -> Result<TorrentID, failure::Error> {
@@ -245,21 +243,24 @@ pub struct TorrentMetaInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentMetaInfoFile {
     pub length: u64,
-    #[serde(with="bt_pathbuf")]
+    #[serde(with = "bt_pathbuf")]
     pub path: PathBuf,
 }
 
 mod bt_pathbuf {
     use std::borrow::Cow;
-    use std::path::{Path, PathBuf, Component};
     use std::fmt;
+    use std::path::{Component, Path, PathBuf};
 
-    use serde::de::{self, SeqAccess, Visitor, Deserializer};
-    use serde::ser::{self, Serializer, SerializeSeq};
+    use serde::de::{self, Deserializer, SeqAccess, Visitor};
+    use serde::ser::{self, SerializeSeq, Serializer};
 
-    pub fn serialize<S>(buf: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    pub fn serialize<S>(buf: &PathBuf, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         let mut seq = serializer.serialize_seq(Some(buf.components().count()))?;
-        
+
         for co in buf.components() {
             match co {
                 Component::Prefix(..) | Component::RootDir => {
@@ -291,7 +292,7 @@ mod bt_pathbuf {
             A: SeqAccess<'de>,
         {
             let mut buf = PathBuf::new();
-            
+
             let mut observed_element = false;
             while let Some(part) = seq.next_element::<Cow<Path>>()? {
                 buf.push(part);
@@ -305,7 +306,10 @@ mod bt_pathbuf {
         }
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error> where D: Deserializer<'de> {
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         deserializer.deserialize_seq(_Visitor)
     }
 }
@@ -499,7 +503,6 @@ impl BitField {
     }
 }
 
-
 pub struct Iter<'a> {
     parent: std::slice::Iter<'a, u8>,
     bit_length: u32,
@@ -528,4 +531,3 @@ impl<'a> Iterator for Iter<'a> {
         }
     }
 }
-

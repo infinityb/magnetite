@@ -230,7 +230,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
             drop(from.split_to(size + 4));
             IResult::Done(Message::Port { dht_port })
         }
-        other => IResult::Err(MagnetiteError::ProtocolViolation)
+        other => IResult::Err(MagnetiteError::ProtocolViolation),
     }
 }
 

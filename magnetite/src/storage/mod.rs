@@ -1,18 +1,16 @@
-use std::pin::Pin;
 use bytes::Bytes;
+use std::pin::Pin;
 use tokio::sync::broadcast;
 
 mod piece_file;
 mod remote_magnetite;
 
-use crate::model::TorrentID;
-use crate::model::MagnetiteError;
 pub use self::piece_file::{
-    PieceFileStorageEngine,
-    PieceFileStorageEngineLockables,
-    PieceFileStorageEngineVerifyMode,
+    PieceFileStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
     DOWNLOAD_CHUNK_SIZE,
 };
+use crate::model::MagnetiteError;
+use crate::model::TorrentID;
 
 pub trait PieceStorageEngine {
     fn get_piece(

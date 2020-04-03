@@ -10,14 +10,14 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
-use sha1::{Digest};
+use sha1::Digest;
 use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncSeekExt};
+use tokio::io::AsyncSeekExt;
 
 use tokio::sync::Mutex;
 
-use crate::model::{ProtocolViolation, TorrentID};
 use super::PieceStorageEngine;
+use crate::model::{ProtocolViolation, TorrentID};
 
 pub const DOWNLOAD_CHUNK_SIZE: usize = 16 * 1024;
 
@@ -36,10 +36,10 @@ pub struct Inflight {
 }
 
 impl Inflight {
-    pub fn complete(self) -> impl std::future::Future<Output = Result<Bytes, failure::Error>> + Send {
-        async move {
-            self.finished.recv().
-        }
+    pub fn complete(
+        self,
+    ) -> impl std::future::Future<Output = Result<Bytes, failure::Error>> + Send {
+        async move { self.finished.recv() }
     }
 }
 
@@ -93,7 +93,8 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
         piece_id: u32,
         chunk_offset: u32,
         data: Bytes,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>>
+    {
         struct HeapEntry<'a> {
             last_touched: SystemTime,
             piece_length: u64,
@@ -127,7 +128,7 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
         let piece_length = self.piece_length;
         async move {
             let locked = lockables.lock().await;
-            
+
             let position = locked.piece_cache_storage.seek(SeekFrom::End(0)).await?;
             assert_eq!(position % self.piece_length, 0);
 
@@ -140,7 +141,7 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
                 let mut discard_size_target = cache_size_max - data.len() as u64;
                 let mut discard_size_found = 0;
 
-                for (k, v) in locked.piece_cache {                    
+                for (k, v) in locked.piece_cache {
                     // take off the newest items until we're below the found threshold.
                     while let Some(v) = discard.peek() {
                         let next_discard_size_found = discard_size_found - v.piece_length;
@@ -168,15 +169,19 @@ impl PieceStorageEngineMut for PieceFileStorageEngine {
             }
 
             locked.piece_cache_storage.write_all(&data[..]).await?;
-            locked.piece_cache.insert((tid, piece_id), PieceCacheEntry {
-                file_offset: position,
-                last_touched: SystemTime::now(),
-            });
-            
+            locked.piece_cache.insert(
+                (tid, piece_id),
+                PieceCacheEntry {
+                    file_offset: position,
+                    last_touched: SystemTime::now(),
+                },
+            );
+
             if let Some(inf) = locked.piece_inflight.remove(piece_id) {
-                inf.finished.
+                // inf.finished.
             }
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
@@ -227,6 +232,7 @@ impl PieceStorageEngine for RemoteMagnetiteStorageEngine {
             // go out to the network to get the piece,
 
             Ok(Bytes::from(chonker))
-        }.boxed()
+        }
+        .boxed()
     }
 }
