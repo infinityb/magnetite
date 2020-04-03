@@ -4,6 +4,7 @@ use bytes::{Bytes, BytesMut};
 use iresult::IResult;
 
 use super::{BadHandshake, TorrentID};
+use crate::model::MagnetiteError;
 
 // plan:
 //
@@ -19,13 +20,13 @@ pub const HANDSHAKE_SIZE: usize =
     HANDSHAKE_PREFIX.len() + RESERVED_SIZE + TorrentID::LENGTH + TorrentID::LENGTH;
 
 #[inline]
-fn too_short() -> failure::Error {
-    failure::format_err!("scratch buffer too short")
+fn too_short() -> MagnetiteError {
+    MagnetiteError::InsufficientSpace
 }
 
 #[inline]
-fn funky_size() -> failure::Error {
-    failure::format_err!("funky size")
+fn funky_size() -> MagnetiteError {
+    MagnetiteError::ProtocolViolation
 }
 
 #[derive(Debug)]
@@ -83,7 +84,7 @@ pub fn serialize_long<'a>(
     command_byte: u8,
     data0: &[u8],
     data1: &[u8],
-) -> Result<&'a [u8], failure::Error> {
+) -> Result<&'a [u8], MagnetiteError> {
     let msg_len = 1 + data0.len() + data1.len();
     let total_len = 4 + msg_len;
     if scratch.len() < total_len {
@@ -105,7 +106,7 @@ pub fn serialize_short<'a>(
     scratch: &'a mut [u8],
     command_byte: u8,
     data: &[u8],
-) -> Result<&'a [u8], failure::Error> {
+) -> Result<&'a [u8], MagnetiteError> {
     serialize_long(scratch, command_byte, data, &[])
 }
 
@@ -120,7 +121,7 @@ const PIECE_BYTE: u8 = b'\x07';
 const CANCEL_BYTE: u8 = b'\x08';
 const PORT_BYTE: u8 = b'\x09';
 
-pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Error> {
+pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteError> {
     if from.len() < 4 {
         return IResult::ReadMore(4 - from.len());
     }
@@ -229,11 +230,11 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, failure::Er
             drop(from.split_to(size + 4));
             IResult::Done(Message::Port { dht_port })
         }
-        other => IResult::Err(failure::format_err!("bad type byte {:?}", other)),
+        other => IResult::Err(MagnetiteError::ProtocolViolation)
     }
 }
 
-pub fn serialize<'a>(scratch: &'a mut [u8], msg: &Message) -> Result<&'a [u8], failure::Error> {
+pub fn serialize<'a>(scratch: &'a mut [u8], msg: &Message) -> Result<&'a [u8], MagnetiteError> {
     match *msg {
         Message::Keepalive => {
             if scratch.len() < 4 {
@@ -344,7 +345,7 @@ impl Handshake {
         Some(&scratch[..HANDSHAKE_SIZE])
     }
 
-    pub fn parse2(data: &mut BytesMut) -> IResult<Handshake, failure::Error> {
+    pub fn parse2(data: &mut BytesMut) -> IResult<Handshake, MagnetiteError> {
         match Self::parse(&data[..]) {
             IResult::Done((length, v)) => {
                 drop(data.split_to(length));
@@ -355,14 +356,14 @@ impl Handshake {
         }
     }
 
-    pub fn parse(data: &[u8]) -> IResult<(usize, Handshake), failure::Error> {
+    pub fn parse(data: &[u8]) -> IResult<(usize, Handshake), MagnetiteError> {
         if data.len() < HANDSHAKE_SIZE {
             return IResult::ReadMore(HANDSHAKE_SIZE - data.len());
         }
 
         let (prefix, rest) = data.split_at(HANDSHAKE_PREFIX.len());
         if prefix != HANDSHAKE_PREFIX {
-            return IResult::Err(BadHandshake.into());
+            return IResult::Err(BadHandshake::junk_data().into());
         }
 
         let (reserve_buf, rest) = rest.split_at(RESERVED_SIZE);

@@ -1,15 +1,67 @@
+use std::io;
 use std::fmt;
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use failure::Fail;
 
 pub mod proto;
 
 use crate::CARGO_PKG_VERSION;
 
 const TORRENT_ID_LENGTH: usize = 20;
+
+#[derive(Debug, Fail, Clone)]
+pub enum MagnetiteError {
+    #[fail(display = "message truncated")]
+    Truncated,
+    #[fail(display = "protocol violation")]
+    ProtocolViolation,
+    #[fail(display = "storage engine corruption")]
+    StorageEngineCorruption,
+    #[fail(display = "bad handshake: {:?}", reason)]
+    BadHandshake { reason: BadHandshakeReason },
+    #[fail(display = "I/O error: {:?}", kind)]
+    IoError { kind: io::ErrorKind },
+    #[fail(display = "insufficient space")]
+    InsufficientSpace,
+}
+
+impl From<Truncated> for MagnetiteError {
+    fn from(e: Truncated) -> MagnetiteError {
+        MagnetiteError::Truncated
+    }
+}
+
+impl From<ProtocolViolation> for MagnetiteError {
+    fn from(e: ProtocolViolation) -> MagnetiteError {
+        MagnetiteError::ProtocolViolation
+    }
+}
+
+impl From<StorageEngineCorruption> for MagnetiteError {
+    fn from(e: StorageEngineCorruption) -> MagnetiteError {
+        MagnetiteError::StorageEngineCorruption
+    }
+}
+
+impl From<BadHandshake> for MagnetiteError {
+    fn from(e: BadHandshake) -> MagnetiteError {
+        MagnetiteError::BadHandshake { reason: e.reason }
+    }
+}
+
+impl From<io::Error> for MagnetiteError {
+    fn from(e: io::Error) -> MagnetiteError {
+        MagnetiteError::IoError { kind: e.kind() }
+    }
+}
+
+
+//
 
 #[derive(Debug)]
 pub struct Truncated;
@@ -51,11 +103,33 @@ impl std::error::Error for StorageEngineCorruption {}
 // --
 
 #[derive(Debug)]
-pub struct BadHandshake;
+pub struct BadHandshake {
+    reason: BadHandshakeReason,
+}
+
+#[derive(Debug, Clone)]
+enum BadHandshakeReason {
+    JunkData,
+    UnknownInfoHash(TorrentID),
+}
+
+impl BadHandshake {
+    pub fn junk_data() -> BadHandshake {
+        BadHandshake {
+            reason: BadHandshakeReason::JunkData,
+        }
+    }
+
+    pub fn unknown_info_hash(ih: &TorrentID) -> BadHandshake {
+        BadHandshake {
+            reason: BadHandshakeReason::UnknownInfoHash(*ih)
+        }
+    }
+}
 
 impl fmt::Display for BadHandshake {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "BadHandshake")
+        write!(f, "{:?}", self)
     }
 }
 
@@ -78,8 +152,9 @@ impl TorrentID {
 
 impl fmt::Debug for TorrentID {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+
         f.debug_tuple("TorrentID")
-            .field(&bencode::BinStr(self.as_bytes()))
+            .field(&bencode::HexStr(self.as_bytes()))
             .finish()
     }
 }
@@ -99,6 +174,15 @@ impl TorrentID {
 
     pub fn zero() -> TorrentID {
         TorrentID([0; TORRENT_ID_LENGTH])
+    }
+
+    pub fn is_zero(&self) -> bool {
+        for by in self.as_bytes() {
+            if *by != 0 {
+                return false;
+            }
+        }
+        return true
     }
 
     pub fn from_slice(r: &[u8]) -> Result<TorrentID, failure::Error> {
@@ -152,7 +236,7 @@ pub struct TorrentMetaInfo {
     #[serde(default)]
     pub files: Vec<TorrentMetaInfoFile>,
     #[serde(rename = "piece length")]
-    pub piece_length: u64,
+    pub piece_length: u32,
     #[serde(with = "serde_bytes")]
     pub pieces: Vec<u8>,
     pub name: String,
@@ -161,7 +245,69 @@ pub struct TorrentMetaInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentMetaInfoFile {
     pub length: u64,
-    pub path: Vec<String>,
+    #[serde(with="bt_pathbuf")]
+    pub path: PathBuf,
+}
+
+mod bt_pathbuf {
+    use std::borrow::Cow;
+    use std::path::{Path, PathBuf, Component};
+    use std::fmt;
+
+    use serde::de::{self, SeqAccess, Visitor, Deserializer};
+    use serde::ser::{self, Serializer, SerializeSeq};
+
+    pub fn serialize<S>(buf: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+        let mut seq = serializer.serialize_seq(Some(buf.components().count()))?;
+        
+        for co in buf.components() {
+            match co {
+                Component::Prefix(..) | Component::RootDir => {
+                    return Err(ser::Error::custom("path must not be absolute"));
+                }
+                Component::CurDir | Component::ParentDir => {
+                    return Err(ser::Error::custom("path must be canonical"));
+                }
+                Component::Normal(v) => {
+                    seq.serialize_element(v)?;
+                }
+            }
+        }
+
+        seq.end()
+    }
+
+    struct _Visitor;
+
+    impl<'de> Visitor<'de> for _Visitor {
+        type Value = PathBuf;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            write!(formatter, "a non-empty vector of paths")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut buf = PathBuf::new();
+            
+            let mut observed_element = false;
+            while let Some(part) = seq.next_element::<Cow<Path>>()? {
+                buf.push(part);
+                observed_element = true;
+            }
+            if !observed_element {
+                return Err(de::Error::custom("path vec must be non-empty"));
+            }
+
+            Ok(buf)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error> where D: Deserializer<'de> {
+        deserializer.deserialize_seq(_Visitor)
+    }
 }
 
 #[derive(Clone)]
@@ -169,7 +315,7 @@ pub struct TorrentMetaWrapped {
     pub meta: TorrentMeta,
     pub total_length: u64,
     pub info_hash: TorrentID,
-    pub piece_shas: Arc<Vec<TorrentID>>,
+    pub piece_shas: Vec<TorrentID>,
 }
 
 impl TorrentMetaWrapped {
@@ -204,7 +350,7 @@ impl TorrentMetaWrapped {
             meta,
             total_length,
             info_hash,
-            piece_shas: Arc::new(piece_shas),
+            piece_shas: piece_shas,
         })
     }
 }
@@ -246,20 +392,13 @@ impl PeerState {
 #[derive(Debug, Clone)]
 pub struct BitField {
     pub bit_length: u32,
+    pub set_count: u32,
     pub data: Box<[u8]>,
 }
 
 impl BitField {
     pub fn as_raw_slice(&self) -> &[u8] {
         &self.data
-    }
-
-    pub fn count_ones(&self) -> u32 {
-        let mut completed = 0;
-        for by in self.as_raw_slice() {
-            completed += by.count_ones() as u32;
-        }
-        completed
     }
 
     pub fn all(bit_length: u32) -> BitField {
@@ -282,6 +421,7 @@ impl BitField {
         }
         BitField {
             bit_length: bit_length,
+            set_count: bit_length,
             data: v.into_boxed_slice(),
         }
     }
@@ -293,21 +433,99 @@ impl BitField {
         }
         BitField {
             bit_length: bit_length,
+            set_count: 0,
             data: vec![0; byte_length].into_boxed_slice(),
         }
     }
 
-    pub fn set(&mut self, index: u32, _value: bool) {
+    pub fn set(&mut self, index: u32, value: bool) -> bool {
         assert!(index < self.bit_length);
         let byte_index = (index / 8) as usize;
         let bit_index = (index % 8) as u8;
-        self.data[byte_index] |= 1 << bit_index;
+        let current_byte = &mut self.data[byte_index];
+        let with_set_bit = 1 << bit_index;
+
+        let isset = (*current_byte & with_set_bit) != 0;
+        let mut bit_modified = false;
+        if value {
+            if !isset {
+                self.set_count += 1;
+                bit_modified = true;
+            }
+            *current_byte |= with_set_bit;
+        } else {
+            if isset {
+                self.set_count -= 1;
+                bit_modified = true;
+            }
+            *current_byte &= !with_set_bit;
+        }
+        bit_modified
     }
 
     pub fn has(&self, index: u32) -> bool {
+        if self.is_filled() {
+            return true;
+        }
+        if self.is_empty() {
+            return false;
+        }
+
         assert!(index < self.bit_length);
         let byte_index = (index / 8) as usize;
         let bit_index = (index % 8) as u8;
         (self.data[byte_index] & (1 << bit_index)) > 0
     }
+
+    pub fn count_ones(&self) -> u32 {
+        self.set_count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set_count == 0
+    }
+
+    pub fn is_filled(&self) -> bool {
+        self.bit_length == self.set_count
+    }
+
+    pub fn iter(&self) -> Iter {
+        Iter {
+            parent: self.data.iter(),
+            bit_length: self.bit_length,
+            bit_offset: 8,
+            cur_byte: 0,
+        }
+    }
 }
+
+
+pub struct Iter<'a> {
+    parent: std::slice::Iter<'a, u8>,
+    bit_length: u32,
+    bit_offset: u8,
+    cur_byte: u8,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = bool;
+
+    fn next(&mut self) -> Option<bool> {
+        if self.bit_length == 0 {
+            return None;
+        }
+
+        loop {
+            if self.bit_offset < 8 {
+                let mask = 1 << self.bit_offset;
+                self.bit_offset += 1;
+                self.bit_length -= 1;
+                return Some(self.cur_byte & mask > 0);
+            }
+
+            self.cur_byte = *self.parent.next()?;
+            self.bit_offset = 0;
+        }
+    }
+}
+

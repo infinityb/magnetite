@@ -8,6 +8,7 @@ mod cmdlet;
 mod model;
 mod storage;
 mod tracker;
+mod scheduler;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");

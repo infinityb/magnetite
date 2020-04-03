@@ -111,7 +111,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         decrypt_and_sha(
             &mut buf,
             &mut cipher,
-            tm.info.piece_length,
+            tm.info.piece_length.into(),
             &mut hasher,
             &mut input,
         )

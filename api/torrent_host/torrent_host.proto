@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package magnetite.api.fuse;
+package magnetite.api.torrent_host;
 
 message AddTorrentRequest {
 	bytes info_data = 1;
@@ -19,8 +19,23 @@ message RemoveTorrentRequest {
 message RemoveTorrentResponse {
 }
 
-service MagnetiteFuseHost {
+message ListTorrentsRequest {
+}
+
+message ListTorrentsResponse {
+	repeated TorrentEntry entries = 1;
+}
+
+message TorrentEntry {
+	bytes info_hash = 1;
+	string name = 2;
+	uint64 size_bytes = 3;
+}
+
+service TorrentHost {
 	rpc AddTorrent(AddTorrentRequest) returns (AddTorrentResponse) {}
 
 	rpc RemoveTorrent(RemoveTorrentRequest) returns (RemoveTorrentResponse) {}
+
+	rpc ListTorrents(ListTorrentsRequest) returns (ListTorrentsResponse) {}
 }

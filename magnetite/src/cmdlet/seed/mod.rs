@@ -1,8 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::net::SocketAddr;
+use tokio::time::Instant;
+use std::net::IpAddr;
+
 
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
@@ -23,9 +27,10 @@ use tracing::{event, Level};
 use crate::model::proto::{
     deserialize, serialize, BytesCow, Handshake, Message, PieceSlice, HANDSHAKE_SIZE,
 };
-use crate::model::{BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated};
+use crate::model::MagnetiteError;
+use crate::model::{BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated, BadHandshake};
 use crate::storage::{
-    PieceFileStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
+    PieceFileStorageEngine, PieceStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
 };
 use crate::CARGO_PKG_VERSION;
 
@@ -72,7 +77,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
 fn pop_messages_into(
     r: &mut BytesMut,
     messages: &mut Vec<Message<'static>>,
-) -> Result<(), failure::Error> {
+) -> Result<(), MagnetiteError> {
     loop {
         match deserialize(r) {
             IResult::Done(v) => messages.push(v),
@@ -84,59 +89,16 @@ fn pop_messages_into(
     }
 }
 
-// async fn check_collect_piece(pfse: &PieceFileStorageEngine) -> Result<(), failure::Error> {
-//     let mut req_queue: Vec<PieceSlice> = Vec::new();
-//     for i in 0..(pfse.piece_length / 16_384) {
-//         req_queue.push(PieceSlice {
-//             index: 100,
-//             begin: (i * 16_384) as u32,
-//             length: 16_384,
-//         });
-//     }
-
-//     let parts = collect_pieces(&req_queue[..], pfse).await?;
-
-//     let mut ser_buf = Vec::new();
-//     let mut tmp_buf = [0; 64 * 1024];
-
-//     for (idx, p) in parts.iter().enumerate() {
-//         let vv = serialize(&mut tmp_buf[..], p).unwrap();
-//         ser_buf.extend(vv);
-//     }
-
-//     let mut reader = BytesMut::from(&ser_buf[..]);
-//     let mut hasher = Sha1::new();
-
-//     for (idx, p) in parts.iter().enumerate() {
-//         match deserialize(&mut reader) {
-//             IResult::Done(Message::Piece { index, begin, data }) => {
-//                 assert_eq!(index, 100);
-//                 assert_eq!(begin as u64, idx as u64 * 16_384);
-//                 assert_eq!(data.as_slice().len(), 16_384);
-//                 hasher.input(data.as_slice());
-//             }
-//             IResult::Done(vv) => panic!("unexpected message: {:?}", vv),
-//             IResult::ReadMore(..) => break,
-//             IResult::Err(err) => panic!("error deserializing: {:?}", err),
-//         }
-//     }
-
-//     if pfse.piece_shas[100].data[..] != hasher.result()[..] {
-//         panic!("Error: human is dead, mismatch.");
-//     }
-
-//     Ok(())
-// }
-
 async fn collect_pieces(
+    content_key: &TorrentID,
     requests: &[PieceSlice],
     pfse: &PieceFileStorageEngine,
-) -> Result<Vec<Message<'static>>, failure::Error> {
+) -> Result<Vec<Message<'static>>, MagnetiteError> {
     let mut messages = Vec::new();
     let _offset: usize = 0;
 
     for p in requests {
-        let piece_data = pfse.get_piece(p.index).await?;
+        let piece_data = pfse.get_piece(content_key, p.index).await?;
         if piece_data.len() < p.begin as usize {
             return Err(ProtocolViolation.into());
         }
@@ -157,13 +119,14 @@ async fn collect_pieces(
 }
 
 async fn send_pieces(
+    content_key: &TorrentID,
     persist_buf: &mut [u8],
-    addr: std::net::SocketAddr,
+    addr: SocketAddr,
     w: &mut ::tokio::net::tcp::WriteHalf<'_>,
     requests: &[PieceSlice],
     pfse: &PieceFileStorageEngine,
-) -> Result<u64, failure::Error> {
-    let messages = collect_pieces(requests, pfse).await?;
+) -> Result<u64, MagnetiteError> {
+    let messages = collect_pieces(content_key, requests, pfse).await?;
     // XXX: allocation - use an iovec when serialize can support it.
     // XXX: trusting user input to be within bounds: piece.length < 64k - header_size
     //      iovecs solve this.
@@ -190,7 +153,7 @@ struct Torrent {
     meta: Arc<TorrentMetaWrapped>,
     have_bitfield: BitField,
     piece_file_path: PathBuf,
-    crypto_secret: String,
+    crypto_secret: Option<String>,
     tracker_groups: Vec<TrackerGroup>,
 }
 
@@ -200,7 +163,7 @@ struct TrackerGroup {
 
 struct Session {
     id: u64,
-    addr: std::net::SocketAddr,
+    addr: SocketAddr,
     handshake: Handshake,
     target: TorrentID,
     // Arc<TorrentMetaWrapped>,
@@ -238,6 +201,81 @@ impl PeerState {
     }
 }
 
+// struct ConnectHandlerState {
+//     self_peer_id: TorrentID,
+//     acceptable_peers: Arc<Mutex<BTreeSet<TorrentID>>>,
+
+// }
+
+fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSalsa20> {
+    if crypto_secret.len() > 0 {
+        let mut nonce_data = [0; 24];
+        nonce_data[4..].copy_from_slice(info_hash.as_bytes());
+        let nonce = GenericArray::from_slice(&nonce_data[..]);
+        let key = GenericArray::from_slice(crypto_secret.as_bytes());
+        Some(XSalsa20::new(&key, &nonce))
+    } else {
+        None
+    }
+}
+
+
+struct TorrentDownloadStateManager {
+    
+    torrents: HashMap<TorrentID, TorrentDownloadState>,
+}
+
+struct TorrentDownloadState {
+    // disallow peers that have not been provided to us by the tracker at some point,
+    // perhaps useful in the case of private trackers?
+    allow_unknown_peers: bool,
+    known_peer_ids: HashMap<IpAddr, Option<TorrentID>>,
+}
+
+impl TorrentDownloadStateManager {
+    fn accept_peer(&self, socket_addr: &IpAddr, peer_id: &TorrentID, info_hash: &TorrentID) -> bool {
+        if let Some(ds) = self.torrents.get(info_hash) {
+            match ds.known_peer_ids.get(socket_addr) {
+                Some(Some(pid)) => peer_id == pid,
+                Some(None) => true, // fail open when in compact tracker mode
+                None => ds.allow_unknown_peers,
+            }
+        } else {
+            false
+        }
+    }
+}
+
+async fn start_connection(
+    ts: &TorrentDownloadStateManager,
+    socket: &mut TcpStream,
+    rbuf: &mut BytesMut,
+    self_pid: &TorrentID,
+    outgoing: Option<&TorrentID>
+) -> Result<Handshake, MagnetiteError> {
+    let remote_handshake;
+    let mut hs_buf = [0; HANDSHAKE_SIZE];
+    if let Some(ih) = outgoing {
+        // send handhake, then rx handshake
+        let hs = Handshake::serialize_bytes(&mut hs_buf[..], &ih, self_pid, &[]).unwrap();
+        socket.write_all(&hs).await?;
+        remote_handshake = read_to_completion(socket, rbuf, Handshake::parse2).await?;
+    } else {
+        remote_handshake = read_to_completion(socket, rbuf, Handshake::parse2).await?;
+
+        let addr = socket.peer_addr()?.ip();
+
+        if !ts.accept_peer(&addr, &remote_handshake.peer_id, &remote_handshake.info_hash) {
+            return Err(BadHandshake::unknown_info_hash(&remote_handshake.info_hash).into());
+        }
+
+        let hs = Handshake::serialize_bytes(&mut hs_buf[..], &remote_handshake.info_hash, self_pid, &[]).unwrap();
+        socket.write_all(&hs).await?;
+    }
+    Ok(remote_handshake)
+}
+
+
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     struct TorrentFactory {
         torrent_file: PathBuf,
@@ -264,21 +302,58 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     };
     let mut sources = Vec::new();
     sources.push(TorrentFactory {
-        torrent_file: Path::new("/home/sell/compile/magnetite/danbooru2019-0-loaded.torrent")
-            .to_owned(),
-        source_file: Path::new("/mnt/home/danbooru2019-0.tome").to_owned(),
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-0.tome").to_owned(),
         secret: "C3EsrGPe62jQx6U6Z6JTxCcWKSWpA4G2".to_string(),
     });
-    // sources.push(TorrentFactory {
-    //     torrent_file: Path::new("/home/sell/compile/magnetite/danbooru2019-1-loaded.torrent").to_owned(),
-    //     source_file: Path::new("/mnt/home/danbooru2019-1.tome").to_owned(),
-    //     secret: "RhdmQRQZzbSwbqyKk4T4tzxcQ4BG6V9b".to_string(),
-    // });
-    // sources.push(TorrentFactory {
-    //     torrent_file: Path::new("/home/sell/compile/magnetite/danbooru2019-2.torrent").to_owned(),
-    //     source_file: Path::new("/mnt/home/danbooru2019-2.tome").to_owned(),
-    //     secret: "afqR5ALeMtoyYej9UNTQi7YEM4dtdbjQ".to_string(),
-    // });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-1.tome").to_owned(),
+        secret: "RhdmQRQZzbSwbqyKk4T4tzxcQ4BG6V9b".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-2.tome").to_owned(),
+        secret: "afqR5ALeMtoyYej9UNTQi7YEM4dtdbjQ".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent")
+            .to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-3.tome").to_owned(),
+        secret: "4r86Ky8jQQt3JQncXZGg2zBQsNXbdjb9".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-4.tome").to_owned(),
+        secret: "g9e8mSsydbxKsSqgU6oCoaqpVybfrGfN".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-5.tome").to_owned(),
+        secret: "bKDMbbPwuQiY7grxjdaEaQSq53hkhuSK".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent")
+            .to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-6.tome").to_owned(),
+        secret: "xDY4RGFDtzk5CUM8N77RBeQ7wB9fujej".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-7.tome").to_owned(),
+        secret: "qEvcKZiR8ynHC54SeETgrZVjoKGCUke9".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent").to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-8.tome").to_owned(),
+        secret: "4jJZSpMwrzVSNZBZf9RqaR4UxDYy3QT7".to_string(),
+    });
+    sources.push(TorrentFactory {
+        torrent_file: Path::new("/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent")
+            .to_owned(),
+        source_file: Path::new("/Volumes/home/danbooru2019-9.tome").to_owned(),
+        secret: "Y2scZxSQpbxktS7fKR9YpL8uzrh2bSSZ".to_string(),
+    });
 
     for s in sources.into_iter() {
         let mut fi = File::open(&s.torrent_file).unwrap();
@@ -299,7 +374,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 meta: tm,
                 have_bitfield,
                 piece_file_path: s.source_file,
-                crypto_secret: s.secret,
+                crypto_secret: Some(s.secret),
                 tracker_groups: Vec::new(),
             },
         );
@@ -310,6 +385,9 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let cc = Arc::new(Mutex::new(cc));
 
     rt.block_on(async {
+        // suppress connections to these until the value has expired.
+        let mut connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
+
         let mut listener = TcpListener::bind("[::]:17862").await.unwrap();
         // let (state_channel_tx, mut state_channel_rx) = tokio::sync::mpsc::channel(10);
         // tokio::spawn(async move {
@@ -320,6 +398,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
         loop {
             let (mut socket, addr) = listener.accept().await.unwrap();
+
             // let state_channel_tx = state_channel_tx.clone();
             let peer_id = peer_id.clone();
             let cc = Arc::clone(&cc);
@@ -370,36 +449,21 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 .unwrap();
                 socket.write(&hs).await.unwrap();
 
-                drop(torrent);
-                let torrent_meta = Arc::clone(&torrent.meta);
-
-                let target = torrent_meta.info_hash;
-                let mut nonce_data = [0; 24];
-                for (o, i) in nonce_data[4..]
-                    .iter_mut()
-                    .zip(torrent_meta.info_hash.as_bytes().iter())
-                {
-                    *o = *i;
+                let mut builder = PieceFileStorageEngine::from_torrent_wrapped(&torrent.meta);
+                builder.set_complete();
+                if let Some(ref secret) = torrent.crypto_secret {
+                    if let Some(salsa) = get_torrent_salsa(secret, &handshake.info_hash) {
+                        builder.set_crypto(salsa);
+                    }
                 }
-                let nonce = GenericArray::from_slice(&nonce_data[..]);
-                let piece_file = TokioFile::open(&torrent.piece_file_path).await.unwrap();
+
+                drop(torrent);
+
+                let torrent_meta = Arc::clone(&torrent.meta);
+                let target = torrent_meta.info_hash;
                 let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
-                let key = GenericArray::from_slice(torrent.crypto_secret.as_bytes());
-
-                let storage_engine = PieceFileStorageEngine {
-                    total_length: torrent_meta.total_length,
-                    piece_length: torrent_meta.meta.info.piece_length,
-                    lockables: Arc::new(Mutex::new(PieceFileStorageEngineLockables {
-                        crypto: Some(XSalsa20::new(&key, &nonce)),
-                        verify_piece: PieceFileStorageEngineVerifyMode::First {
-                            verified: BitField::none(bf_length),
-                        },
-                        piece_cache: LruCache::new(16),
-                        piece_file,
-                    })),
-                    piece_shas: torrent_meta.piece_shas.clone(),
-                };
-
+                let piece_file = TokioFile::open(&torrent.piece_file_path).await.unwrap();
+                let storage_engine = builder.build(piece_file);
                 let _have_bitfield =
                     BitField::all(torrent_meta.meta.info.pieces.chunks(20).count() as u32);
 
@@ -433,14 +497,20 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                         let mut reqs = Vec::new();
                         pop_messages_into(&mut rbuf, &mut reqs)?;
                         event!(Level::DEBUG, read_requests=?reqs);
-                        request_queue_tx.send(reqs).await?;
+                        if let Err(err) = request_queue_tx.send(reqs).await {
+                            event!(Level::WARN, "writer-disappeared");
+                            break;
+                        }
 
                         let length =
                             match timeout(Duration::new(40, 0), srh.read_buf(&mut rbuf)).await {
                                 Ok(res) => res?,
                                 Err(err) => {
-                                    let _err: tokio::time::Elapsed = err;
-                                    request_queue_tx.send(Vec::new()).await?;
+                                    let _: tokio::time::Elapsed = err;
+                                    if let Err(err) = request_queue_tx.send(Vec::new()).await {
+                                        event!(Level::WARN, "writer-disappeared");
+                                        break;
+                                    }
                                     continue;
                                 }
                             };
@@ -557,6 +627,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                         }
 
                         state.sent_bytes += send_pieces(
+                            &torrent_meta.info_hash,
                             &mut msg_buf[..],
                             addr,
                             &mut swh,
@@ -599,7 +670,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                     Ok(())
                 };
 
-                let (res1, res2): (Result<(), failure::Error>, Result<(), failure::Error>) =
+                let (res1, res2): (Result<(), MagnetiteError>, Result<(), MagnetiteError>) =
                     futures::future::join(reader, handler).await;
 
                 let mut ccl = cc.lock().await;
@@ -642,9 +713,9 @@ async fn read_to_completion<T, F>(
     s: &mut TcpStream,
     buf: &mut BytesMut,
     p: F,
-) -> Result<T, failure::Error>
+) -> Result<T, MagnetiteError>
 where
-    F: Fn(&mut BytesMut) -> IResult<T, failure::Error>,
+    F: Fn(&mut BytesMut) -> IResult<T, MagnetiteError>,
 {
     let mut needed: usize = 0;
     loop {

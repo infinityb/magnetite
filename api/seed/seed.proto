@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package magnetite.api.seed;
+
+// message SubscribeUtilizationRequest {
+// 	//
+// }
+
+// message SubscribeUtilizationResponse {
+// 	uint64 upload_rate = 1;
+// 	uint64 download_rate = 2;
+// }
+
+// message SubscribePeerInfoRequest {
+// 	//
+// }
+
+// message SubscribePeerInfoResponse {
+// 	//
+// }
+
+// service TorrentSeeder {
+// 	rpc SubscribeUtilization(SubscribeUtilizationRequest) returns (stream SubscribeUtilizationResponse);
+
+// 	rpc SubscribePeerInfo(SubscribePeerInfoRequest) returns (stream SubscribePeerInfoResponse);
+// }

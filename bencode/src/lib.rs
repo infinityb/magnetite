@@ -1240,3 +1240,18 @@ impl<'a> fmt::Debug for BinStr<'a> {
         f.write_char('"')
     }
 }
+
+pub struct HexStr<'a>(pub &'a [u8]);
+
+impl<'a> fmt::Debug for HexStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+        f.write_str("dehex(\"")?;
+        for c in self.0.iter() {
+            f.write_char(HEX_CHARS[usize::from(c >> 4)] as char)?;
+            f.write_char(HEX_CHARS[usize::from(c & 0xF)] as char)?;
+        }
+        f.write_str("\")")?;
+        Ok(())
+    }
+}
