@@ -1,6 +1,6 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Read;
@@ -8,34 +8,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use bytes::Bytes;
 use clap::{App, Arg, SubCommand};
 use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
 };
 use libc::{c_int, EIO, ENOENT, ENOTDIR};
-use lru::LruCache;
-use salsa20::stream_cipher::generic_array::GenericArray;
-use salsa20::stream_cipher::NewStreamCipher;
-use salsa20::XSalsa20;
-use sha1::Digest;
+use rand::{thread_rng, Rng};
 use slab::Slab;
-use tokio::fs::File as TokioFile;
 use tokio::net::UnixListener;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
+use serde::{Serialize, Deserialize};
 
 mod errors;
 
 pub use self::errors::{
     FilesystemIntegrityError, InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory,
 };
-use crate::model::{BitField, TorrentID, TorrentMetaWrapped};
-use crate::storage::PieceStorageEngine;
+
+use crate::model::{TorrentID, TorrentMetaWrapped};
+use crate::storage::disk_cache_layer::CacheWrapper;
 use crate::storage::{
-    PieceFileStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
+    piece_file, state_wrapper, GetPieceRequest, PieceFileStorageEngine, PieceStorageEngineDumb,
+    StateWrapper, remote_magnetite::RemoteMagnetite,
 };
 
 pub mod fuse_api {
@@ -110,13 +106,13 @@ enum OpenState {
 }
 
 #[derive(Debug)]
-struct FilesystemImplMutable {
+struct FilesystemImplMutable<P> {
     // any directory or file that has been updated.  If an owner (torrent) is removed
     // then the info_hash_owner_counter will decrement.  If the info_hash_owner_counter
     // counter drops to 0, that file shall be deallocated.
-    piece_cache: LruCache<(TorrentID, u32), Bytes>,
-    storage_backends: BTreeMap<TorrentID, PieceFileStorageEngine>,
-    info_hash_damage: BTreeSet<(TorrentID, u64)>,
+    storage_backend: P,
+    content_info: state_wrapper::ContentInfoManager,
+    // info_hash_damage: BTreeSet<(TorrentID, u64)>,
     inodes: BTreeMap<u64, FileEntry>,
     inode_seq: u64,
     open_files: Slab<OpenState>,
@@ -152,14 +148,15 @@ fn sensible_directory_file_entry(parent: u64, ino: u64) -> FileEntry {
     }
 }
 
-fn fs_impl_mkdir<T>(
-    fs: &mut FilesystemImplMutable,
+fn fs_impl_mkdir<T, P>(
+    fs: &mut FilesystemImplMutable<P>,
     parent: u64,
     name: T,
     owner: TorrentID,
 ) -> Result<u64, failure::Error>
 where
     T: AsRef<OsStr>,
+    P: PieceStorageEngineDumb,
 {
     let mut affected_inodes = Vec::new();
 
@@ -176,9 +173,9 @@ where
                 drop(chino);
                 drop(dir);
 
-                for v in affected_inodes {
-                    fs.info_hash_damage.insert((owner, v));
-                }
+                // for v in affected_inodes {
+                //     fs.info_hash_damage.insert((owner, v));
+                // }
                 return Ok(inode);
             }
         }
@@ -199,9 +196,9 @@ where
             sensible_directory_file_entry(parent_inode, created_inode),
         );
 
-        for v in affected_inodes {
-            fs.info_hash_damage.insert((owner, v));
-        }
+        // for v in affected_inodes {
+        //     fs.info_hash_damage.insert((owner, v));
+        // }
 
         return Ok(created_inode);
     } else {
@@ -209,7 +206,10 @@ where
     }
 }
 
-impl FilesystemImplMutable {
+impl<P> FilesystemImplMutable<P>
+where
+    P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
+{
     #[inline]
     fn traverse_path<I, T>(&self, parent: u64, path_parts: I) -> Result<&FileEntry, failure::Error>
     where
@@ -352,24 +352,33 @@ impl FilesystemImplMutable {
     }
 }
 
-struct FilesystemImpl {
-    mutable: Arc<Mutex<FilesystemImplMutable>>,
+#[derive(Clone)]
+struct FilesystemImpl<P> {
+    mutable: Arc<Mutex<FilesystemImplMutable<P>>>,
 }
 
 const HELLO_TXT_CONTENT: &str = "Hello World!\n";
 
 const TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
-impl Filesystem for FilesystemImpl {
+impl<P> Filesystem for FilesystemImpl<P>
+where
+    P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
+{
     fn init(&mut self, _req: &fuse::Request) -> Result<(), c_int> {
         Ok(())
     }
 
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let mutable = Arc::clone(&self.mutable);
+        let self_cloned: Self = self.clone();
         let name = name.to_owned();
+
         tokio::spawn(async move {
-            let fs = mutable.lock().await;
+            let cookie: u64 = thread_rng().gen();
+            // event!(Level::DEBUG, "{}:{}: acquiring fs-handle lock {}", file!(), line!(), cookie);
+            let fs = self_cloned.mutable.lock().await;
+            // event!(Level::DEBUG, "{}:{}: acquired fs-handle lock {}", file!(), line!(), cookie);
+
             match fs.traverse_path(parent, [name].iter()) {
                 Ok(fe) => reply.entry(&TTL, &fe.attrs, 0),
                 Err(err) => {
@@ -389,18 +398,30 @@ impl Filesystem for FilesystemImpl {
                     }
                 }
             }
+
+            // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
+            drop(fs);
+            // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
         });
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        let mutable = Arc::clone(&self.mutable);
+        let self_cloned: Self = self.clone();
         tokio::spawn(async move {
-            let fs = mutable.lock().await;
+            let cookie: u64 = thread_rng().gen();
+            // event!(Level::DEBUG, "{}:{}: acquiring fs-handle lock {}", file!(), line!(), cookie);
+            let fs = self_cloned.mutable.lock().await;
+            // event!(Level::DEBUG, "{}:{}: acquired fs-handle lock {}", file!(), line!(), cookie);
+
             if let Some(pentry) = fs.inodes.get(&ino) {
                 reply.attr(&TTL, &pentry.attrs);
-                return;
+            } else {
+                reply.error(ENOENT);
             }
-            reply.error(ENOENT);
+
+            // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
+            drop(fs);
+            // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
         });
     }
 
@@ -413,15 +434,19 @@ impl Filesystem for FilesystemImpl {
         size: u32,
         reply: ReplyData,
     ) {
+        let self_cloned: Self = self.clone();
+
         if offset < 0 {
             reply.error(ENOENT);
             return;
         }
         let offset = offset as u64;
-
-        let mutable = Arc::clone(&self.mutable);
         tokio::spawn(async move {
-            let mut fs = mutable.lock().await;
+            let cookie: u64 = thread_rng().gen();
+            // event!(Level::DEBUG, "{}:{}: acquiring fs-handle lock {}", file!(), line!(), cookie);
+            let fs = self_cloned.mutable.lock().await;
+            // event!(Level::DEBUG, "{}:{}: acquired fs-handle lock {}", file!(), line!(), cookie);
+
             let mut target_file = None;
             if let Some(pentry) = fs.inodes.get(&ino) {
                 if let FileEntryData::File(ref file) = pentry.data {
@@ -429,30 +454,53 @@ impl Filesystem for FilesystemImpl {
                 }
             }
             if let Some(tf) = target_file {
-                let storage_engine = fs.storage_backends.get(&tf.info_hash).unwrap().clone();
+                let info = fs.content_info.get_content_info(&tf.info_hash).unwrap();
+                let piece_length = u64::from(info.piece_length);
+
                 let piece_file_offset = tf.torrent_rel_offset + offset;
-                let piece_index = (piece_file_offset / storage_engine.get_piece_length()) as u32;
-                let piece_offset = (piece_file_offset % storage_engine.get_piece_length()) as u32;
+                let piece_index = (piece_file_offset / piece_length) as u32;
+                let piece_offset = (piece_file_offset % piece_length) as u32;
 
-                let cache_key = (tf.info_hash, piece_index);
-                let piece_data;
-                if let Some(cached) = fs.piece_cache.get(&cache_key) {
-                    piece_data = cached.clone();
-                    drop(cached);
-                    drop(fs);
-                } else {
-                    drop(fs);
+                let piece_sha = info.piece_shas.get(piece_index as usize).unwrap().clone();
 
-                    piece_data = storage_engine
-                        .get_piece(&tf.info_hash, piece_index as u32)
-                        .await
-                        .unwrap();
+                let req = GetPieceRequest {
+                    content_key: tf.info_hash,
+                    piece_sha: piece_sha,
+                    piece_length: info.piece_length,
+                    total_length: info.total_length,
+                    piece_index: piece_index,
+                };
+                event!(
+                    Level::INFO,
+                    "requesting piece from storage engine: {:?}",
+                    req
+                );
+                let piece_data_res_fut = fs.storage_backend.get_piece_dumb(&req);
 
-                    let mut fs = mutable.lock().await;
-                    fs.piece_cache
-                        .put((tf.info_hash, piece_index), piece_data.clone());
-                    drop(fs);
-                }
+                // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
+                drop(fs);
+                // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
+
+                let piece_data_res = piece_data_res_fut.await;
+
+                event!(
+                    Level::INFO,
+                    "requesting piece from storage engine: {:?} -> {}",
+                    req,
+                    if piece_data_res.is_ok() {
+                        "ok"
+                    } else {
+                        "error"
+                    }
+                );
+                let piece_data = match piece_data_res {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        event!(Level::ERROR, "failed to fetch piece: {}", err);
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                };
 
                 let mut interesting_data = &piece_data[piece_offset as usize..];
                 if (size as usize) < interesting_data.len() {
@@ -460,7 +508,11 @@ impl Filesystem for FilesystemImpl {
                 }
                 reply.data(interesting_data);
             } else {
-                reply.error(ENOENT);
+                reply.error(libc::ENOENT);
+
+                // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
+                drop(fs);
+                // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
             }
         });
     }
@@ -473,9 +525,9 @@ impl Filesystem for FilesystemImpl {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let mutable = Arc::clone(&self.mutable);
+        let self_cloned: Self = self.clone();
         tokio::spawn(async move {
-            let mut fs = mutable.lock().await;
+            let mut fs = self_cloned.mutable.lock().await;
             let FilesystemImplMutable {
                 ref mut open_files,
                 ref mut inodes,
@@ -533,6 +585,14 @@ pub fn get_subcommand() -> App<'static, 'static> {
         .version(CARGO_PKG_VERSION)
         .about("mount torrents")
         .arg(
+            Arg::with_name("config")
+                .long("config")
+                .value_name("FILE")
+                .help("config file")
+                .required(true)
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("control-socket")
                 .long("control-socket")
                 .value_name("FILE")
@@ -579,105 +639,82 @@ impl MagnetiteFuseHost for FuseHost {
 
 #[cfg(unix)]
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+    #[derive(Serialize, Deserialize)]
+    struct Config {
+        cache_secret: String,
+        upstream_server: String,
+        torrents: Vec<TorrentFactory>,
+    }
+
+    #[derive(Serialize, Deserialize)]
     struct TorrentFactory {
         torrent_file: PathBuf,
-        source_file: PathBuf,
-        secret: String,
     }
+
+
+    let config = matches.value_of("config").unwrap();
+    let mut cfg_fi = File::open(&config).unwrap();
+    let mut cfg_by = Vec::new();
+    cfg_fi.read_to_end(&mut cfg_by).unwrap();
+    let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
     let control_socket = matches.value_of_os("control-socket").unwrap();
     let control_socket = Path::new(control_socket).to_owned();
     let mount_point = matches.value_of_os("mount-point").unwrap();
     let mount_point = Path::new(mount_point).to_owned();
 
-    //  /Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent
     let mut rt = Runtime::new()?;
-    let mut sources = Vec::new();
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-0.tome").to_owned(),
-        secret: "C3EsrGPe62jQx6U6Z6JTxCcWKSWpA4G2".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-1.tome").to_owned(),
-        secret: "RhdmQRQZzbSwbqyKk4T4tzxcQ4BG6V9b".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-2.tome").to_owned(),
-        secret: "afqR5ALeMtoyYej9UNTQi7YEM4dtdbjQ".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-3.tome").to_owned(),
-        secret: "4r86Ky8jQQt3JQncXZGg2zBQsNXbdjb9".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-4.tome").to_owned(),
-        secret: "g9e8mSsydbxKsSqgU6oCoaqpVybfrGfN".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-5.tome").to_owned(),
-        secret: "bKDMbbPwuQiY7grxjdaEaQSq53hkhuSK".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-6.tome").to_owned(),
-        secret: "xDY4RGFDtzk5CUM8N77RBeQ7wB9fujej".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-7.tome").to_owned(),
-        secret: "qEvcKZiR8ynHC54SeETgrZVjoKGCUke9".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-8.tome").to_owned(),
-        secret: "4jJZSpMwrzVSNZBZf9RqaR4UxDYy3QT7".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-9.tome").to_owned(),
-        secret: "Y2scZxSQpbxktS7fKR9YpL8uzrh2bSSZ".to_string(),
-    });
+    let mut pf_builder = RemoteMagnetite::connected(&config.upstream_server);
+    let mut state_builder = StateWrapper::builder();
+
+    let mut torrents = Vec::new();
+    for s in &config.torrents {
+        let mut fi = File::open(&s.torrent_file).unwrap();
+        let mut by = Vec::new();
+        fi.read_to_end(&mut by).unwrap();
+
+        let mut torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
+        let tm = Arc::new(torrent);
+
+        let piece_count = tm.piece_shas.len() as u32;
+        state_builder.register_info_hash(
+            &tm.info_hash,
+            state_wrapper::Registration {
+                total_length: tm.total_length,
+                piece_length: tm.meta.info.piece_length,
+                piece_shas: tm.piece_shas.clone().into(),
+            },
+        );
+
+        println!("added info_hash: {:?}", tm.info_hash);
+        torrents.push(tm);
+    }
+
+
+    let storage_engine = pf_builder.build();
+    let mut cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
+
+    let zero_iv = TorrentID::zero();
+    use crate::cmdlet::seed::get_torrent_salsa;
+    if let Some(salsa) = get_torrent_salsa(&config.cache_secret, &zero_iv) {
+        cache.set_crypto(salsa);
+    }
+
+    use std::fs::OpenOptions;
+
+    let cache_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("magnetite.cache")
+        .unwrap();
+
+    let storage_engine = cache.build(cache_file.into(), storage_engine);
 
     let mut fs_impl = FilesystemImplMutable {
-        piece_cache: LruCache::<(TorrentID, u32), Bytes>::new(32),
-        storage_backends: BTreeMap::new(),
-        info_hash_damage: BTreeSet::new(),
+        storage_backend: storage_engine,
+        content_info: state_builder.build_content_info_manager(),
         inodes: BTreeMap::new(),
         inode_seq: 3,
         open_files: Slab::new(),
@@ -708,44 +745,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             }),
         },
     );
-
-    for s in sources.into_iter() {
-        let mut fi = File::open(&s.torrent_file).unwrap();
-        let mut by = Vec::new();
-        fi.read_to_end(&mut by).unwrap();
-
-        let mut torrent_meta = TorrentMetaWrapped::from_bytes(&by).unwrap();
-        // torrent_meta.meta.info.files.truncate(4);
-        let torrent_meta = Arc::new(torrent_meta);
-
-        let info_hash = torrent_meta.info_hash;
-        let piece_file = rt.block_on(TokioFile::open(&s.source_file)).unwrap();
-
-        let mut nonce_data = [0; 24];
-        for (o, i) in nonce_data[4..]
-            .iter_mut()
-            .zip(torrent_meta.info_hash.as_bytes().iter())
-        {
-            *o = *i;
-        }
-        let nonce = GenericArray::from_slice(&nonce_data[..]);
-        let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
-        let key = GenericArray::from_slice(s.secret.as_bytes());
-
-        let mut builder = PieceFileStorageEngine::from_torrent_wrapped(&torrent_meta);
-        builder.set_complete();
-        builder.set_crypto(XSalsa20::new(&key, &nonce));
-        let storage_engine = builder.build(piece_file);
-
-        println!(
-            "loaded {} files from torrent file: {:?}",
-            torrent_meta.meta.info.files.len(),
-            fs_impl.add_torrent(&torrent_meta)
-        );
-        fs_impl
-            .storage_backends
-            .insert(torrent_meta.info_hash, storage_engine);
-        println!("added info_hash: {:?}", info_hash);
+    for t in &torrents {
+        fs_impl.add_torrent(t);
     }
 
     rt.block_on(async {

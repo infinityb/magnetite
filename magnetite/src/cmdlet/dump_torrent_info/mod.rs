@@ -12,7 +12,7 @@ pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
 pub fn get_subcommand() -> App<'static, 'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
-        .about("Seed a torrent")
+        .about("dump torrent metadata")
         .arg(
             Arg::with_name("torrent-file")
                 .long("torrent-file")

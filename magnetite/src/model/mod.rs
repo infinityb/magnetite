@@ -1,12 +1,10 @@
-use std::fmt;
-use std::io;
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use failure::Fail;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::fmt;
+use std::io;
+use std::path::PathBuf;
 
 pub mod proto;
 
@@ -28,6 +26,10 @@ pub enum MagnetiteError {
     IoError { kind: io::ErrorKind },
     #[fail(display = "insufficient space")]
     InsufficientSpace,
+    #[fail(display = "completion lost")]
+    CompletionLost,
+    #[fail(display = "internal error: {}", msg)]
+    InternalError { msg: String },
 }
 
 impl From<Truncated> for MagnetiteError {

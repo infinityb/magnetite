@@ -3,3 +3,4 @@ pub mod dump_torrent_info;
 pub mod fuse_mount;
 pub mod seed;
 pub mod validate_mse_tome;
+pub mod host;

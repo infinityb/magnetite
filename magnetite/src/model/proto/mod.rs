@@ -5,12 +5,13 @@ use iresult::IResult;
 
 use super::{BadHandshake, TorrentID};
 use crate::model::MagnetiteError;
+use crate::utils::BytesCow;
 
 // plan:
 //
 // Try to use `Suggest Piece` from http://bittorrent.org/beps/bep_0006.html to
 // increase cloud cache hits, so we don't have to hit the backend storage
-// system as ahrd.
+// system as hard.
 
 const RESERVED_SIZE: usize = 8;
 
@@ -34,24 +35,6 @@ pub struct PieceSlice {
     pub index: u32,
     pub begin: u32,
     pub length: u32,
-}
-
-#[derive(Debug)]
-pub enum BytesCow<'a> {
-    Owned(Bytes),
-    Borrowed(&'a [u8]),
-}
-
-impl<'a> BytesCow<'a> {
-    pub fn as_slice<'z>(&'z self) -> &'z [u8]
-    where
-        'a: 'z,
-    {
-        match *self {
-            BytesCow::Owned(ref by) => by,
-            BytesCow::Borrowed(by) => by,
-        }
-    }
 }
 
 #[derive(Debug)]

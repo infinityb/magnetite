@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::net::IpAddr;
@@ -10,11 +10,9 @@ use tokio::time::Instant;
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
 use iresult::IResult;
-use lru::LruCache;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::NewStreamCipher;
 use salsa20::XSalsa20;
-use sha1::Digest;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -23,17 +21,15 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
-use crate::model::proto::{
-    deserialize, serialize, BytesCow, Handshake, Message, PieceSlice, HANDSHAKE_SIZE,
-};
+use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
 use crate::model::{
     BadHandshake, BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated,
 };
 use crate::storage::{
-    PieceFileStorageEngine, PieceFileStorageEngineLockables, PieceFileStorageEngineVerifyMode,
-    PieceStorageEngine,
+    piece_file, state_wrapper, PieceFileStorageEngine, PieceStorageEngine, StateWrapper,
 };
+use crate::utils::BytesCow;
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "seed";
@@ -94,13 +90,12 @@ fn pop_messages_into(
 async fn collect_pieces(
     content_key: &TorrentID,
     requests: &[PieceSlice],
-    pfse: &PieceFileStorageEngine,
+    pse: &(dyn PieceStorageEngine + Sync + Sync + 'static),
 ) -> Result<Vec<Message<'static>>, MagnetiteError> {
     let mut messages = Vec::new();
     let _offset: usize = 0;
-
     for p in requests {
-        let piece_data = pfse.get_piece(content_key, p.index).await?;
+        let piece_data = pse.get_piece(content_key, p.index).await?;
         if piece_data.len() < p.begin as usize {
             return Err(ProtocolViolation.into());
         }
@@ -126,9 +121,9 @@ async fn send_pieces(
     addr: SocketAddr,
     w: &mut ::tokio::net::tcp::WriteHalf<'_>,
     requests: &[PieceSlice],
-    pfse: &PieceFileStorageEngine,
+    pse: &(dyn PieceStorageEngine + Sync + Sync + 'static),
 ) -> Result<u64, MagnetiteError> {
-    let messages = collect_pieces(content_key, requests, pfse).await?;
+    let messages = collect_pieces(content_key, requests, pse).await?;
     // XXX: allocation - use an iovec when serialize can support it.
     // XXX: trusting user input to be within bounds: piece.length < 64k - header_size
     //      iovecs solve this.
@@ -209,7 +204,7 @@ impl PeerState {
 
 // }
 
-fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSalsa20> {
+pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSalsa20> {
     if crypto_secret.len() > 0 {
         let mut nonce_data = [0; 24];
         nonce_data[4..].copy_from_slice(info_hash.as_bytes());
@@ -310,6 +305,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         torrents: HashMap::new(),
         sessions: HashMap::new(),
     };
+
     let mut sources = Vec::new();
     sources.push(TorrentFactory {
         torrent_file: Path::new(
@@ -392,33 +388,53 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         secret: "Y2scZxSQpbxktS7fKR9YpL8uzrh2bSSZ".to_string(),
     });
 
+    let mut pf_builder = PieceFileStorageEngine::builder();
+    let mut state_builder = StateWrapper::builder();
+
     for s in sources.into_iter() {
         let mut fi = File::open(&s.torrent_file).unwrap();
         let mut by = Vec::new();
         fi.read_to_end(&mut by).unwrap();
 
+        let mut pf = File::open(&s.source_file).unwrap();
+
         let mut torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
+
+        // deallocate files, we don't need them for seed on piece file engine
         torrent.meta.info.files = Vec::new();
+
         let tm = Arc::new(torrent);
 
-        let info_hash = tm.info_hash;
-        let have_bitfield = BitField::all(tm.meta.info.pieces.chunks(20).count() as u32);
+        let piece_count = tm.piece_shas.len() as u32;
+        let have_bitfield = BitField::all(piece_count);
 
-        cc.torrents.insert(
-            info_hash,
-            Torrent {
-                id: info_hash,
-                meta: tm,
-                have_bitfield,
-                piece_file_path: s.source_file,
-                crypto_secret: Some(s.secret),
-                tracker_groups: Vec::new(),
+        let mut crypto = None;
+        if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
+            crypto = Some(salsa);
+        }
+
+        pf_builder.register_info_hash(
+            &tm.info_hash,
+            piece_file::Registration {
+                piece_count: piece_count,
+                verify_mode: piece_file::PieceFileStorageEngineVerifyMode::First,
+                crypto: crypto,
+                piece_file: pf.into(),
+            },
+        );
+        state_builder.register_info_hash(
+            &tm.info_hash,
+            state_wrapper::Registration {
+                total_length: tm.total_length,
+                piece_length: tm.meta.info.piece_length,
+                piece_shas: tm.piece_shas.clone().into(),
             },
         );
 
-        println!("added info_hash: {:?}", info_hash);
+        println!("added info_hash: {:?}", tm.info_hash);
     }
 
+    let storage_engine = state_builder.build(pf_builder.build());
     let cc = Arc::new(Mutex::new(cc));
 
     rt.block_on(async {
@@ -438,6 +454,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
             // let state_channel_tx = state_channel_tx.clone();
             let peer_id = peer_id.clone();
+            let storage_engine = storage_engine.clone();
             let cc = Arc::clone(&cc);
 
             tokio::spawn(async move {
@@ -486,21 +503,12 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 .unwrap();
                 socket.write(&hs).await.unwrap();
 
-                let mut builder = PieceFileStorageEngine::from_torrent_wrapped(&torrent.meta);
-                builder.set_complete();
-                if let Some(ref secret) = torrent.crypto_secret {
-                    if let Some(salsa) = get_torrent_salsa(secret, &handshake.info_hash) {
-                        builder.set_crypto(salsa);
-                    }
-                }
-
                 drop(torrent);
 
                 let torrent_meta = Arc::clone(&torrent.meta);
                 let target = torrent_meta.info_hash;
                 let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
                 let piece_file = TokioFile::open(&torrent.piece_file_path).await.unwrap();
-                let storage_engine = builder.build(piece_file);
                 let _have_bitfield =
                     BitField::all(torrent_meta.meta.info.pieces.chunks(20).count() as u32);
 

@@ -15,7 +15,7 @@ pub const SUBCOMMAND_NAME: &str = "assemble-mse-tome";
 pub fn get_subcommand() -> App<'static, 'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
-        .about("Assemble a Magnetite Seeding Engine Tome")
+        .about("Assemble a Magnetite Storage Engine Tome")
         .arg(
             Arg::with_name("torrent-file")
                 .long("torrent-file")

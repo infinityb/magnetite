@@ -4,7 +4,7 @@ use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
 use salsa20::stream_cipher::generic_array::GenericArray;
-use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher}; // SyncStreamCipherSeek
+use salsa20::stream_cipher::{NewStreamCipher, SyncStreamCipher};
 use salsa20::XSalsa20;
 use sha1::{Digest, Sha1};
 

@@ -9,6 +9,7 @@ mod model;
 mod scheduler;
 mod storage;
 mod tracker;
+mod utils;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -32,6 +33,7 @@ fn main() -> Result<(), failure::Error> {
         .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
         .subcommand(cmdlet::validate_mse_tome::get_subcommand())
         .subcommand(cmdlet::fuse_mount::get_subcommand())
+        .subcommand(cmdlet::host::get_subcommand())
         .get_matches();
 
     let verbosity = matches.occurrences_of("v");
@@ -69,6 +71,7 @@ fn main() -> Result<(), failure::Error> {
         cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main,
         cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main,
         cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main,
+        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main,
         _ => panic!("bad argument parse"),
     };
     main_function(args.expect("subcommand args"))

@@ -1205,39 +1205,21 @@ pub struct BinStr<'a>(pub &'a [u8]);
 
 impl<'a> fmt::Debug for BinStr<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const SPECIALS: &[u8; 14] = b"0123456abtnvfr";
-        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-        f.write_char('b')?;
-        f.write_char('"')?;
-
-        let mut from = 0;
-        for (i, c) in self.0.iter().enumerate() {
-            if usize::from(*c) < SPECIALS.len() {
-                // guaranteed all-ascii
-                f.write_str(str::from_utf8(&self.0[from..i]).unwrap())?;
-                let mut special_char_buf = [b'\\', 0];
-                special_char_buf[1] = SPECIALS[*c as usize];
-                f.write_str(str::from_utf8(&special_char_buf).unwrap())?;
-                from = i + 1;
-                continue;
-            }
-            if *c < 32 || 128 <= *c {
-                // guaranteed all-ascii
-                f.write_str(str::from_utf8(&self.0[from..i]).unwrap())?;
-                let mut hex_char_buf = [b'\\', b'x', 0, 0];
-                hex_char_buf[2] = HEX_CHARS[(*c >> 4) as usize];
-                hex_char_buf[3] = HEX_CHARS[(*c & 0x0F) as usize];
-                f.write_str(str::from_utf8(&hex_char_buf).unwrap())?;
-                from = i + 1;
-                continue;
+        write!(f, "b\"")?;
+        for &b in self.0 {
+            match b {
+                b'\0' => write!(f, "\\0")?,
+                b'\"' => write!(f, "\\\"")?,
+                b'\\' => write!(f, "\\\\")?,
+                b'\n' => write!(f, "\\n")?,
+                b'\r' => write!(f, "\\r")?,
+                b'\t' => write!(f, "\\t")?,
+                _ if 0x20 <= b && b < 0x7f => write!(f, "{}", b as char)?,
+                _ => write!(f, "\\x{:02x}", b)?
             }
         }
-
-        // guaranteed all-ascii
-        f.write_str(str::from_utf8(&self.0[from..]).unwrap())?;
-
-        f.write_char('"')
+        write!(f, "\"")?;
+        Ok(())
     }
 }
 
