@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::BytesMut;
@@ -37,34 +37,10 @@ pub fn get_subcommand() -> App<'static, 'static> {
         .version(CARGO_PKG_VERSION)
         .about("Seed a torrent")
         .arg(
-            Arg::with_name("client-secret")
-                .long("client-secret")
-                .value_name("SECRET")
-                .help("Seeds PeerID")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("torrent-file")
-                .long("torrent-file")
+            Arg::with_name("config")
+                .long("config")
                 .value_name("FILE")
-                .help("The torrent file to serve")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("piece-file")
-                .long("piece-file")
-                .value_name("piece-file")
-                .help("The piece file to serve")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("secret")
-                .long("secret")
-                .value_name("VALUE")
-                .help("The secret")
+                .help("config file")
                 .required(true)
                 .takes_value(true),
         )
@@ -280,23 +256,16 @@ async fn start_connection(
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    struct TorrentFactory {
-        torrent_file: PathBuf,
-        source_file: PathBuf,
-        secret: String,
-    }
+    use crate::model::config::LegacyConfig as Config;
 
-    let client_secret = matches.value_of("client-secret").unwrap();
-    let peer_id = TorrentID::generate_peer_id_seeded(&client_secret);
-    let torrent_file = matches.value_of_os("torrent-file").unwrap();
-    let _torrent_file = Path::new(torrent_file).to_owned();
+    let config = matches.value_of("config").unwrap();
+    let mut cfg_fi = File::open(&config).unwrap();
+    let mut cfg_by = Vec::new();
+    cfg_fi.read_to_end(&mut cfg_by).unwrap();
+    let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
-    let piece_file = matches.value_of_os("piece-file").unwrap();
-    let _piece_file = Path::new(piece_file).to_owned();
-
+    let peer_id = TorrentID::generate_peer_id_seeded(&config.client_secret);
     let mut rt = Runtime::new()?;
-
-    let _secret: String = matches.value_of("secret").unwrap().to_string();
 
     let cc = ClientContext {
         session_id_seq: 0,
@@ -307,7 +276,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mut pf_builder = PieceFileStorageEngine::builder();
     let mut state_builder = StateWrapper::builder();
 
-    for s in sources.into_iter() {
+    for s in &config.torrents {
         let mut fi = File::open(&s.torrent_file).unwrap();
         let mut by = Vec::new();
         fi.read_to_end(&mut by).unwrap();
@@ -355,7 +324,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         // suppress connections to these until the value has expired.
         // let connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
 
-        let mut listener = TcpListener::bind("[::]:17862").await.unwrap();
+        let mut listener = TcpListener::bind(&config.seed_bind_addr).await.unwrap();
         // let (state_channel_tx, mut state_channel_rx) = tokio::sync::mpsc::channel(10);
         // tokio::spawn(async move {
         //     while let Some(stat_update) = state_channel_rx.recv().await {

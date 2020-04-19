@@ -4,8 +4,7 @@ use tracing::{event, Level};
 
 use super::TTL;
 use crate::vfs::{
-    Directory, DirectoryChild, FileData, FileEntry, FileEntryData, FilesystemIntegrityError,
-    InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory, Vfs,
+    InvalidPath, NoEntityExists, NotADirectory,
 };
 
 pub trait FuseResultWrapper {
@@ -59,7 +58,7 @@ impl FuseResultWrapper for FuseReplyDirectory {
     type Responder = ReplyDirectory;
     type Result = ();
 
-    fn respond(responder: Self::Responder, result: Self::Result) {
+    fn respond(responder: Self::Responder, _: ()) {
         responder.ok();
     }
 

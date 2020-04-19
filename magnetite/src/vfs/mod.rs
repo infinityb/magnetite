@@ -7,7 +7,7 @@ use fuse::FileType;
 mod errors;
 
 pub use self::errors::{
-    FilesystemIntegrityError, InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory,
+    FilesystemIntegrityError, IsADirectory, InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory,
 };
 use crate::model::TorrentID;
 
@@ -27,8 +27,8 @@ pub struct DirectoryChild {
 #[derive(Debug, Clone)]
 pub struct FileData {
     // length is in FileEntry#size
-    pub info_hash: TorrentID,
-    pub torrent_rel_offset: u64,
+    pub content_key: TorrentID,
+    pub torrent_global_offset: u64,
 }
 
 #[derive(Debug)]

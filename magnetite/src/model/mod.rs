@@ -158,6 +158,19 @@ impl std::error::Error for BadHandshake {}
 
 // --
 
+#[derive(Debug)]
+pub struct InternalError;
+
+impl fmt::Display for InternalError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "InternalError")
+    }
+}
+
+impl std::error::Error for InternalError {}
+
+// --
+
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TorrentID(pub [u8; TORRENT_ID_LENGTH]);
 

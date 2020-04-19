@@ -1,13 +1,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{App, Arg, SubCommand};
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::NewStreamCipher;
 use salsa20::XSalsa20;
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tracing::{event, Level};
@@ -47,17 +45,7 @@ pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<X
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    #[derive(Serialize, Deserialize)]
-    struct Config {
-        torrents: Vec<TorrentFactory>,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct TorrentFactory {
-        torrent_file: PathBuf,
-        source_file: PathBuf,
-        secret: String,
-    }
+    use crate::model::config::LegacyConfig as Config;
 
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();

@@ -1,7 +1,7 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -12,24 +12,24 @@ use clap::{App, Arg, SubCommand};
 use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
 };
-use libc::{c_int, EINVAL, EIO, ENOENT, ENOTDIR};
+use libc::{c_int, EINVAL};
 use serde::{Deserialize, Serialize};
 use slab::Slab;
-use tokio::net::UnixListener;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use crate::model::{TorrentID, TorrentMetaWrapped};
 use crate::storage::disk_cache_layer::CacheWrapper;
-use crate::storage::sha_verify::{ShaVerify, ShaVerifyMode};
 use crate::storage::{
-    piece_file, remote_magnetite::RemoteMagnetite, state_wrapper, GetPieceRequest,
+    multi_piece_read,
+    MultiPieceReadRequest,
+    piece_file, state_wrapper,
     PieceFileStorageEngine, PieceStorageEngineDumb, StateWrapper,
 };
 use crate::vfs::{
-    Directory, DirectoryChild, FileData, FileEntry, FileEntryData, FilesystemIntegrityError,
-    InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory, Vfs,
+    Directory, DirectoryChild, FileData, FileEntry, FileEntryData,
+    NoEntityExists, NotADirectory, Vfs,
 };
 
 mod adapter;
@@ -111,7 +111,7 @@ where
 
         let mut cur_offset: u64 = 0;
         for f in &tm.meta.info.files {
-            let torrent_rel_offset = cur_offset;
+            let torrent_global_offset = cur_offset;
             cur_offset += f.length;
             if f.path == Path::new("") {
                 continue;
@@ -143,8 +143,8 @@ where
                     inode: created_inode,
                     size: f.length,
                     data: FileEntryData::File(FileData {
-                        info_hash: tm.info_hash,
-                        torrent_rel_offset,
+                        content_key: tm.info_hash,
+                        torrent_global_offset,
                     }),
                 },
             );
@@ -209,8 +209,8 @@ where
         let name = name.to_owned();
         tokio::spawn(async move {
             let fs = self_cloned.mutable.lock().await;
-            fuse_result_wrapper::<FuseReplyEntry, _>(reply, move |r| {
-                let entry = fs.vfs.traverse_path(parent, [name].into_iter())?;
+            fuse_result_wrapper::<FuseReplyEntry, _>(reply, move |_reply| {
+                let entry = fs.vfs.traverse_path(parent, [name].iter())?;
                 Ok(file_entry_attrs(&entry))
             });
         });
@@ -220,7 +220,7 @@ where
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
             let fs = self_cloned.mutable.lock().await;
-            fuse_result_wrapper::<FuseReplyAttr, _>(reply, move |r| {
+            fuse_result_wrapper::<FuseReplyAttr, _>(reply, move |_reply| {
                 let entry = fs.vfs.inodes.get(&ino).ok_or(NoEntityExists)?;
                 Ok(file_entry_attrs(&entry))
             });
@@ -236,8 +236,6 @@ where
         size: u32,
         reply: ReplyData,
     ) {
-        // this will get a lot more readable once we port it to `fuse_result_wrapper`
-        // but because VFS isn't aware of piece sizes right now, we cannot do that.
         let self_cloned: Self = self.clone();
 
         if offset < 0 {
@@ -257,58 +255,30 @@ where
             }
 
             if let Some(tf) = target_file {
-                let info = fs.content_info.get_content_info(&tf.info_hash).unwrap();
-                let piece_length = u64::from(info.piece_length);
-
-                let piece_file_offset_start = tf.torrent_rel_offset + offset;
-                let piece_file_offset_end = tf.torrent_rel_offset + offset + size as u64;
-                let piece_index = (piece_file_offset_start / piece_length) as u32;
-                let piece_offset = (piece_file_offset_start % piece_length) as u32;
-                let mut piece_index_end = (piece_file_offset_end / piece_length) as u32;
-                if piece_file_offset_end % piece_length != 0 {
-                    piece_index_end += 1;
-                }
-
-                let piece_sha = info.piece_shas.get(piece_index as usize).unwrap().clone();
-
-                let mut req = GetPieceRequest {
-                    content_key: tf.info_hash,
-                    piece_sha: piece_sha,
+                let info = fs.content_info.get_content_info(&tf.content_key).unwrap();
+                let req = MultiPieceReadRequest {
+                    content_key: tf.content_key,
+                    piece_shas: &info.piece_shas[..],
                     piece_length: info.piece_length,
                     total_length: info.total_length,
-                    piece_index: piece_index,
+
+                    file_offset: offset,
+                    read_length: size as usize,
+                    torrent_global_offset: tf.torrent_global_offset,
                 };
-
-                let mut out_buf = Vec::new();
-
-                for _ in piece_index..piece_index_end {
-                    event!(
-                        Level::DEBUG,
-                        "requesting piece from storage engine: {:?}",
-                        req
-                    );
-                    match fs.storage_backend.get_piece_dumb(&req).await {
-                        Ok(p) => out_buf.extend(&p[..]),
-                        Err(err) => {
-                            event!(Level::ERROR, "failed to fetch piece: {}", err);
-                            reply.error(libc::EIO);
-                            return;
-                        }
+                let bytes = match multi_piece_read(&fs.storage_backend, &req).await {
+                    Ok(by) => by,
+                    Err(err) => {
+                        event!(Level::ERROR, "failed to fetch piece: {}", err);
+                        reply.error(libc::EIO);
+                        return;
                     }
-                    req.piece_index += 1;
-                }
+                };
                 drop(fs);
-                let mut interesting_data = &out_buf[piece_offset as usize..];
-                if (size as usize) < interesting_data.len() {
-                    interesting_data = &interesting_data[..size as usize];
-                }
-                reply.data(interesting_data);
+                reply.data(&bytes[..]);
             } else {
-                reply.error(libc::ENOENT);
-
-                // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
                 drop(fs);
-                // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
+                reply.error(libc::ENOENT);
             }
         });
     }
@@ -319,7 +289,7 @@ where
         ino: u64,
         _fh: u64,
         offset: i64,
-        mut reply: ReplyDirectory,
+        reply: ReplyDirectory,
     ) {
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
@@ -381,14 +351,14 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
-        .arg(
-            Arg::with_name("control-socket")
-                .long("control-socket")
-                .value_name("FILE")
-                .help("Where to bind the control socket")
-                .required(true)
-                .takes_value(true),
-        )
+        // .arg(
+        //     Arg::with_name("control-socket")
+        //         .long("control-socket")
+        //         .value_name("FILE")
+        //         .help("Where to bind the control socket")
+        //         .required(true)
+        //         .takes_value(true),
+        // )
         .arg(
             Arg::with_name("mount-point")
                 .long("mount-point")
@@ -453,8 +423,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     cfg_fi.read_to_end(&mut cfg_by).unwrap();
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
-    let control_socket = matches.value_of_os("control-socket").unwrap();
-    let control_socket = Path::new(control_socket).to_owned();
+    // let control_socket = matches.value_of_os("control-socket").unwrap();
+    // let control_socket = Path::new(control_socket).to_owned();
     let mount_point = matches.value_of_os("mount-point").unwrap();
     let mount_point = Path::new(mount_point).to_owned();
 
@@ -511,7 +481,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let zero_iv = TorrentID::zero();
     use crate::cmdlet::seed::get_torrent_salsa;
     if let Some(salsa) = get_torrent_salsa(&config.storage_engine.cache_secret, &zero_iv) {
-        // cache.set_crypto(salsa);
+        cache.set_crypto(salsa);
     }
 
     use std::fs::OpenOptions;
@@ -562,7 +532,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     }
 
     rt.block_on(async {
-        let _uds = UnixListener::bind(&control_socket)?;
+        // let _uds = UnixListener::bind(&control_socket)?;
         tokio::task::spawn_blocking(move || {
             let options = ["-o", "ro", "-o", "fsname=magnetite"]
                 .iter()

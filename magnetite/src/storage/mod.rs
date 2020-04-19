@@ -1,5 +1,6 @@
-use bytes::Bytes;
 use std::pin::Pin;
+
+use bytes::{Bytes, BytesMut};
 
 pub mod disk_cache_layer;
 pub mod piece_file;
@@ -90,4 +91,54 @@ pub mod utils {
 
         (offset_start, (offset_end - offset_start) as u32)
     }
+}
+
+pub struct MultiPieceReadRequest<'a> {
+    pub content_key: TorrentID,
+    pub piece_shas: &'a [TorrentID],
+    pub piece_length: u32,
+    pub total_length: u64,
+
+    pub torrent_global_offset: u64,
+    pub file_offset: u64,
+    pub read_length: usize,
+}
+
+pub async fn multi_piece_read<S>(
+    storage_engine: &S,
+    request: &MultiPieceReadRequest<'_>,
+) -> Result<Bytes, failure::Error>
+    where S: PieceStorageEngineDumb
+{
+    // all this maths seems common, we need utilities for this.
+    let piece_length = u64::from(request.piece_length);
+    let piece_file_offset_start = request.torrent_global_offset + request.file_offset;
+    let piece_file_offset_end = piece_file_offset_start + request.read_length as u64;
+
+    let piece_index = (piece_file_offset_start / piece_length) as u32;
+    let read_piece_offset = (piece_file_offset_start % piece_length) as usize;
+
+    let mut piece_index_end = (piece_file_offset_end / piece_length) as u32;
+    if piece_file_offset_end % piece_length != 0 {
+        piece_index_end += 1;
+    }
+
+    let mut out_buf = BytesMut::new();
+    for pi in piece_index..piece_index_end {
+        let req = GetPieceRequest {
+            content_key: request.content_key,
+            piece_sha: request.piece_shas.get(pi as usize).unwrap().clone(),
+            piece_length: request.piece_length,
+            total_length: request.total_length,
+            piece_index: pi,
+        };
+
+        let p = storage_engine.get_piece_dumb(&req).await?;
+        out_buf.extend_from_slice(&p[..]);
+    }
+
+    // drop the unwanted part at the start of the first piece.
+    drop(out_buf.split_to(read_piece_offset));
+    // and drop off the unwanted data at the end of the last piece.
+    Ok(out_buf.split_off(request.read_length).freeze())
 }

@@ -5,6 +5,24 @@ use serde::{Deserialize, Serialize};
 use crate::storage::sha_verify::ShaVerifyMode;
 
 #[derive(Serialize, Deserialize)]
+pub struct LegacyConfig {
+    #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
+    pub seed_bind_addr: String, // "[::]:17862"
+
+    pub torrents: Vec<LegacyTorrentFactory>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LegacyTorrentFactory {
+    pub torrent_file: PathBuf,
+    pub source_file: PathBuf,
+    pub secret: String,
+}
+
+
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     storage_engine: Vec<StorageEngineElement>,
     torrents: Vec<TorrentFactory>,

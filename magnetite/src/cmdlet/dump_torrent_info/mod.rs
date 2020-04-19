@@ -3,13 +3,9 @@ use std::io::Read;
 use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use salsa20::stream_cipher::SyncStreamCipher;
-use salsa20::XSalsa20;
 use sha1::{Digest, Sha1};
-use std::io::Write;
-use std::path::PathBuf;
 
-use crate::model::{TorrentID, TorrentMetaWrapped};
+use crate::model::TorrentID;
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
@@ -26,21 +22,11 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
-        .arg(
-            Arg::with_name("tome")
-                .long("tome")
-                .value_name("FILE")
-                .help("The tome file to read")
-                .required(true)
-                .takes_value(true),
-        )
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
-    let tome = matches.value_of_os("tome").unwrap();
-    let tome = Path::new(tome).to_owned();
 
     println!("torrent_file = {:?}", torrent_file.display());
 

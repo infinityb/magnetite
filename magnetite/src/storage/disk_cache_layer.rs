@@ -1,5 +1,4 @@
-use core::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::SeekFrom;
 use std::pin::Pin;
