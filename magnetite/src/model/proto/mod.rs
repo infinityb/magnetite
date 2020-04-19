@@ -1,5 +1,5 @@
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
 use iresult::IResult;
 
@@ -213,7 +213,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
             drop(from.split_to(size + 4));
             IResult::Done(Message::Port { dht_port })
         }
-        other => IResult::Err(MagnetiteError::ProtocolViolation),
+        _ => IResult::Err(MagnetiteError::ProtocolViolation),
     }
 }
 

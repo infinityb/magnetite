@@ -2,15 +2,13 @@ use core::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 use std::io::SeekFrom;
-use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use futures::future::FutureExt;
-use rand::{thread_rng, Rng};
 use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
@@ -21,31 +19,9 @@ use tracing::{event, Level};
 #[cfg(target_os = "linux")]
 use nix::fcntl::{fallocate, FallocateFlags};
 
-use crate::model::{MagnetiteError, ProtocolViolation, TorrentID};
-use crate::storage::{GetPieceRequest, PieceStorageEngine, PieceStorageEngineDumb};
-
-// we also need this in the PieceFile storage engine. lets generalize and use composition, if we can.
-#[derive(Clone)]
-pub struct Inflight {
-    // starts off as None and is eventually resolved exactly once.
-    finished: watch::Receiver<Option<Result<Bytes, MagnetiteError>>>,
-}
-
-impl Inflight {
-    pub fn complete(
-        mut self,
-    ) -> impl std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send {
-        async move {
-            loop {
-                match self.finished.recv().await {
-                    Some(Some(v)) => return v,
-                    Some(None) => continue,
-                    None => return Err(MagnetiteError::CompletionLost),
-                }
-            }
-        }
-    }
-}
+use super::piggyback::Inflight;
+use crate::model::{MagnetiteError, TorrentID};
+use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
 
 #[derive(Clone)]
 struct PieceCacheEntry {
@@ -144,6 +120,36 @@ struct FileSpan {
     length: u64,
 }
 
+async fn load_from_disk(
+    file: Arc<Mutex<TokioFile>>,
+    crypto: Option<Arc<Mutex<XSalsa20>>>,
+    piece_length: u32,
+    piece_length_nopad: u32,
+    file_position: u64,
+) -> Result<Bytes, MagnetiteError> {
+    let mut piece_data = vec![0; piece_length as usize];
+
+    let mut file = file.lock().await;
+    file.seek(SeekFrom::Start(file_position)).await?;
+    file.read_exact(&mut piece_data).await?;
+    drop(file);
+
+    if let Some(cr) = crypto {
+        let mut crlocked = cr.lock().await;
+        crlocked.seek(file_position);
+        crlocked.apply_keystream(&mut piece_data[..]);
+    }
+
+    piece_data.truncate(piece_length_nopad as usize);
+    Ok(Bytes::from(piece_data))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cache_cleanup(_cache: &mut PieceCacheInfo, _adding: u64, _batch_size: u64) -> Vec<FileSpan> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
 fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Vec<FileSpan> {
     #[derive(Debug)]
     struct HeapEntry {
@@ -172,7 +178,7 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
         }
     }
 
-    let mut predicted_used_space = cache.cache_size_cur + adding;
+    let predicted_used_space = cache.cache_size_cur + adding;
     if predicted_used_space < cache.cache_size_max {
         return Vec::new();
     }
@@ -222,28 +228,40 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     out
 }
 
-async fn load_from_disk(
-    file: Arc<Mutex<TokioFile>>,
-    crypto: Option<Arc<Mutex<XSalsa20>>>,
-    piece_length: u32,
-    piece_length_nopad: u32,
-    file_position: u64,
-) -> Result<Bytes, MagnetiteError> {
-    let mut piece_data = vec![0; piece_length as usize];
+#[cfg(not(target_os = "linux"))]
+fn punch_cache(_: &mut TokioFile, _: &[FileSpan]) -> Result<(), nix::Error> {
+    Ok(())
+}
 
-    let mut file = file.lock().await;
-    file.seek(SeekFrom::Start(file_position)).await?;
-    file.read_exact(&mut piece_data).await?;
-    drop(file);
+#[cfg(target_os = "linux")]
+fn punch_cache(cache: &mut TokioFile, punch_spans: &[FileSpan]) -> Result<(), nix::Error> {
+    let start = std::time::Instant::now();
+    let mut byte_acc: u64 = 0;
 
-    if let Some(cr) = crypto {
-        let mut crlocked = cr.lock().await;
-        crlocked.seek(file_position);
-        crlocked.apply_keystream(&mut piece_data[..]);
+    for punch in punch_spans {
+        use std::os::unix::io::AsRawFd;
+
+        byte_acc += punch.length;
+        let flags = FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
+        fallocate(
+            file.as_raw_fd(),
+            flags,
+            punch.start as i64,
+            punch.length as i64,
+        )?;
     }
 
-    piece_data.truncate(piece_length_nopad as usize);
-    Ok(Bytes::from(piece_data))
+    if byte_acc > 0 {
+        event!(
+            Level::INFO,
+            "punched {} bytes out with {} calls in {:?}",
+            byte_acc,
+            punch_spans.len(),
+            start.elapsed(),
+        );
+    }
+
+    Ok(())
 }
 
 impl<P> PieceStorageEngineDumb for CacheWrapper<P>
@@ -261,22 +279,7 @@ where
         let req: GetPieceRequest = req.clone();
 
         async move {
-            let cookie: u64 = thread_rng().gen();
-            event!(
-                Level::TRACE,
-                "{}:{}: acquiring piece-cache lock {}",
-                file!(),
-                line!(),
-                cookie
-            );
             let mut piece_cache = self_cloned.piece_cache.lock().await;
-            event!(
-                Level::TRACE,
-                "{}:{}: acquired piece-cache lock {}",
-                file!(),
-                line!(),
-                cookie
-            );
 
             let cache_entry = piece_cache
                 .pieces
@@ -290,23 +293,6 @@ where
                 drop(infl);
                 drop(cache_entry);
                 drop(piece_cache);
-
-                event!(
-                    Level::TRACE,
-                    "{}:{}: releasing piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
-
-                event!(
-                    Level::TRACE,
-                    "{}:{}: released piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
-
                 return completion_fut.await;
             }
 
@@ -317,23 +303,7 @@ where
             cache_entry.inflight = Some(infl.clone());
 
             drop(cache_entry);
-
-            event!(
-                Level::TRACE,
-                "{}:{}: releasing piece-cache lock {}",
-                file!(),
-                line!(),
-                cookie
-            );
             drop(piece_cache);
-            event!(
-                Level::TRACE,
-                "{}:{}: released piece-cache lock {}",
-                file!(),
-                line!(),
-                cookie
-            );
-
             tokio::spawn(async move {
                 let (_, piece_length_nopad) = super::utils::compute_offset_length(
                     req.piece_index,
@@ -360,6 +330,14 @@ where
                     )
                     .await;
 
+                    if let Ok(ref bytes) = disk_load_res {
+                        event!(
+                            Level::ERROR,
+                            "got piece from cache: len()={:?}",
+                            bytes.len()
+                        );
+                    }
+
                     if let Err(ref err) = disk_load_res {
                         event!(
                             Level::ERROR,
@@ -374,153 +352,67 @@ where
                     // schedule cleanup of inflight marker after a second
                     tokio::time::delay_for(Duration::new(1, 0)).await;
 
-                    let cookie: u64 = thread_rng().gen();
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: acquiring piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: acquired piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
                     if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                         event!(Level::DEBUG, "clearing memory-cached piece");
                         e.inflight = None;
                     }
-
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: releasing piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
                     drop(piece_cache);
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: released piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
-
                     return;
                 }
 
-                event!(Level::INFO, "loading request from upstream");
+                event!(Level::DEBUG, "loading request from upstream");
 
-                let mut punch_spans = Vec::<FileSpan>::new();
-                #[cfg(target_os = "linux")]
-                {
-                    let cookie: u64 = thread_rng().gen();
+                let mut piece_cache = self_cloned.piece_cache.lock().await;
+                let punch_spans = cache_cleanup(
+                    &mut *piece_cache,
+                    cache_entry_cloned.piece_length as u64,
+                    1024 * 1024 * 1024,
+                );
 
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: acquiring piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
-                    let mut piece_cache = self_cloned.piece_cache.lock().await;
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: acquired piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
+                drop(piece_cache);
 
-                    punch_spans = cache_cleanup(
-                        &mut *piece_cache,
-                        cache_entry_cloned.piece_length as u64,
-                        1024 * 1024 * 1024,
-                    );
-
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: releasing piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
-                    drop(piece_cache);
-                    event!(
-                        Level::TRACE,
-                        "{}:{}: released piece-cache lock {}",
-                        file!(),
-                        line!(),
-                        cookie
-                    );
-                }
-
-                let cookie: u64 = thread_rng().gen();
                 let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
-
-                let cookie: u64 = thread_rng().gen();
                 event!(
-                    Level::TRACE,
-                    "{}:{}: acquiring cache-file lock {}",
-                    file!(),
-                    line!(),
-                    cookie
+                    Level::DEBUG,
+                    "loading request from upstream: {}",
+                    if res.is_ok() { "ok" } else { "err" }
                 );
+
                 let mut file = self_cloned.cache_file.lock().await;
-                event!(
-                    Level::TRACE,
-                    "{}:{}: acquired cache-file lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
 
-                let mut byte_acc: u64 = 0;
-                let start = std::time::Instant::now();
-
-                let file_copy = self_cloned.cache_file.clone();
-                #[cfg(target_os = "linux")]
-                for punch in &punch_spans {
-                    byte_acc += punch.length;
-                    let flags =
-                        FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
-                    if let Err(err) = fallocate(
-                        file.as_raw_fd(),
-                        flags,
-                        punch.start as i64,
-                        punch.length as i64,
-                    ) {
-                        event!(Level::ERROR, "failed to punch hole: {}", err);
-                        let _ = tx.broadcast(Some(Err(MagnetiteError::StorageEngineCorruption)));
-                        return;
-                    }
-                }
-
-                if byte_acc > 0 {
-                    event!(
-                        Level::WARN,
-                        "punched {} bytes out with {} calls in {:?}",
-                        byte_acc,
-                        punch_spans.len(),
-                        start.elapsed(),
-                    );
+                if let Err(err) = punch_cache(&mut file, &punch_spans) {
+                    event!(Level::ERROR, "failed to punch hole: {}", err);
+                    let _ = tx.broadcast(Some(Err(MagnetiteError::StorageEngineCorruption)));
+                    return;
                 }
 
                 let mut cache_position = None;
                 if let Ok(ref bytes) = res {
+                    let mut piece_padded = BytesMut::with_capacity(req.piece_length as usize);
+                    piece_padded.extend_from_slice(&bytes[..]);
+
+                    let pre_length = piece_padded.len();
+                    // req.piece_index
+                    piece_padded.resize(req.piece_length as usize, 0);
+                    if pre_length != piece_padded.len() {
+                        event!(
+                            Level::DEBUG,
+                            "padded piece #{}: {} -> {}",
+                            req.piece_index,
+                            pre_length,
+                            piece_padded.len()
+                        );
+                    }
+
                     let write_res = async {
                         let position = file.seek(SeekFrom::End(0)).await?;
                         assert_eq!(position % self_cloned.cache_alignment, 0);
                         cache_position = Some(position);
 
                         let padding_size = {
-                            let size = bytes.len() as u64;
-                            let mut partial = size % self_cloned.cache_alignment;
+                            let size = piece_padded.len() as u64;
+                            let partial = size % self_cloned.cache_alignment;
                             if partial != 0 {
                                 self_cloned.cache_alignment - partial
                             } else {
@@ -528,7 +420,7 @@ where
                             }
                         };
                         let padding = vec![0; padding_size as usize];
-                        file.write_all(&bytes[..]).await?;
+                        file.write_all(&piece_padded[..]).await?;
                         file.write_all(&padding[..]).await?;
 
                         Result::<(), MagnetiteError>::Ok(())
@@ -540,21 +432,7 @@ where
                     }
                 }
 
-                event!(
-                    Level::TRACE,
-                    "{}:{}: releasing cache-file lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
                 drop(file);
-                event!(
-                    Level::TRACE,
-                    "{}:{}: released cache-file lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
 
                 if let Err(ref err) = res {
                     event!(Level::ERROR, "failed to load piece from upstream: {}", err);
@@ -563,23 +441,7 @@ where
                 let _ = tx.broadcast(Some(res));
                 drop(tx);
 
-                let cookie: u64 = thread_rng().gen();
-                event!(
-                    Level::TRACE,
-                    "{}:{}: acquiring piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
                 let mut piece_cache = self_cloned.piece_cache.lock().await;
-                event!(
-                    Level::TRACE,
-                    "{}:{}: acquired piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
-
                 if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                     event!(
                         Level::DEBUG,
@@ -591,41 +453,11 @@ where
                     piece_cache.cache_size_cur += u64::from(e.piece_length);
                 }
 
-                event!(
-                    Level::TRACE,
-                    "{}:{}: releasing piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
                 drop(piece_cache);
-                event!(
-                    Level::TRACE,
-                    "{}:{}: released piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
-
                 // schedule cleanup of inflight marker after a second
                 tokio::time::delay_for(Duration::new(10, 0)).await;
 
-                let cookie: u64 = thread_rng().gen();
-                event!(
-                    Level::TRACE,
-                    "{}:{}: acquiring piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
                 let mut piece_cache = self_cloned.piece_cache.lock().await;
-                event!(
-                    Level::TRACE,
-                    "{}:{}: acquired piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
 
                 if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                     event!(
@@ -637,21 +469,7 @@ where
                     e.inflight = None;
                 }
 
-                event!(
-                    Level::TRACE,
-                    "{}:{}: releasing piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
                 drop(piece_cache);
-                event!(
-                    Level::TRACE,
-                    "{}:{}: released piece-cache lock {}",
-                    file!(),
-                    line!(),
-                    cookie
-                );
             });
 
             return infl.complete().await;

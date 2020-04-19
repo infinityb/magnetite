@@ -1,37 +1,21 @@
-use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::net::IpAddr;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::time::Instant;
 
-use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
-use iresult::IResult;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::NewStreamCipher;
 use salsa20::XSalsa20;
-use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
 use tracing::{event, Level};
-use serde::{Serialize, Deserialize};
 
-use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
-use crate::model::MagnetiteError;
-use crate::model::{
-    BadHandshake, BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated,
-};
-use crate::storage::{
-    piece_file, state_wrapper, PieceFileStorageEngine, PieceStorageEngine, StateWrapper,
-};
+use crate::model::{TorrentID, TorrentMetaWrapped};
+use crate::storage::disk_cache_layer::CacheWrapper;
 use crate::storage::remote_magnetite::start_server;
-use crate::utils::BytesCow;
+use crate::storage::{piece_file, state_wrapper, PieceFileStorageEngine, StateWrapper};
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "host";
@@ -91,7 +75,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let mut by = Vec::new();
         fi.read_to_end(&mut by).unwrap();
 
-        let mut pf = File::open(&s.source_file).unwrap();
+        let pf = File::open(&s.source_file).unwrap();
         let mut torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
 
         // deallocate files, we don't need them for seed on piece file engine
@@ -100,7 +84,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let tm = Arc::new(torrent);
 
         let piece_count = tm.piece_shas.len() as u32;
-        let have_bitfield = BitField::all(piece_count);
 
         let mut crypto = None;
         if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
@@ -111,7 +94,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             &tm.info_hash,
             piece_file::Registration {
                 piece_count: piece_count,
-                verify_mode: piece_file::PieceFileStorageEngineVerifyMode::First,
                 crypto: crypto,
                 piece_file: pf.into(),
             },
@@ -129,13 +111,25 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         println!("added info_hash: {:?}", tm.info_hash);
     }
 
-    let storage_engine = state_builder.build(pf_builder.build());
+    let storage_engine = pf_builder.build();
+    let cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
+    let cache_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("magnetite.cache")
+        .unwrap();
+
+    let storage_engine = state_builder.build(cache.build(cache_file.into(), storage_engine));
 
     rt.block_on(async {
         let mut listener = TcpListener::bind("[::]:17862").await.unwrap();
         loop {
             let storage_engine = storage_engine.clone();
-            let (mut socket, addr) = listener.accept().await.unwrap();
+            let (socket, addr) = listener.accept().await.unwrap();
+            event!(Level::INFO, "got connection from {:?}", addr);
+
             tokio::spawn(async move {
                 if let Err(err) = start_server(socket, storage_engine).await {
                     event!(Level::ERROR, "error: {}", err);

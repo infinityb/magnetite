@@ -1,6 +1,6 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Read;
@@ -12,27 +12,29 @@ use clap::{App, Arg, SubCommand};
 use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
 };
-use libc::{c_int, EIO, ENOENT, ENOTDIR};
-use rand::{thread_rng, Rng};
+use libc::{c_int, EINVAL, EIO, ENOENT, ENOTDIR};
+use serde::{Deserialize, Serialize};
 use slab::Slab;
 use tokio::net::UnixListener;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
-use serde::{Serialize, Deserialize};
-
-mod errors;
-
-pub use self::errors::{
-    FilesystemIntegrityError, InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory,
-};
 
 use crate::model::{TorrentID, TorrentMetaWrapped};
 use crate::storage::disk_cache_layer::CacheWrapper;
+use crate::storage::sha_verify::{ShaVerify, ShaVerifyMode};
 use crate::storage::{
-    piece_file, state_wrapper, GetPieceRequest, PieceFileStorageEngine, PieceStorageEngineDumb,
-    StateWrapper, remote_magnetite::RemoteMagnetite,
+    piece_file, remote_magnetite::RemoteMagnetite, state_wrapper, GetPieceRequest,
+    PieceFileStorageEngine, PieceStorageEngineDumb, StateWrapper,
 };
+use crate::vfs::{
+    Directory, DirectoryChild, FileData, FileEntry, FileEntryData, FilesystemIntegrityError,
+    InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory, Vfs,
+};
+
+mod adapter;
+
+use self::adapter::{fuse_result_wrapper, FuseReplyAttr, FuseReplyDirectory, FuseReplyEntry};
 
 pub mod fuse_api {
     tonic::include_proto!("magnetite.api.fuse");
@@ -42,57 +44,6 @@ use fuse_api::{
     magnetite_fuse_host_server::MagnetiteFuseHost, AddTorrentRequest, AddTorrentResponse,
     RemoveTorrentRequest, RemoveTorrentResponse,
 };
-
-#[derive(Debug)]
-struct Directory {
-    parent: u64,
-    child_inodes: Vec<DirectoryChild>,
-}
-
-#[derive(Debug)]
-struct DirectoryChild {
-    file_name: OsString,
-    ft: FileType,
-    inode: u64,
-}
-
-#[derive(Debug, Clone)]
-struct FileData {
-    // length is in FileAttr#size
-    info_hash: TorrentID,
-    torrent_rel_offset: u64,
-    // piece_index_start: u32,
-    // piece_offset_start: u32,
-}
-
-#[derive(Debug)]
-enum FileEntryData {
-    Dir(Directory),
-    File(FileData),
-}
-
-#[derive(Debug)]
-struct FileEntry {
-    info_hash_owner_counter: u32,
-    attrs: FileAttr,
-    data: FileEntryData,
-}
-
-impl FileEntry {
-    pub fn get_file(&self) -> Option<&FileData> {
-        match self.data {
-            FileEntryData::File(ref rd) => Some(rd),
-            _ => None,
-        }
-    }
-
-    pub fn get_directory(&self) -> Option<&Directory> {
-        match self.data {
-            FileEntryData::Dir(ref dir) => Some(dir),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Debug)]
 enum OpenState {
@@ -113,23 +64,37 @@ struct FilesystemImplMutable<P> {
     storage_backend: P,
     content_info: state_wrapper::ContentInfoManager,
     // info_hash_damage: BTreeSet<(TorrentID, u64)>,
-    inodes: BTreeMap<u64, FileEntry>,
-    inode_seq: u64,
+    vfs: Vfs,
     open_files: Slab<OpenState>,
 }
 
-fn sensible_directory_file_attr(ino: u64) -> FileAttr {
+fn file_entry_attrs(fe: &FileEntry) -> FileAttr {
+    let kind;
+    let perm;
+    let nlink;
+    match fe.data {
+        FileEntryData::Dir(..) => {
+            kind = FileType::Directory;
+            perm = 0o555;
+            nlink = 2;
+        }
+        FileEntryData::File(..) => {
+            kind = FileType::RegularFile;
+            perm = 0o444;
+            nlink = 1;
+        }
+    }
     FileAttr {
-        ino,
-        size: 0,
+        ino: fe.inode,
+        size: fe.size,
         blocks: 0,
         atime: UNIX_EPOCH,
         mtime: UNIX_EPOCH,
         ctime: UNIX_EPOCH,
         crtime: UNIX_EPOCH,
-        kind: FileType::Directory,
-        perm: 0o755,
-        nlink: 2,
+        kind,
+        perm,
+        nlink,
         uid: 501,
         gid: 20,
         rdev: 0,
@@ -137,126 +102,10 @@ fn sensible_directory_file_attr(ino: u64) -> FileAttr {
     }
 }
 
-fn sensible_directory_file_entry(parent: u64, ino: u64) -> FileEntry {
-    FileEntry {
-        info_hash_owner_counter: 1,
-        attrs: sensible_directory_file_attr(ino),
-        data: FileEntryData::Dir(Directory {
-            parent: parent,
-            child_inodes: Default::default(),
-        }),
-    }
-}
-
-fn fs_impl_mkdir<T, P>(
-    fs: &mut FilesystemImplMutable<P>,
-    parent: u64,
-    name: T,
-    owner: TorrentID,
-) -> Result<u64, failure::Error>
-where
-    T: AsRef<OsStr>,
-    P: PieceStorageEngineDumb,
-{
-    let mut affected_inodes = Vec::new();
-
-    let target = fs.inodes.get_mut(&parent).ok_or(NoEntityExists)?;
-    if let FileEntryData::Dir(ref mut dir) = target.data {
-        let parent_inode = target.attrs.ino;
-        affected_inodes.push(parent_inode);
-
-        for chino in &dir.child_inodes {
-            if chino.file_name == name.as_ref() {
-                let inode = chino.inode;
-                affected_inodes.push(inode);
-
-                drop(chino);
-                drop(dir);
-
-                // for v in affected_inodes {
-                //     fs.info_hash_damage.insert((owner, v));
-                // }
-                return Ok(inode);
-            }
-        }
-
-        let created_inode = fs.inode_seq;
-        fs.inode_seq += 1;
-
-        dir.child_inodes.push(DirectoryChild {
-            file_name: name.as_ref().to_owned(),
-            ft: FileType::Directory,
-            inode: created_inode,
-        });
-        affected_inodes.push(created_inode);
-        drop(dir);
-
-        fs.inodes.insert(
-            created_inode,
-            sensible_directory_file_entry(parent_inode, created_inode),
-        );
-
-        // for v in affected_inodes {
-        //     fs.info_hash_damage.insert((owner, v));
-        // }
-
-        return Ok(created_inode);
-    } else {
-        return Err(NotADirectory.into());
-    }
-}
-
 impl<P> FilesystemImplMutable<P>
 where
     P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
 {
-    #[inline]
-    fn traverse_path<I, T>(&self, parent: u64, path_parts: I) -> Result<&FileEntry, failure::Error>
-    where
-        I: Iterator<Item = T>,
-        T: AsRef<OsStr>,
-    {
-        use smallvec::SmallVec;
-        use std::path::Component;
-
-        let mut entry_path = SmallVec::<[&FileEntry; 16]>::new();
-        let root = self.inodes.get(&parent).ok_or(InvalidRootInode)?;
-        entry_path.push(root);
-
-        for part in path_parts {
-            let part: &OsStr = part.as_ref();
-            for comp in Path::new(part).components() {
-                match comp {
-                    Component::RootDir | Component::Prefix(..) => return Err(InvalidPath.into()),
-                    Component::CurDir => (),
-                    Component::ParentDir if entry_path.len() > 1 => {
-                        entry_path.pop();
-                    }
-                    Component::ParentDir => return Err(InvalidPath.into()),
-                    Component::Normal(pp) => {
-                        let current_entry = entry_path[entry_path.len() - 1];
-                        let dir = current_entry.get_directory().ok_or(NotADirectory)?;
-                        let mut found_file = false;
-                        for chino in &dir.child_inodes {
-                            if chino.file_name == pp {
-                                found_file = true;
-                                let next_node = self
-                                    .inodes
-                                    .get(&chino.inode)
-                                    .ok_or(FilesystemIntegrityError)?;
-                                entry_path.push(next_node);
-                            }
-                        }
-                        if !found_file {
-                            return Err(NoEntityExists.into());
-                        }
-                    }
-                }
-            }
-        }
-        Ok(entry_path[entry_path.len() - 1])
-    }
-
     pub fn add_torrent(&mut self, tm: &TorrentMetaWrapped) -> Result<(), failure::Error> {
         use smallvec::SmallVec;
 
@@ -274,39 +123,25 @@ where
             let mut assert_path = SmallVec::<[u64; 8]>::new();
 
             let mut parent = 1;
-            parent = fs_impl_mkdir(self, parent, &tm.meta.info.name, tm.info_hash)?;
+            parent = self.vfs.mkdir(parent, &tm.meta.info.name, tm.info_hash)?;
             assert_path.push(parent);
 
             for p in dir_path.components() {
-                parent = fs_impl_mkdir(self, parent, p, tm.info_hash)?;
+                parent = self.vfs.mkdir(parent, p, tm.info_hash)?;
                 assert_path.push(parent);
             }
 
-            let created_inode = self.inode_seq;
-            self.inode_seq += 1;
+            let created_inode = self.vfs.inode_seq;
+            self.vfs.inode_seq += 1;
 
             assert_path.push(created_inode);
 
-            self.inodes.insert(
+            self.vfs.inodes.insert(
                 created_inode,
                 FileEntry {
                     info_hash_owner_counter: 1,
-                    attrs: FileAttr {
-                        ino: created_inode,
-                        size: f.length,
-                        blocks: 1,
-                        atime: UNIX_EPOCH,
-                        mtime: UNIX_EPOCH,
-                        ctime: UNIX_EPOCH,
-                        crtime: UNIX_EPOCH,
-                        kind: FileType::RegularFile,
-                        perm: 0o444,
-                        nlink: 1,
-                        uid: 501,
-                        gid: 20,
-                        rdev: 0,
-                        flags: 0,
-                    },
+                    inode: created_inode,
+                    size: f.length,
                     data: FileEntryData::File(FileData {
                         info_hash: tm.info_hash,
                         torrent_rel_offset,
@@ -314,7 +149,7 @@ where
                 },
             );
 
-            let target = self.inodes.get_mut(&parent).unwrap();
+            let target = self.vfs.inodes.get_mut(&parent).unwrap();
             if let FileEntryData::Dir(ref mut dir) = target.data {
                 dir.child_inodes.push(DirectoryChild {
                     file_name: AsRef::<OsStr>::as_ref(file_name).to_owned(),
@@ -372,56 +207,23 @@ where
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let self_cloned: Self = self.clone();
         let name = name.to_owned();
-
         tokio::spawn(async move {
-            let cookie: u64 = thread_rng().gen();
-            // event!(Level::DEBUG, "{}:{}: acquiring fs-handle lock {}", file!(), line!(), cookie);
             let fs = self_cloned.mutable.lock().await;
-            // event!(Level::DEBUG, "{}:{}: acquired fs-handle lock {}", file!(), line!(), cookie);
-
-            match fs.traverse_path(parent, [name].iter()) {
-                Ok(fe) => reply.entry(&TTL, &fe.attrs, 0),
-                Err(err) => {
-                    if err.downcast_ref::<NoEntityExists>().is_some() {
-                        reply.error(ENOENT);
-                    } else if err.downcast_ref::<InvalidPath>().is_some() {
-                        reply.error(ENOENT);
-                    } else if err.downcast_ref::<NotADirectory>().is_some() {
-                        reply.error(ENOTDIR);
-                    } else {
-                        event!(
-                            Level::ERROR,
-                            "Responding with EIO due to unexpected error: {}",
-                            err
-                        );
-                        reply.error(EIO);
-                    }
-                }
-            }
-
-            // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
-            drop(fs);
-            // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
+            fuse_result_wrapper::<FuseReplyEntry, _>(reply, move |r| {
+                let entry = fs.vfs.traverse_path(parent, [name].into_iter())?;
+                Ok(file_entry_attrs(&entry))
+            });
         });
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
-            let cookie: u64 = thread_rng().gen();
-            // event!(Level::DEBUG, "{}:{}: acquiring fs-handle lock {}", file!(), line!(), cookie);
             let fs = self_cloned.mutable.lock().await;
-            // event!(Level::DEBUG, "{}:{}: acquired fs-handle lock {}", file!(), line!(), cookie);
-
-            if let Some(pentry) = fs.inodes.get(&ino) {
-                reply.attr(&TTL, &pentry.attrs);
-            } else {
-                reply.error(ENOENT);
-            }
-
-            // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
-            drop(fs);
-            // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
+            fuse_result_wrapper::<FuseReplyAttr, _>(reply, move |r| {
+                let entry = fs.vfs.inodes.get(&ino).ok_or(NoEntityExists)?;
+                Ok(file_entry_attrs(&entry))
+            });
         });
     }
 
@@ -434,75 +236,69 @@ where
         size: u32,
         reply: ReplyData,
     ) {
+        // this will get a lot more readable once we port it to `fuse_result_wrapper`
+        // but because VFS isn't aware of piece sizes right now, we cannot do that.
         let self_cloned: Self = self.clone();
 
         if offset < 0 {
-            reply.error(ENOENT);
+            reply.error(EINVAL);
             return;
         }
+
         let offset = offset as u64;
         tokio::spawn(async move {
-            let cookie: u64 = thread_rng().gen();
-            // event!(Level::DEBUG, "{}:{}: acquiring fs-handle lock {}", file!(), line!(), cookie);
             let fs = self_cloned.mutable.lock().await;
-            // event!(Level::DEBUG, "{}:{}: acquired fs-handle lock {}", file!(), line!(), cookie);
 
             let mut target_file = None;
-            if let Some(pentry) = fs.inodes.get(&ino) {
+            if let Some(pentry) = fs.vfs.inodes.get(&ino) {
                 if let FileEntryData::File(ref file) = pentry.data {
                     target_file = Some(file.clone());
                 }
             }
+
             if let Some(tf) = target_file {
                 let info = fs.content_info.get_content_info(&tf.info_hash).unwrap();
                 let piece_length = u64::from(info.piece_length);
 
-                let piece_file_offset = tf.torrent_rel_offset + offset;
-                let piece_index = (piece_file_offset / piece_length) as u32;
-                let piece_offset = (piece_file_offset % piece_length) as u32;
+                let piece_file_offset_start = tf.torrent_rel_offset + offset;
+                let piece_file_offset_end = tf.torrent_rel_offset + offset + size as u64;
+                let piece_index = (piece_file_offset_start / piece_length) as u32;
+                let piece_offset = (piece_file_offset_start % piece_length) as u32;
+                let mut piece_index_end = (piece_file_offset_end / piece_length) as u32;
+                if piece_file_offset_end % piece_length != 0 {
+                    piece_index_end += 1;
+                }
 
                 let piece_sha = info.piece_shas.get(piece_index as usize).unwrap().clone();
 
-                let req = GetPieceRequest {
+                let mut req = GetPieceRequest {
                     content_key: tf.info_hash,
                     piece_sha: piece_sha,
                     piece_length: info.piece_length,
                     total_length: info.total_length,
                     piece_index: piece_index,
                 };
-                event!(
-                    Level::INFO,
-                    "requesting piece from storage engine: {:?}",
-                    req
-                );
-                let piece_data_res_fut = fs.storage_backend.get_piece_dumb(&req);
 
-                // event!(Level::DEBUG, "{}:{}: releasing fs-handle lock {}", file!(), line!(), cookie);
+                let mut out_buf = Vec::new();
+
+                for _ in piece_index..piece_index_end {
+                    event!(
+                        Level::DEBUG,
+                        "requesting piece from storage engine: {:?}",
+                        req
+                    );
+                    match fs.storage_backend.get_piece_dumb(&req).await {
+                        Ok(p) => out_buf.extend(&p[..]),
+                        Err(err) => {
+                            event!(Level::ERROR, "failed to fetch piece: {}", err);
+                            reply.error(libc::EIO);
+                            return;
+                        }
+                    }
+                    req.piece_index += 1;
+                }
                 drop(fs);
-                // event!(Level::DEBUG, "{}:{}: released fs-handle lock {}", file!(), line!(), cookie);
-
-                let piece_data_res = piece_data_res_fut.await;
-
-                event!(
-                    Level::INFO,
-                    "requesting piece from storage engine: {:?} -> {}",
-                    req,
-                    if piece_data_res.is_ok() {
-                        "ok"
-                    } else {
-                        "error"
-                    }
-                );
-                let piece_data = match piece_data_res {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        event!(Level::ERROR, "failed to fetch piece: {}", err);
-                        reply.error(libc::EIO);
-                        return;
-                    }
-                };
-
-                let mut interesting_data = &piece_data[piece_offset as usize..];
+                let mut interesting_data = &out_buf[piece_offset as usize..];
                 if (size as usize) < interesting_data.len() {
                     interesting_data = &interesting_data[..size as usize];
                 }
@@ -521,57 +317,50 @@ where
         &mut self,
         _req: &Request,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
             let mut fs = self_cloned.mutable.lock().await;
-            let FilesystemImplMutable {
-                ref mut open_files,
-                ref mut inodes,
-                ..
-            } = &mut *fs;
+            fuse_result_wrapper::<FuseReplyDirectory, _>(reply, move |reply| {
+                let FilesystemImplMutable { ref mut vfs, .. } = &mut *fs;
 
-            let dir = inodes.get(&ino).unwrap().get_directory().unwrap();
-            let mut replies = 0;
-            let fh = fh as usize;
-            if offset <= 0 {
-                if reply.add(ino, 1, FileType::Directory, ".") {
-                    reply.ok();
-                    return;
-                }
-                replies += 1;
-            }
-            if offset <= 1 {
-                if reply.add(dir.parent, 2, FileType::Directory, "..") {
-                    reply.ok();
-                    return;
-                }
-                replies += 1;
-            }
+                let dir = vfs
+                    .inodes
+                    .get(&ino)
+                    .ok_or(NoEntityExists)?
+                    .get_directory()
+                    .ok_or(NotADirectory)?;
 
-            {
+                if offset <= 0 {
+                    if reply.add(ino, 1, FileType::Directory, ".") {
+                        return Ok(());
+                    }
+                }
+
+                if offset <= 1 {
+                    if reply.add(dir.parent, 2, FileType::Directory, "..") {
+                        return Ok(());
+                    }
+                }
+
                 let mut idx: usize = 0;
                 if 2 <= offset {
                     idx = offset as usize - 2;
                 }
+
                 // later, we can reserve the lower few bits of the offset for internal stuff,
                 // and bitshift it to get the resumption inode.
                 for (i, chino) in dir.child_inodes.iter().enumerate().skip(idx) {
                     if reply.add(chino.inode, (i + 3) as i64, chino.ft, &chino.file_name) {
-                        reply.ok();
-                        return;
+                        return Ok(());
                     }
-                    replies += 1;
                 }
-            }
 
-            drop(dir);
-            drop(fs);
-
-            reply.ok();
+                Ok(())
+            });
         });
     }
 }
@@ -641,16 +430,22 @@ impl MagnetiteFuseHost for FuseHost {
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     #[derive(Serialize, Deserialize)]
     struct Config {
+        storage_engine: Engine,
+        torrents: Vec<TorrentFactory>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Engine {
         cache_secret: String,
         upstream_server: String,
-        torrents: Vec<TorrentFactory>,
     }
 
     #[derive(Serialize, Deserialize)]
     struct TorrentFactory {
         torrent_file: PathBuf,
+        source_file: PathBuf,
+        secret: String,
     }
-
 
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
@@ -664,8 +459,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mount_point = Path::new(mount_point).to_owned();
 
     let mut rt = Runtime::new()?;
-    let mut pf_builder = RemoteMagnetite::connected(&config.upstream_server);
     let mut state_builder = StateWrapper::builder();
+    let mut pf_builder = PieceFileStorageEngine::builder();
 
     let mut torrents = Vec::new();
     for s in &config.torrents {
@@ -673,10 +468,27 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let mut by = Vec::new();
         fi.read_to_end(&mut by).unwrap();
 
-        let mut torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
+        let torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
         let tm = Arc::new(torrent);
 
         let piece_count = tm.piece_shas.len() as u32;
+
+        let pf = File::open(&s.source_file).unwrap();
+
+        let mut crypto = None;
+        if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
+            crypto = Some(salsa);
+        }
+
+        pf_builder.register_info_hash(
+            &tm.info_hash,
+            piece_file::Registration {
+                piece_count: piece_count,
+                crypto: crypto,
+                piece_file: pf.into(),
+            },
+        );
+
         state_builder.register_info_hash(
             &tm.info_hash,
             state_wrapper::Registration {
@@ -690,14 +502,16 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         torrents.push(tm);
     }
 
+    // let storage_engine =
+    //     rt.block_on(async { RemoteMagnetite::connected(&config.storage_engine.upstream_server) });
 
-    let storage_engine = pf_builder.build();
+    // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::None);
     let mut cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
 
     let zero_iv = TorrentID::zero();
     use crate::cmdlet::seed::get_torrent_salsa;
-    if let Some(salsa) = get_torrent_salsa(&config.cache_secret, &zero_iv) {
-        cache.set_crypto(salsa);
+    if let Some(salsa) = get_torrent_salsa(&config.storage_engine.cache_secret, &zero_iv) {
+        // cache.set_crypto(salsa);
     }
 
     use std::fs::OpenOptions;
@@ -710,35 +524,25 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         .open("magnetite.cache")
         .unwrap();
 
+    let storage_engine = pf_builder.build();
     let storage_engine = cache.build(cache_file.into(), storage_engine);
+    // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::None);
 
     let mut fs_impl = FilesystemImplMutable {
         storage_backend: storage_engine,
         content_info: state_builder.build_content_info_manager(),
-        inodes: BTreeMap::new(),
-        inode_seq: 3,
+        vfs: Vfs {
+            inodes: BTreeMap::new(),
+            inode_seq: 3,
+        },
         open_files: Slab::new(),
     };
-    fs_impl.inodes.insert(
+    fs_impl.vfs.inodes.insert(
         1,
         FileEntry {
             info_hash_owner_counter: 1,
-            attrs: FileAttr {
-                ino: 1,
-                size: 0,
-                blocks: 0,
-                atime: UNIX_EPOCH,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
-                crtime: UNIX_EPOCH,
-                kind: FileType::Directory,
-                perm: 0o555,
-                nlink: 2,
-                uid: 501,
-                gid: 20,
-                rdev: 0,
-                flags: 0,
-            },
+            inode: 1,
+            size: 0,
             data: FileEntryData::Dir(Directory {
                 parent: 1,
                 child_inodes: Default::default(),
@@ -746,7 +550,15 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         },
     );
     for t in &torrents {
-        fs_impl.add_torrent(t);
+        if let Err(err) = fs_impl.add_torrent(t) {
+            event!(
+                Level::ERROR,
+                "{}:{}: failed to add torrent: {}",
+                file!(),
+                line!(),
+                err
+            );
+        }
     }
 
     rt.block_on(async {
@@ -757,7 +569,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 .map(|o| o.as_ref())
                 .collect::<Vec<&OsStr>>();
 
-            println!("mounting with {} known inodes", fs_impl.inodes.len());
+            println!("mounting with {} known inodes", fs_impl.vfs.inodes.len());
             let fs_impl = FilesystemImpl {
                 mutable: Arc::new(Mutex::new(fs_impl)),
             };

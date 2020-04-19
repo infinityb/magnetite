@@ -1215,7 +1215,7 @@ impl<'a> fmt::Debug for BinStr<'a> {
                 b'\r' => write!(f, "\\r")?,
                 b'\t' => write!(f, "\\t")?,
                 _ if 0x20 <= b && b < 0x7f => write!(f, "{}", b as char)?,
-                _ => write!(f, "\\x{:02x}", b)?
+                _ => write!(f, "\\x{:02x}", b)?,
             }
         }
         write!(f, "\"")?;

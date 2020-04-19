@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use clap::{App, AppSettings, Arg};
 
 use tracing::{event, Level};
@@ -10,6 +12,7 @@ mod scheduler;
 mod storage;
 mod tracker;
 mod utils;
+mod vfs;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -76,58 +79,3 @@ fn main() -> Result<(), failure::Error> {
     };
     main_function(args.expect("subcommand args"))
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::model::proto::{Handshake, HANDSHAKE_PREFIX};
-
-//     #[test]
-//     fn parse_header_full() {
-//         static HEADER: &'static [u8] = b"\x13BitTorrent protocol\x00\x00\x00\x00\x00\x10\x00\x01\x14\xbe\xab\xae\xc8W\x99\x7f]p\xc1\x94\x10`kI\x1b\xb4\xf1\x9b-lt0D00-\xea/\x9f}\xd4\xb1\xa1$\xde\xaf\xe9\xb6";
-//         let header = Handshake::new(HEADER).unwrap();
-//         assert_eq!(header.get_protocol(), HANDSHAKE_PREFIX);
-//         assert_eq!(header.get_reserved(), b"\x00\x00\x00\x00\x00\x10\x00\x01");
-//         assert_eq!(
-//             header.get_info_hash(),
-//             b"\x14\xbe\xab\xae\xc8W\x99\x7f]p\xc1\x94\x10`kI\x1b\xb4\xf1\x9b"
-//         );
-//         assert!(header.has_peer_id());
-//         assert_eq!(
-//             header.get_peer_id(),
-//             Some(&b"-lt0D00-\xea/\x9f}\xd4\xb1\xa1$\xde\xaf\xe9\xb6"[..])
-//         );
-//     }
-
-//     #[test]
-//     fn parse_header_partial() {
-//         static HEADER: &'static [u8] = b"\x13BitTorrent protocol\x00\x00\x00\x00\x00\x10\x00\x01\x14\xbe\xab\xae\xc8W\x99\x7f]p\xc1\x94\x10`kI\x1b\xb4\xf1\x9b";
-//         let header = Handshake::new(HEADER).unwrap();
-//         assert_eq!(header.get_protocol(), HANDSHAKE_PREFIX);
-//         assert_eq!(header.get_reserved(), b"\x00\x00\x00\x00\x00\x10\x00\x01");
-//         assert_eq!(
-//             header.get_info_hash(),
-//             b"\x14\xbe\xab\xae\xc8W\x99\x7f]p\xc1\x94\x10`kI\x1b\xb4\xf1\x9b"
-//         );
-//         assert!(!header.has_peer_id());
-//         assert_eq!(header.get_peer_id(), None);
-//     }
-
-//     #[test]
-//     fn parse_header_oversized() {
-//         static HEADER: &'static [u8] = b"\x13BitTorrent protocol\x00\x00\x00\x00\x00\x10\x00\x01\x14\xbe\xab\xae\xc8W\x99\x7f]p\xc1\x94\x10`kI\x1b\xb4\xf1\x9b-lt0D00-\xea/\x9f}\xd4\xb1\xa1$\xde\xaf\xe9\xb6xxx";
-//         let header = Handshake::new(HEADER).unwrap();
-//         assert_eq!(header.as_bytes().len(), 68);
-//     }
-// }
-
-// #[cfg(feature = "afl")]
-// pub mod afl {
-//     use crate::model::proto::{Handshake, HANDSHAKE_PREFIX};
-//     use std::io::{self, Read};
-
-//     pub fn afl_header_buf() {
-//         let mut buf = Vec::new();
-//         io::stdin().take(1 << 20).read_to_end(&mut buf).unwrap();
-//         let _ = Header::new(&buf);
-//     }
-// }

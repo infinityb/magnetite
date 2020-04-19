@@ -1,15 +1,16 @@
 use bytes::Bytes;
 use std::pin::Pin;
-use tokio::sync::broadcast;
 
 pub mod disk_cache_layer;
 pub mod piece_file;
+pub mod piggyback;
 pub mod remote_magnetite;
+pub mod sha_verify;
 pub mod state_wrapper;
 
 pub const DOWNLOAD_CHUNK_SIZE: u32 = 16 * 1024;
 
-pub use self::piece_file::{PieceFileStorageEngine, PieceFileStorageEngineVerifyMode};
+pub use self::piece_file::PieceFileStorageEngine;
 pub use self::state_wrapper::StateWrapper;
 use crate::model::{MagnetiteError, TorrentID};
 
@@ -37,39 +38,39 @@ pub trait PieceStorageEngineDumb {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>>;
 }
 
-pub trait PieceStorageEngineMut: PieceStorageEngine {
-    fn write_chunk(
-        &self,
-        content_key: &TorrentID,
-        piece_id: u32,
-        chunk_offset: u32,
-        finalize_piece: bool,
-        data: Bytes,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>>;
-}
+// pub trait PieceStorageEngineMut: PieceStorageEngine {
+//     fn write_chunk(
+//         &self,
+//         content_key: &TorrentID,
+//         piece_id: u32,
+//         chunk_offset: u32,
+//         finalize_piece: bool,
+//         data: Bytes,
+//     ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>>;
+// }
 
-pub struct CompletionEvent {
-    info_hash: TorrentID,
-    piece_id: u32,
-}
+// pub struct CompletionEvent {
+//     info_hash: TorrentID,
+//     piece_id: u32,
+// }
 
-pub struct WriteChunkResponse {
-    piece_completed: bool,
-    piece_failed_validation: bool,
-    completion: broadcast::Receiver<Result<CompletionEvent, MagnetiteError>>,
-}
+// pub struct WriteChunkResponse {
+//     piece_completed: bool,
+//     piece_failed_validation: bool,
+//     completion: broadcast::Receiver<Result<CompletionEvent, MagnetiteError>>,
+// }
 
-impl WriteChunkResponse {
-    pub fn write_completed_piece(&self) -> bool {
-        self.piece_completed
-    }
+// impl WriteChunkResponse {
+//     pub fn write_completed_piece(&self) -> bool {
+//         self.piece_completed
+//     }
 
-    pub fn piece_failed_validation(&self) -> bool {
-        self.piece_failed_validation
-    }
-}
+//     pub fn piece_failed_validation(&self) -> bool {
+//         self.piece_failed_validation
+//     }
+// }
 
-mod utils {
+pub mod utils {
     #[inline]
     pub fn compute_offset(index: u32, atom_length: u32, total_length: u64) -> (u64, u64) {
         let (start, length) = compute_offset_length(index, atom_length, total_length);

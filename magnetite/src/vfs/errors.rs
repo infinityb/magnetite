@@ -29,6 +29,18 @@ impl std::error::Error for NotADirectory {}
 // --
 
 #[derive(Debug)]
+pub struct IsADirectory;
+
+impl fmt::Display for IsADirectory {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "IsADirectory")
+    }
+}
+
+impl std::error::Error for IsADirectory {}
+// --
+
+#[derive(Debug)]
 pub struct NoEntityExists;
 
 impl fmt::Display for NoEntityExists {

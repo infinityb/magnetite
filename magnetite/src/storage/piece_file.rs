@@ -8,43 +8,13 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
-use sha1::{Digest, Sha1};
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncReadExt;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 use super::{GetPieceRequest, PieceStorageEngineDumb};
-use crate::model::{
-    BitField, MagnetiteError, ProtocolViolation, StorageEngineCorruption, TorrentID,
-};
-use crate::storage::CompletionEvent;
-
-#[derive(Debug)]
-pub enum PieceFileStorageEngineVerifyState {
-    Never,
-    First { verified: BitField },
-    Always,
-}
-
-#[derive(Debug)]
-pub enum PieceFileStorageEngineVerifyMode {
-    Never,
-    First,
-    Always,
-}
-
-impl PieceFileStorageEngineVerifyState {
-    pub fn new(mode: PieceFileStorageEngineVerifyMode, bf_len: u32) -> Self {
-        match mode {
-            PieceFileStorageEngineVerifyMode::Never => PieceFileStorageEngineVerifyState::Never,
-            PieceFileStorageEngineVerifyMode::First => PieceFileStorageEngineVerifyState::First {
-                verified: BitField::all(bf_len),
-            },
-            PieceFileStorageEngineVerifyMode::Always => PieceFileStorageEngineVerifyState::Always,
-        }
-    }
-}
+use crate::model::{BitField, MagnetiteError, ProtocolViolation, TorrentID};
 
 pub struct InProgress {
     // for interior pieces:
@@ -52,12 +22,11 @@ pub struct InProgress {
     // for the last piece, we only count existing chunks
     //   self.chunks.len() == ceil(float(total_length % piece_length) / DOWNLOAD_CHUNK_SIZE)
     pub chunks: BitField,
-    pub completion: broadcast::Sender<Result<CompletionEvent, MagnetiteError>>,
+    // pub completion: broadcast::Sender<Result<CompletionEvent, MagnetiteError>>,
 }
 
 #[derive(Clone)]
 struct TorrentState {
-    verify_pieces: Arc<Mutex<PieceFileStorageEngineVerifyState>>,
     crypto: Option<Arc<Mutex<XSalsa20>>>,
     piece_file: Arc<Mutex<TokioFile>>,
 }
@@ -73,19 +42,15 @@ pub struct Builder {
 
 pub struct Registration {
     pub piece_count: u32,
-    pub verify_mode: PieceFileStorageEngineVerifyMode,
     pub crypto: Option<XSalsa20>,
     pub piece_file: TokioFile,
 }
 
 impl Builder {
     pub fn register_info_hash(&mut self, content_key: &TorrentID, reg: Registration) {
-        let vstate = PieceFileStorageEngineVerifyState::new(reg.verify_mode, reg.piece_count);
-
         self.torrents.insert(
             *content_key,
             TorrentState {
-                verify_pieces: Arc::new(Mutex::new(vstate)),
                 crypto: reg.crypto.map(|x| Arc::new(Mutex::new(x))),
                 piece_file: Arc::new(Mutex::new(reg.piece_file)),
             },
@@ -263,18 +228,6 @@ impl PieceStorageEngineDumb for PieceFileStorageEngine {
             let (piece_offset_start, piece_offset_end) =
                 super::utils::compute_offset(req.piece_index, req.piece_length, req.total_length);
 
-            // We could get into a state where we verify a piece twice since we don't record
-            // that we have an inflight verification.
-            let mut verify_pieces = ts.verify_pieces.lock().await;
-            let run_verify = match &*verify_pieces {
-                PieceFileStorageEngineVerifyState::Never => false,
-                PieceFileStorageEngineVerifyState::First { ref verified } => {
-                    !verified.has(req.piece_index)
-                }
-                PieceFileStorageEngineVerifyState::Always => true,
-            };
-            drop(verify_pieces);
-
             let mut piece_file = ts.piece_file.lock().await;
             piece_file.seek(SeekFrom::Start(piece_offset_start)).await?;
 
@@ -287,24 +240,6 @@ impl PieceStorageEngineDumb for PieceFileStorageEngine {
                 let mut cr = crypto.lock().await;
                 cr.seek(piece_offset_start);
                 cr.apply_keystream(&mut chonker);
-            }
-
-            if run_verify {
-                let mut hasher = Sha1::new();
-                hasher.input(&chonker);
-                let sha = hasher.result();
-                if sha[..] != req.piece_sha.0[..] {
-                    return Err(StorageEngineCorruption.into());
-                }
-
-                let mut verify_pieces = ts.verify_pieces.lock().await;
-                match &mut *verify_pieces {
-                    PieceFileStorageEngineVerifyState::First { ref mut verified } => {
-                        verified.set(req.piece_index, true);
-                    }
-                    _ => (),
-                }
-                drop(verify_pieces);
             }
 
             Ok(Bytes::from(chonker))

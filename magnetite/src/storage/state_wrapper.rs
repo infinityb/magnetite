@@ -64,7 +64,7 @@ where
         piece_id: u32,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         let piece_key = (*content_key, piece_id);
-        let mut self_cloned: Self = self.clone();
+        let self_cloned: Self = self.clone();
 
         async move {
             let cookie: u64 = thread_rng().gen();

@@ -5,7 +5,6 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::time::Instant;
 
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
@@ -13,7 +12,6 @@ use iresult::IResult;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::NewStreamCipher;
 use salsa20::XSalsa20;
-use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -300,93 +298,11 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let _secret: String = matches.value_of("secret").unwrap().to_string();
 
-    let mut cc = ClientContext {
+    let cc = ClientContext {
         session_id_seq: 0,
         torrents: HashMap::new(),
         sessions: HashMap::new(),
     };
-
-    let mut sources = Vec::new();
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-0-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-0.tome").to_owned(),
-        secret: "C3EsrGPe62jQx6U6Z6JTxCcWKSWpA4G2".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-1-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-1.tome").to_owned(),
-        secret: "RhdmQRQZzbSwbqyKk4T4tzxcQ4BG6V9b".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-2-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-2.tome").to_owned(),
-        secret: "afqR5ALeMtoyYej9UNTQi7YEM4dtdbjQ".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-3-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-3.tome").to_owned(),
-        secret: "4r86Ky8jQQt3JQncXZGg2zBQsNXbdjb9".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-4-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-4.tome").to_owned(),
-        secret: "g9e8mSsydbxKsSqgU6oCoaqpVybfrGfN".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-5-loaded.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-5.tome").to_owned(),
-        secret: "bKDMbbPwuQiY7grxjdaEaQSq53hkhuSK".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-6.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-6.tome").to_owned(),
-        secret: "xDY4RGFDtzk5CUM8N77RBeQ7wB9fujej".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-7.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-7.tome").to_owned(),
-        secret: "qEvcKZiR8ynHC54SeETgrZVjoKGCUke9".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-8.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-8.tome").to_owned(),
-        secret: "4jJZSpMwrzVSNZBZf9RqaR4UxDYy3QT7".to_string(),
-    });
-    sources.push(TorrentFactory {
-        torrent_file: Path::new(
-            "/Users/sell/Downloads/danbooru2019-torrent/danbooru2019-9.torrent",
-        )
-        .to_owned(),
-        source_file: Path::new("/Volumes/home/danbooru2019-9.tome").to_owned(),
-        secret: "Y2scZxSQpbxktS7fKR9YpL8uzrh2bSSZ".to_string(),
-    });
 
     let mut pf_builder = PieceFileStorageEngine::builder();
     let mut state_builder = StateWrapper::builder();
@@ -396,7 +312,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let mut by = Vec::new();
         fi.read_to_end(&mut by).unwrap();
 
-        let mut pf = File::open(&s.source_file).unwrap();
+        let pf = File::open(&s.source_file).unwrap();
 
         let mut torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
 
@@ -406,7 +322,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let tm = Arc::new(torrent);
 
         let piece_count = tm.piece_shas.len() as u32;
-        let have_bitfield = BitField::all(piece_count);
 
         let mut crypto = None;
         if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
@@ -417,7 +332,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             &tm.info_hash,
             piece_file::Registration {
                 piece_count: piece_count,
-                verify_mode: piece_file::PieceFileStorageEngineVerifyMode::First,
                 crypto: crypto,
                 piece_file: pf.into(),
             },
@@ -439,7 +353,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     rt.block_on(async {
         // suppress connections to these until the value has expired.
-        let mut connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
+        // let connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
 
         let mut listener = TcpListener::bind("[::]:17862").await.unwrap();
         // let (state_channel_tx, mut state_channel_rx) = tokio::sync::mpsc::channel(10);
@@ -508,7 +422,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 let torrent_meta = Arc::clone(&torrent.meta);
                 let target = torrent_meta.info_hash;
                 let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
-                let piece_file = TokioFile::open(&torrent.piece_file_path).await.unwrap();
                 let _have_bitfield =
                     BitField::all(torrent_meta.meta.info.pieces.chunks(20).count() as u32);
 
@@ -543,7 +456,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                         pop_messages_into(&mut rbuf, &mut reqs)?;
                         event!(Level::DEBUG, read_requests=?reqs);
                         if let Err(err) = request_queue_tx.send(reqs).await {
-                            event!(Level::WARN, "writer-disappeared");
+                            event!(Level::WARN, "writer-disappeared: {}", err);
                             break;
                         }
 
@@ -553,7 +466,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                                 Err(err) => {
                                     let _: tokio::time::Elapsed = err;
                                     if let Err(err) = request_queue_tx.send(Vec::new()).await {
-                                        event!(Level::WARN, "writer-disappeared");
+                                        event!(Level::WARN, "writer-disappeared: {}", err);
                                         break;
                                     }
                                     continue;

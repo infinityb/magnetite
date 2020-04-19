@@ -179,7 +179,7 @@ impl<'a> Iterator for PieceSetIter<'a> {
 //     }
 // }
 
-struct SummingBitField {
+pub struct SummingBitField {
     damage_counter: u16,
     bit_length: u32,
     next_piece_candidates: Box<usize>,
@@ -212,7 +212,7 @@ impl SummingBitField {
     pub fn add_bitfield(&mut self, bf: &BitField) {
         self.damage_counter = self.damage_counter.saturating_add(1);
 
-        for (pn, (o, is_set)) in self.data.iter_mut().zip(bf.iter()).enumerate() {
+        for (o, is_set) in self.data.iter_mut().zip(bf.iter()) {
             if is_set {
                 *o = add_one_clamping_lob_u8(*o);
             }
@@ -264,25 +264,25 @@ impl DefaultPieceSelectionStrategy {
         self.in_progress.remove(&piece_id);
     }
 
-    pub fn finish_chunk(&mut self, piece_id: u32, chunk_id: u32) {
+    pub fn finish_chunk(&mut self, _piece_id: u32, _chunk_id: u32) {
         //
     }
 
-    pub fn get_work<A>(&mut self, bytes: u64, into: &mut SmallVec<A>)
+    pub fn get_work<A>(&mut self, bytes: u64, _into: &mut SmallVec<A>)
     where
         A: Array<Item = (TorrentID, u32, u32)>,
     {
         // find the 100 rarest pieces which are of high priority. if we don't
         // yet have 100 pieces, continue the same logic but with normal
         // priority pieces.
-        let mut submitted_bytes = 0;
-        let mut high_p = self.high_priority.iter();
-        let mut normal_p = self.normal_priority.iter();
+        let submitted_bytes = 0;
+        let _high_p = self.high_priority.iter();
+        let _normal_p = self.normal_priority.iter();
 
         // into.append(())
         // DOWNLOAD_CHUNK_SIZE
         while submitted_bytes < bytes {
-            for (k, v) in self.in_progress.iter() {
+            for (_k, _v) in self.in_progress.iter() {
                 //
             }
         }

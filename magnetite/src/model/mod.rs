@@ -6,6 +6,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+pub mod config;
 pub mod proto;
 
 use crate::CARGO_PKG_VERSION;
@@ -32,20 +33,26 @@ pub enum MagnetiteError {
     InternalError { msg: String },
 }
 
+impl From<CompletionLost> for MagnetiteError {
+    fn from(_e: CompletionLost) -> MagnetiteError {
+        MagnetiteError::CompletionLost
+    }
+}
+
 impl From<Truncated> for MagnetiteError {
-    fn from(e: Truncated) -> MagnetiteError {
+    fn from(_e: Truncated) -> MagnetiteError {
         MagnetiteError::Truncated
     }
 }
 
 impl From<ProtocolViolation> for MagnetiteError {
-    fn from(e: ProtocolViolation) -> MagnetiteError {
+    fn from(_e: ProtocolViolation) -> MagnetiteError {
         MagnetiteError::ProtocolViolation
     }
 }
 
 impl From<StorageEngineCorruption> for MagnetiteError {
-    fn from(e: StorageEngineCorruption) -> MagnetiteError {
+    fn from(_e: StorageEngineCorruption) -> MagnetiteError {
         MagnetiteError::StorageEngineCorruption
     }
 }
@@ -61,6 +68,19 @@ impl From<io::Error> for MagnetiteError {
         MagnetiteError::IoError { kind: e.kind() }
     }
 }
+
+//
+
+#[derive(Debug)]
+pub struct CompletionLost;
+
+impl fmt::Display for CompletionLost {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "CompletionLost")
+    }
+}
+
+impl std::error::Error for CompletionLost {}
 
 //
 
@@ -109,7 +129,7 @@ pub struct BadHandshake {
 }
 
 #[derive(Debug, Clone)]
-enum BadHandshakeReason {
+pub enum BadHandshakeReason {
     JunkData,
     UnknownInfoHash(TorrentID),
 }
