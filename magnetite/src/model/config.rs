@@ -21,7 +21,6 @@ pub struct LegacyTorrentFactory {
     pub secret: String,
 }
 
-
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     storage_engine: Vec<StorageEngineElement>,

@@ -108,7 +108,8 @@ pub async fn multi_piece_read<S>(
     storage_engine: &S,
     request: &MultiPieceReadRequest<'_>,
 ) -> Result<Bytes, failure::Error>
-    where S: PieceStorageEngineDumb
+where
+    S: PieceStorageEngineDumb,
 {
     // all this maths seems common, we need utilities for this.
     let piece_length = u64::from(request.piece_length);

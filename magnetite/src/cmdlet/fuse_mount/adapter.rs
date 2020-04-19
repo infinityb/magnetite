@@ -3,9 +3,7 @@ use libc::{c_int, EINVAL, EIO, ENOENT, ENOTDIR};
 use tracing::{event, Level};
 
 use super::TTL;
-use crate::vfs::{
-    InvalidPath, NoEntityExists, NotADirectory,
-};
+use crate::vfs::{InvalidPath, NoEntityExists, NotADirectory};
 
 pub trait FuseResultWrapper {
     type Responder;

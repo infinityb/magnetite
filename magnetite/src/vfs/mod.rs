@@ -7,7 +7,8 @@ use fuse::FileType;
 mod errors;
 
 pub use self::errors::{
-    FilesystemIntegrityError, IsADirectory, InvalidPath, InvalidRootInode, NoEntityExists, NotADirectory,
+    FilesystemIntegrityError, InvalidPath, InvalidRootInode, IsADirectory, NoEntityExists,
+    NotADirectory,
 };
 use crate::model::TorrentID;
 

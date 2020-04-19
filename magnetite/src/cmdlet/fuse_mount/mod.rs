@@ -22,14 +22,12 @@ use tracing::{event, Level};
 use crate::model::{TorrentID, TorrentMetaWrapped};
 use crate::storage::disk_cache_layer::CacheWrapper;
 use crate::storage::{
-    multi_piece_read,
-    MultiPieceReadRequest,
-    piece_file, state_wrapper,
-    PieceFileStorageEngine, PieceStorageEngineDumb, StateWrapper,
+    multi_piece_read, piece_file, state_wrapper, MultiPieceReadRequest, PieceFileStorageEngine,
+    PieceStorageEngineDumb, StateWrapper,
 };
 use crate::vfs::{
-    Directory, DirectoryChild, FileData, FileEntry, FileEntryData,
-    NoEntityExists, NotADirectory, Vfs,
+    Directory, DirectoryChild, FileData, FileEntry, FileEntryData, NoEntityExists, NotADirectory,
+    Vfs,
 };
 
 mod adapter;
@@ -283,14 +281,7 @@ where
         });
     }
 
-    fn readdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        reply: ReplyDirectory,
-    ) {
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, reply: ReplyDirectory) {
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
             let mut fs = self_cloned.mutable.lock().await;
