@@ -2,9 +2,13 @@
 
 The ferrous torrent client.
 
-A torrent client written on top of tokio.
+A torrent client written on top of tokio, eventually.  Currently, the target is to finish the
+storage components and run a basic video CDN network on top of it.  Working today: a torrent-centric
+remote file system (via FUSE and HTTP).
 
 https://markuseliasson.se/article/bittorrent-in-python/
+
+https://wiki.theory.org/index.php/BitTorrentSpecification
 
 License
 =======
