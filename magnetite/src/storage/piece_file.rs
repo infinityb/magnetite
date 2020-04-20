@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io;
 use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -207,6 +208,17 @@ impl PieceFileStorageEngine {
 //     }
 // }
 
+async fn piece_file_pread_exact(
+    file: &Mutex<TokioFile>,
+    offset: u64,
+    buf: &mut [u8],
+) -> io::Result<()> {
+    let mut piece_file = file.lock().await;
+    piece_file.seek(SeekFrom::Start(offset)).await?;
+    piece_file.read_exact(buf).await?;
+    Ok(())
+}
+
 impl PieceStorageEngineDumb for PieceFileStorageEngine {
     fn get_piece_dumb(
         &self,
@@ -216,25 +228,20 @@ impl PieceStorageEngineDumb for PieceFileStorageEngine {
         let req: GetPieceRequest = req.clone();
 
         async move {
-            let torrents = self_cloned.torrents.lock().await;
+            let ts: TorrentState = {
+                let torrents = self_cloned.torrents.lock().await;
 
-            let ts: TorrentState = torrents
-                .get(&req.content_key)
-                .ok_or_else(|| ProtocolViolation)?
-                .clone();
-
-            drop(torrents);
+                torrents
+                    .get(&req.content_key)
+                    .ok_or_else(|| ProtocolViolation)?
+                    .clone()
+            };
 
             let (piece_offset_start, piece_offset_end) =
                 super::utils::compute_offset(req.piece_index, req.piece_length, req.total_length);
 
-            let mut piece_file = ts.piece_file.lock().await;
-            piece_file.seek(SeekFrom::Start(piece_offset_start)).await?;
-
             let mut chonker = vec![0; (piece_offset_end - piece_offset_start) as usize];
-            piece_file.read_exact(&mut chonker).await?;
-
-            drop(piece_file);
+            piece_file_pread_exact(&*ts.piece_file, piece_offset_start, &mut chonker[..]).await?;
 
             if let Some(ref crypto) = ts.crypto {
                 let mut cr = crypto.lock().await;

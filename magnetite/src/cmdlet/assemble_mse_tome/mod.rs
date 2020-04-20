@@ -45,7 +45,6 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .long("secret")
                 .value_name("VALUE")
                 .help("The secret")
-                .required(true)
                 .takes_value(true),
         )
 }
@@ -60,7 +59,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let target_path = matches.value_of_os("target").unwrap();
     let target_path = Path::new(target_path).to_owned();
 
-    let secret = matches.value_of("secret").unwrap();
+    let secret = matches.value_of("secret");
 
     let mut buffer = Vec::new();
     let mut file = File::open(&torrent_file).unwrap();
@@ -68,12 +67,20 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let wrapped = TorrentMetaWrapped::from_bytes(&buffer).unwrap();
 
-    let key = GenericArray::from_slice(secret.as_bytes());
-    let mut nonce_data = [0; 24];
-    nonce_data.copy_from_slice(wrapped.info_hash.as_bytes());
+    let mut cipher_owned;
+    let mut cipher;
+    if let Some(ref secret) = secret {
+        let key = GenericArray::from_slice(secret.as_bytes());
+        let mut nonce_data = [0; 24];
+        nonce_data.copy_from_slice(wrapped.info_hash.as_bytes());
 
-    let nonce = GenericArray::from_slice(&nonce_data[..]);
-    let mut cipher = XSalsa20::new(&key, &nonce);
+        let nonce = GenericArray::from_slice(&nonce_data[..]);
+        cipher_owned = XSalsa20::new(&key, &nonce);
+        cipher = Some(&mut cipher_owned);
+    } else {
+        cipher = None;
+    }
+
     let tm: TorrentMeta = bencode::from_bytes(&buffer).unwrap();
 
     let mut output = File::create(target_path).unwrap();
@@ -102,7 +109,12 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     Ok(())
 }
 
-fn copy_and_encrypt<R, W>(b: &mut [u8], s: &mut XSalsa20, w: &mut W, r: &mut R) -> io::Result<()>
+fn copy_and_encrypt<R, W>(
+    b: &mut [u8],
+    s: &mut Option<&mut XSalsa20>,
+    w: &mut W,
+    r: &mut R,
+) -> io::Result<()>
 where
     R: Read,
     W: Write,
@@ -112,7 +124,9 @@ where
         if length == 0 {
             break;
         }
-        s.apply_keystream(&mut b[..length]);
+        if let Some(ref mut ss) = s {
+            ss.apply_keystream(&mut b[..length]);
+        }
         w.write_all(&b[..length])?;
     }
 

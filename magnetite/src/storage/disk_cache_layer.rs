@@ -123,7 +123,7 @@ async fn load_from_disk(
     file: Arc<Mutex<TokioFile>>,
     crypto: Option<Arc<Mutex<XSalsa20>>>,
     piece_length: u32,
-    piece_length_nopad: u32,
+    _piece_length_nopad: u32,
     file_position: u64,
 ) -> Result<Bytes, MagnetiteError> {
     let mut piece_data = vec![0; piece_length as usize];
@@ -139,7 +139,6 @@ async fn load_from_disk(
         crlocked.apply_keystream(&mut piece_data[..]);
     }
 
-    // piece_data.truncate(piece_length_nopad as usize);
     Ok(Bytes::from(piece_data))
 }
 

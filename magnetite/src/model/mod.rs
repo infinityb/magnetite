@@ -69,6 +69,13 @@ impl From<io::Error> for MagnetiteError {
     }
 }
 
+impl From<InternalError> for MagnetiteError {
+    fn from(e: InternalError) -> MagnetiteError {
+        MagnetiteError::InternalError {
+            msg: e.msg.to_string(),
+        }
+    }
+}
 //
 
 #[derive(Debug)]
@@ -159,11 +166,13 @@ impl std::error::Error for BadHandshake {}
 // --
 
 #[derive(Debug)]
-pub struct InternalError;
+pub struct InternalError {
+    pub msg: &'static str,
+}
 
 impl fmt::Display for InternalError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "InternalError")
+        write!(f, "InternalError: {}", self.msg)
     }
 }
 
@@ -253,13 +262,15 @@ impl TorrentID {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentMeta {
+    #[serde(default)]
     pub announce: String,
-    #[serde(rename = "announce-list")]
+    #[serde(rename = "announce-list", default)]
     pub announce_list: Vec<Vec<String>>,
+    #[serde(default)]
     pub comment: String,
-    #[serde(rename = "created by")]
+    #[serde(rename = "created by", default)]
     pub created_by: String,
-    #[serde(rename = "creation date")]
+    #[serde(rename = "creation date", default)]
     pub creation_date: u64,
     pub info: TorrentMetaInfo,
 }

@@ -2,6 +2,8 @@ use std::pin::Pin;
 
 use bytes::{Bytes, BytesMut};
 
+use tokio::sync::Mutex;
+
 pub mod disk_cache_layer;
 pub mod piece_file;
 pub mod piggyback;
@@ -16,6 +18,8 @@ pub use self::sha_verify::{ShaVerify, ShaVerifyMode};
 pub use self::state_wrapper::StateWrapper;
 
 use crate::model::{MagnetiteError, TorrentID};
+use crate::storage::state_wrapper::ContentInfo;
+use crate::storage::state_wrapper::ContentInfoManager;
 
 #[derive(Copy, Clone, Debug)]
 pub struct GetPieceRequest {
@@ -75,6 +79,23 @@ pub trait PieceStorageEngineDumb {
 
 pub mod utils {
     #[inline]
+    pub fn compute_piece_index_lb(position: u64, atom_length: u32) -> u32 {
+        let atom_length = u64::from(atom_length);
+        let piece_index = (position / atom_length) as u32;
+        piece_index
+    }
+
+    #[inline]
+    pub fn compute_piece_index_ub(position: u64, atom_length: u32) -> u32 {
+        let atom_length = u64::from(atom_length);
+        let mut piece_index = (position / atom_length) as u32;
+        if position % atom_length != 0 {
+            piece_index += 1;
+        }
+        piece_index
+    }
+
+    #[inline]
     pub fn compute_offset(index: u32, atom_length: u32, total_length: u64) -> (u64, u64) {
         let (start, length) = compute_offset_length(index, atom_length, total_length);
         (start, start + u64::from(length))
@@ -118,13 +139,10 @@ where
     let piece_file_offset_start = request.torrent_global_offset + request.file_offset;
     let piece_file_offset_end = piece_file_offset_start + request.read_length as u64;
 
-    let piece_index = (piece_file_offset_start / piece_length) as u32;
     let read_piece_offset = (piece_file_offset_start % piece_length) as usize;
-
-    let mut piece_index_end = (piece_file_offset_end / piece_length) as u32;
-    if piece_file_offset_end % piece_length != 0 {
-        piece_index_end += 1;
-    }
+    let piece_index = utils::compute_piece_index_lb(piece_file_offset_start, request.piece_length);
+    let piece_index_end =
+        utils::compute_piece_index_ub(piece_file_offset_end, request.piece_length);
 
     let mut out_buf = BytesMut::new();
     for pi in piece_index..piece_index_end {
@@ -144,4 +162,14 @@ where
     drop(out_buf.split_to(read_piece_offset));
     // and drop off the unwanted data at the end of the last piece.
     Ok(out_buf.split_to(request.read_length).freeze())
+}
+
+pub async fn get_content_info(
+    cim: &Mutex<ContentInfoManager>,
+    content_key: &TorrentID,
+) -> Option<ContentInfo> {
+    // FIXME: a readlock is fine here.
+    let c = cim.lock().await;
+    let ci = c.data.get(content_key)?;
+    Some(ci.clone())
 }

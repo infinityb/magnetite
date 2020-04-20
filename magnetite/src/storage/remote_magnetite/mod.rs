@@ -33,7 +33,7 @@ const WINDOW_SIZE_HARD_LIMIT: usize = 4096;
 const WINDOW_SIZE_START: usize = 5;
 const TXID_RANDOM_MASK: u64 = 0xFFFF_FFFF_FFFF_0000;
 const LATENCY_TARGET_MIN_MILLISECONDS: u32 = 180;
-const LATENCY_TARGET_MAX_MILLISECONDS: u32 = 800;
+const LATENCY_TARGET_MAX_MILLISECONDS: u32 = 1800;
 const CHUNK_SIZE: u32 = 32 * 1024; // 26ms @ 10Mbps
 
 #[test]
@@ -337,7 +337,12 @@ async fn run_connected(
                     current_window_size = 2;
                 }
                 if prev_window_size != current_window_size {
-                    event!(Level::INFO, "halved window size to {}", current_window_size);
+                    event!(
+                        Level::INFO,
+                        "halved window size to {}, current latency {}ms",
+                        current_window_size,
+                        average
+                    );
                 }
             }
         }

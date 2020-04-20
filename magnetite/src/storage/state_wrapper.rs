@@ -4,11 +4,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::future::FutureExt;
-use rand::{thread_rng, Rng};
 use tokio::sync::Mutex;
-use tracing::{event, Level};
 
 use crate::model::{MagnetiteError, ProtocolViolation, TorrentID};
+use crate::storage::get_content_info;
 use crate::storage::{GetPieceRequest, PieceStorageEngine, PieceStorageEngineDumb};
 
 #[derive(Clone)]
@@ -19,7 +18,7 @@ pub struct StateWrapper<P> {
 
 #[derive(Default, Debug, Clone)]
 pub struct ContentInfoManager {
-    data: BTreeMap<TorrentID, ContentInfo>,
+    pub data: BTreeMap<TorrentID, ContentInfo>,
 }
 
 pub struct Builder {
@@ -67,20 +66,9 @@ where
         let self_cloned: Self = self.clone();
 
         async move {
-            let cookie: u64 = thread_rng().gen();
-            event!(Level::DEBUG, "acquiring state-wrapper lock {}", cookie);
-            let state = self_cloned.state.lock().await;
-            event!(Level::DEBUG, "acquired state-wrapper lock {}", cookie);
-
-            let content_info: ContentInfo = state
-                .data
-                .get(&piece_key.0)
-                .ok_or_else(|| ProtocolViolation)?
-                .clone();
-
-            event!(Level::DEBUG, "releasing state-wrapper lock {}", cookie);
-            drop(state);
-            event!(Level::DEBUG, "released state-wrapper lock {}", cookie);
+            let content_info = get_content_info(&*self_cloned.state, &piece_key.0)
+                .await
+                .ok_or(ProtocolViolation)?;
 
             let piece_sha = content_info
                 .piece_shas

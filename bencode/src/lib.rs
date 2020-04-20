@@ -928,13 +928,15 @@ mod test {
 
     #[derive(Serialize, Deserialize, Debug)]
     struct TorrentMeta {
+        #[serde(default)]
         announce: String,
-        #[serde(rename = "announce-list")]
+        #[serde(rename = "announce-list", default)]
         announce_list: Vec<Vec<String>>,
+        #[serde(default)]
         comment: String,
-        #[serde(rename = "created by")]
+        #[serde(rename = "created by", default)]
         created_by: String,
-        #[serde(rename = "creation date")]
+        #[serde(rename = "creation date", default)]
         creation_date: u64,
         info: TorrentMetaInfo,
     }

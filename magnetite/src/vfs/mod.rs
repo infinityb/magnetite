@@ -14,22 +14,22 @@ pub use self::errors::{
     FilesystemIntegrityError, InvalidPath, InvalidRootInode, IsADirectory, NoEntityExists,
     NotADirectory,
 };
-use crate::storage::state_wrapper;
 use crate::model::TorrentID;
+use crate::storage::state_wrapper;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum FileType {
     RegularFile,
     Directory,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Directory {
     pub parent: u64,
     pub child_inodes: Vec<DirectoryChild>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DirectoryChild {
     pub file_name: OsString,
     pub ft: FileType,
@@ -43,13 +43,13 @@ pub struct FileData {
     pub torrent_global_offset: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum FileEntryData {
     Dir(Directory),
     File(FileData),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FileEntry {
     pub info_hash_owner_counter: u32,
     pub inode: u64,
@@ -199,7 +199,6 @@ fn sensible_directory_file_entry(parent: u64, inode: u64) -> FileEntry {
         }),
     }
 }
-
 
 #[derive(Debug)]
 pub struct FilesystemImplMutable<P> {

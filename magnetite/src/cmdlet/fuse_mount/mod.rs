@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -13,8 +13,7 @@ use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
 };
 use libc::{c_int, EINVAL};
-use serde::{Deserialize, Serialize};
-use slab::Slab;
+
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
@@ -22,12 +21,12 @@ use tracing::{event, Level};
 use crate::model::{TorrentID, TorrentMetaWrapped};
 use crate::storage::disk_cache_layer::CacheWrapper;
 use crate::storage::{
-    multi_piece_read, piece_file, state_wrapper, MultiPieceReadRequest, PieceFileStorageEngine,
+    multi_piece_read, state_wrapper, MultiPieceReadRequest, PieceFileStorageEngine,
     PieceStorageEngineDumb, ShaVerify, ShaVerifyMode, StateWrapper,
 };
 use crate::vfs::{
-    Directory, DirectoryChild, FileData, FileEntry, FileEntryData, NoEntityExists, NotADirectory,
-    Vfs, FileType as VfsFileType, FilesystemImpl, FilesystemImplMutable,
+    Directory, FileEntry, FileEntryData, FileType as VfsFileType, FilesystemImpl,
+    FilesystemImplMutable, NoEntityExists, NotADirectory, Vfs,
 };
 
 mod adapter;
@@ -308,7 +307,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let mut rt = Runtime::new()?;
     let mut state_builder = StateWrapper::builder();
-    let mut pf_builder = PieceFileStorageEngine::builder();
+    let _pf_builder = PieceFileStorageEngine::builder();
 
     let mut torrents = Vec::new();
     for s in &config.torrents {
@@ -319,7 +318,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
         let tm = Arc::new(torrent);
 
-        let piece_count = tm.piece_shas.len() as u32;
+        let _piece_count = tm.piece_shas.len() as u32;
 
         // let pf = File::open(&s.source_file).unwrap();
 
