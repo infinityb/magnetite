@@ -67,28 +67,74 @@ impl FuseResultWrapper for FuseReplyDirectory {
 
 // --
 
-pub fn fuse_result_wrapper<P, F>(mut reply: P::Responder, f: F) -> ()
+pub fn fuse_result_wrapper<P, F>(mut responder: P::Responder, f: F) -> FuseCompleter<P>
 where
     P: FuseResultWrapper,
     F: FnOnce(&mut P::Responder) -> Result<P::Result, failure::Error>,
 {
-    match f(&mut reply) {
-        Ok(v) => P::respond(reply, v),
+    match f(&mut responder) {
+        Ok(result) => FuseCompleter {
+            responder: responder,
+            inner: FuseCompleterInner::Respond(result),
+        },
         Err(err) => {
             if err.downcast_ref::<NoEntityExists>().is_some() {
-                P::error(reply, ENOENT);
+                FuseCompleter {
+                    responder: responder,
+                    inner: FuseCompleterInner::Error(ENOENT),
+                }
             } else if err.downcast_ref::<InvalidPath>().is_some() {
-                P::error(reply, EINVAL);
+                FuseCompleter {
+                    responder: responder,
+                    inner: FuseCompleterInner::Error(EINVAL),
+                }
             } else if err.downcast_ref::<NotADirectory>().is_some() {
-                P::error(reply, ENOTDIR);
+                FuseCompleter {
+                    responder: responder,
+                    inner: FuseCompleterInner::Error(ENOTDIR),
+                }
             } else {
                 event!(
                     Level::ERROR,
                     "Responding with EIO due to unexpected error: {}",
                     err
                 );
-                P::error(reply, EIO);
+                FuseCompleter {
+                    responder: responder,
+                    inner: FuseCompleterInner::Error(EIO),
+                }
             }
+        }
+    }
+}
+
+// this lets us unlock things before we signal to fuse that we're done
+// which may acquire a lock inside of fuse and do a write.
+#[must_use]
+pub struct FuseCompleter<P>
+where
+    P: FuseResultWrapper,
+{
+    responder: P::Responder,
+    inner: FuseCompleterInner<P>,
+}
+
+enum FuseCompleterInner<P>
+where
+    P: FuseResultWrapper,
+{
+    Respond(P::Result),
+    Error(c_int),
+}
+
+impl<P> FuseCompleter<P>
+where
+    P: FuseResultWrapper,
+{
+    pub fn complete(self) {
+        match self.inner {
+            FuseCompleterInner::Respond(result) => P::respond(self.responder, result),
+            FuseCompleterInner::Error(errno) => P::error(self.responder, errno),
         }
     }
 }

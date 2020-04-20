@@ -139,7 +139,7 @@ async fn load_from_disk(
         crlocked.apply_keystream(&mut piece_data[..]);
     }
 
-    piece_data.truncate(piece_length_nopad as usize);
+    // piece_data.truncate(piece_length_nopad as usize);
     Ok(Bytes::from(piece_data))
 }
 
@@ -150,6 +150,9 @@ fn cache_cleanup(_cache: &mut PieceCacheInfo, _adding: u64, _batch_size: u64) ->
 
 #[cfg(target_os = "linux")]
 fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Vec<FileSpan> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
     #[derive(Debug)]
     struct HeapEntry {
         last_touched: SystemTime,
@@ -243,7 +246,7 @@ fn punch_cache(cache: &mut TokioFile, punch_spans: &[FileSpan]) -> Result<(), ni
         byte_acc += punch.length;
         let flags = FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
         fallocate(
-            file.as_raw_fd(),
+            cache.as_raw_fd(),
             flags,
             punch.start as i64,
             punch.length as i64,
@@ -331,7 +334,7 @@ where
 
                     if let Ok(ref bytes) = disk_load_res {
                         event!(
-                            Level::ERROR,
+                            Level::DEBUG,
                             "got piece from cache: len()={:?}",
                             bytes.len()
                         );
@@ -388,39 +391,36 @@ where
 
                 let mut cache_position = None;
                 if let Ok(ref bytes) = res {
-                    let mut piece_padded = BytesMut::with_capacity(req.piece_length as usize);
-                    piece_padded.extend_from_slice(&bytes[..]);
+                    let mut cache_padded = bytes.len() as u64;
+                    if cache_padded % self_cloned.cache_alignment != 0 {
+                        cache_padded %= self_cloned.cache_alignment;
+                        cache_padded += self_cloned.cache_alignment;
 
-                    let pre_length = piece_padded.len();
-                    // req.piece_index
-                    piece_padded.resize(req.piece_length as usize, 0);
-                    if pre_length != piece_padded.len() {
                         event!(
                             Level::DEBUG,
                             "padded piece #{}: {} -> {}",
                             req.piece_index,
-                            pre_length,
-                            piece_padded.len()
+                            bytes.len(),
+                            cache_padded,
                         );
                     }
+
+                    let mut piece_padded = BytesMut::with_capacity(cache_padded as usize);
+                    piece_padded.extend_from_slice(&bytes[..]);
+                    piece_padded.resize(cache_padded as usize, 0);
 
                     let write_res = async {
                         let position = file.seek(SeekFrom::End(0)).await?;
                         assert_eq!(position % self_cloned.cache_alignment, 0);
                         cache_position = Some(position);
 
-                        let padding_size = {
-                            let size = piece_padded.len() as u64;
-                            let partial = size % self_cloned.cache_alignment;
-                            if partial != 0 {
-                                self_cloned.cache_alignment - partial
-                            } else {
-                                0
-                            }
-                        };
-                        let padding = vec![0; padding_size as usize];
+                        if let Some(ref cr) = self_cloned.crypto {
+                            let mut crlocked = cr.lock().await;
+                            crlocked.seek(position);
+                            crlocked.apply_keystream(&mut piece_padded[..]);
+                        }
+
                         file.write_all(&piece_padded[..]).await?;
-                        file.write_all(&padding[..]).await?;
 
                         Result::<(), MagnetiteError>::Ok(())
                     }

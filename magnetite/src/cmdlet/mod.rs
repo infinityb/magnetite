@@ -4,3 +4,4 @@ pub mod fuse_mount;
 pub mod host;
 pub mod seed;
 pub mod validate_mse_tome;
+pub mod webserver;

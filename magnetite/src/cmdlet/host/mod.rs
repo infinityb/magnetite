@@ -112,7 +112,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let storage_engine = state_builder.build(cache.build(cache_file.into(), storage_engine));
 
     rt.block_on(async {
-        let mut listener = TcpListener::bind("[::]:17862").await.unwrap();
+        let mut listener = TcpListener::bind(config.seed_bind_addr).await.unwrap();
         loop {
             let storage_engine = storage_engine.clone();
             let (socket, addr) = listener.accept().await.unwrap();

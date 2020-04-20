@@ -12,7 +12,9 @@ pub mod state_wrapper;
 pub const DOWNLOAD_CHUNK_SIZE: u32 = 16 * 1024;
 
 pub use self::piece_file::PieceFileStorageEngine;
+pub use self::sha_verify::{ShaVerify, ShaVerifyMode};
 pub use self::state_wrapper::StateWrapper;
+
 use crate::model::{MagnetiteError, TorrentID};
 
 #[derive(Copy, Clone, Debug)]
@@ -141,5 +143,5 @@ where
     // drop the unwanted part at the start of the first piece.
     drop(out_buf.split_to(read_piece_offset));
     // and drop off the unwanted data at the end of the last piece.
-    Ok(out_buf.split_off(request.read_length).freeze())
+    Ok(out_buf.split_to(request.read_length).freeze())
 }

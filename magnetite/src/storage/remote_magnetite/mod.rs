@@ -324,7 +324,7 @@ async fn run_connected(
                 }
                 if prev_window_size != current_window_size {
                     event!(
-                        Level::INFO,
+                        Level::DEBUG,
                         "increased window size to {}",
                         current_window_size
                     );

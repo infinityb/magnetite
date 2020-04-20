@@ -23,7 +23,7 @@ use crate::model::{TorrentID, TorrentMetaWrapped};
 use crate::storage::disk_cache_layer::CacheWrapper;
 use crate::storage::{
     multi_piece_read, piece_file, state_wrapper, MultiPieceReadRequest, PieceFileStorageEngine,
-    PieceStorageEngineDumb, StateWrapper,
+    PieceStorageEngineDumb, ShaVerify, ShaVerifyMode, StateWrapper,
 };
 use crate::vfs::{
     Directory, DirectoryChild, FileData, FileEntry, FileEntryData, NoEntityExists, NotADirectory,
@@ -55,15 +55,14 @@ enum OpenState {
 }
 
 #[derive(Debug)]
-struct FilesystemImplMutable<P> {
+pub struct FilesystemImplMutable<P> {
     // any directory or file that has been updated.  If an owner (torrent) is removed
     // then the info_hash_owner_counter will decrement.  If the info_hash_owner_counter
     // counter drops to 0, that file shall be deallocated.
-    storage_backend: P,
-    content_info: state_wrapper::ContentInfoManager,
+    pub storage_backend: P,
+    pub content_info: state_wrapper::ContentInfoManager,
     // info_hash_damage: BTreeSet<(TorrentID, u64)>,
-    vfs: Vfs,
-    open_files: Slab<OpenState>,
+    pub vfs: Vfs,
 }
 
 fn file_entry_attrs(fe: &FileEntry) -> FileAttr {
@@ -186,8 +185,8 @@ where
 }
 
 #[derive(Clone)]
-struct FilesystemImpl<P> {
-    mutable: Arc<Mutex<FilesystemImplMutable<P>>>,
+pub struct FilesystemImpl<P> {
+    pub mutable: Arc<Mutex<FilesystemImplMutable<P>>>,
 }
 
 const HELLO_TXT_CONTENT: &str = "Hello World!\n";
@@ -207,10 +206,15 @@ where
         let name = name.to_owned();
         tokio::spawn(async move {
             let fs = self_cloned.mutable.lock().await;
-            fuse_result_wrapper::<FuseReplyEntry, _>(reply, move |_reply| {
+
+            let completion = fuse_result_wrapper::<FuseReplyEntry, _>(reply, |_reply| {
                 let entry = fs.vfs.traverse_path(parent, [name].iter())?;
                 Ok(file_entry_attrs(&entry))
             });
+
+            drop(fs);
+
+            completion.complete();
         });
     }
 
@@ -218,10 +222,15 @@ where
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
             let fs = self_cloned.mutable.lock().await;
-            fuse_result_wrapper::<FuseReplyAttr, _>(reply, move |_reply| {
+
+            let completion = fuse_result_wrapper::<FuseReplyAttr, _>(reply, |_reply| {
                 let entry = fs.vfs.inodes.get(&ino).ok_or(NoEntityExists)?;
                 Ok(file_entry_attrs(&entry))
             });
+
+            drop(fs);
+
+            completion.complete();
         });
     }
 
@@ -251,7 +260,6 @@ where
                     target_file = Some(file.clone());
                 }
             }
-
             if let Some(tf) = target_file {
                 let info = fs.content_info.get_content_info(&tf.content_key).unwrap();
                 let req = MultiPieceReadRequest {
@@ -285,7 +293,7 @@ where
         let self_cloned: Self = self.clone();
         tokio::spawn(async move {
             let mut fs = self_cloned.mutable.lock().await;
-            fuse_result_wrapper::<FuseReplyDirectory, _>(reply, move |reply| {
+            let completion = fuse_result_wrapper::<FuseReplyDirectory, _>(reply, |reply| {
                 let FilesystemImplMutable { ref mut vfs, .. } = &mut *fs;
 
                 let dir = vfs
@@ -322,6 +330,10 @@ where
 
                 Ok(())
             });
+
+            drop(fs);
+
+            completion.complete();
         });
     }
 }
@@ -389,24 +401,7 @@ impl MagnetiteFuseHost for FuseHost {
 
 #[cfg(unix)]
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    #[derive(Serialize, Deserialize)]
-    struct Config {
-        storage_engine: Engine,
-        torrents: Vec<TorrentFactory>,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct Engine {
-        cache_secret: String,
-        upstream_server: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct TorrentFactory {
-        torrent_file: PathBuf,
-        source_file: PathBuf,
-        secret: String,
-    }
+    use crate::model::config::LegacyConfig as Config;
 
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
@@ -463,15 +458,12 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         torrents.push(tm);
     }
 
-    // let storage_engine =
-    //     rt.block_on(async { RemoteMagnetite::connected(&config.storage_engine.upstream_server) });
-
     // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::None);
     let mut cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
 
     let zero_iv = TorrentID::zero();
     use crate::cmdlet::seed::get_torrent_salsa;
-    if let Some(salsa) = get_torrent_salsa(&config.storage_engine.cache_secret, &zero_iv) {
+    if let Some(salsa) = get_torrent_salsa(&config.cache_secret, &zero_iv) {
         cache.set_crypto(salsa);
     }
 
@@ -486,8 +478,13 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         .unwrap();
 
     let storage_engine = pf_builder.build();
+    // let storage_engine = rt.block_on(async {
+    //     use crate::storage::remote_magnetite::RemoteMagnetite;
+
+    //     RemoteMagnetite::connected("10.0.1.2:17862")
+    // });
     let storage_engine = cache.build(cache_file.into(), storage_engine);
-    // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::None);
+    let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::Always);
 
     let mut fs_impl = FilesystemImplMutable {
         storage_backend: storage_engine,
@@ -496,7 +493,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             inodes: BTreeMap::new(),
             inode_seq: 3,
         },
-        open_files: Slab::new(),
     };
     fs_impl.vfs.inodes.insert(
         1,
@@ -522,6 +518,12 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         }
     }
 
+    event!(
+        Level::INFO,
+        "mounting with {} known inodes",
+        fs_impl.vfs.inodes.len()
+    );
+
     rt.block_on(async {
         // let _uds = UnixListener::bind(&control_socket)?;
         tokio::task::spawn_blocking(move || {
@@ -530,7 +532,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 .map(|o| o.as_ref())
                 .collect::<Vec<&OsStr>>();
 
-            println!("mounting with {} known inodes", fs_impl.vfs.inodes.len());
             let fs_impl = FilesystemImpl {
                 mutable: Arc::new(Mutex::new(fs_impl)),
             };

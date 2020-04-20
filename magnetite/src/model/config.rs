@@ -9,6 +9,8 @@ pub struct LegacyConfig {
     #[serde(default)]
     pub client_secret: String,
     #[serde(default)]
+    pub cache_secret: String,
+    #[serde(default)]
     pub seed_bind_addr: String, // "[::]:17862"
 
     pub torrents: Vec<LegacyTorrentFactory>,
