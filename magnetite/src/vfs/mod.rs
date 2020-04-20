@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use fuse::FileType;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use crate::model::TorrentMetaWrapped;
+use crate::storage::PieceStorageEngineDumb;
 
 mod errors;
 
@@ -10,7 +14,14 @@ pub use self::errors::{
     FilesystemIntegrityError, InvalidPath, InvalidRootInode, IsADirectory, NoEntityExists,
     NotADirectory,
 };
+use crate::storage::state_wrapper;
 use crate::model::TorrentID;
+
+#[derive(Debug)]
+pub enum FileType {
+    RegularFile,
+    Directory,
+}
 
 #[derive(Debug)]
 pub struct Directory {
@@ -187,4 +198,106 @@ fn sensible_directory_file_entry(parent: u64, inode: u64) -> FileEntry {
             child_inodes: Default::default(),
         }),
     }
+}
+
+
+#[derive(Debug)]
+pub struct FilesystemImplMutable<P> {
+    // any directory or file that has been updated.  If an owner (torrent) is removed
+    // then the info_hash_owner_counter will decrement.  If the info_hash_owner_counter
+    // counter drops to 0, that file shall be deallocated.
+    pub storage_backend: P,
+    pub content_info: state_wrapper::ContentInfoManager,
+    // info_hash_damage: BTreeSet<(TorrentID, u64)>,
+    pub vfs: Vfs,
+}
+
+impl<P> FilesystemImplMutable<P>
+where
+    P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
+{
+    pub fn add_torrent(&mut self, tm: &TorrentMetaWrapped) -> Result<(), failure::Error> {
+        use smallvec::SmallVec;
+
+        let mut cur_offset: u64 = 0;
+        for f in &tm.meta.info.files {
+            let torrent_global_offset = cur_offset;
+            cur_offset += f.length;
+            if f.path == Path::new("") {
+                continue;
+            }
+
+            let dir_path = f.path.parent().unwrap();
+            let file_name = f.path.file_name().unwrap();
+
+            let mut assert_path = SmallVec::<[u64; 8]>::new();
+
+            let mut parent = 1;
+            parent = self.vfs.mkdir(parent, &tm.meta.info.name, tm.info_hash)?;
+            assert_path.push(parent);
+
+            for p in dir_path.components() {
+                parent = self.vfs.mkdir(parent, p, tm.info_hash)?;
+                assert_path.push(parent);
+            }
+
+            let created_inode = self.vfs.inode_seq;
+            self.vfs.inode_seq += 1;
+
+            assert_path.push(created_inode);
+
+            self.vfs.inodes.insert(
+                created_inode,
+                FileEntry {
+                    info_hash_owner_counter: 1,
+                    inode: created_inode,
+                    size: f.length,
+                    data: FileEntryData::File(FileData {
+                        content_key: tm.info_hash,
+                        torrent_global_offset,
+                    }),
+                },
+            );
+
+            let target = self.vfs.inodes.get_mut(&parent).unwrap();
+            if let FileEntryData::Dir(ref mut dir) = target.data {
+                dir.child_inodes.push(DirectoryChild {
+                    file_name: AsRef::<OsStr>::as_ref(file_name).to_owned(),
+                    ft: FileType::RegularFile,
+                    inode: created_inode,
+                });
+            }
+
+            // {
+            //     println!("asserting {:#?} on {:#?}", assert_path, self);
+            //     let mut inode_path = Vec::new();
+            //     let mut current = self.inodes.get(&1).unwrap();
+            //     for assert_inode in &assert_path {
+            //         inode_path.push(current);
+            //         let cur_dir = current.get_directory().unwrap();
+
+            //         let mut reachable = false;
+            //         for chino in &cur_dir.child_inodes {
+            //             println!("checking for {} in {:#?}", assert_inode, cur_dir);
+            //             if chino.inode == *assert_inode {
+            //                 reachable = true;
+            //             }
+            //         }
+
+            //         if !reachable {
+            //             println!("asserting {:#?} on {:#?} -- {:#?}", assert_path, self, inode_path);
+            //             panic!("failed to make file reachable - this is a bug");
+            //         }
+
+            //         current = self.inodes.get(assert_inode).unwrap();
+            //     }
+            // }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct FilesystemImpl<P> {
+    pub mutable: Arc<Mutex<FilesystemImplMutable<P>>>,
 }
