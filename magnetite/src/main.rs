@@ -20,7 +20,7 @@ const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 fn main() -> Result<(), failure::Error> {
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
-    let matches = App::new(CARGO_PKG_NAME)
+    let app = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
         .about("Demonstration Torrent Seeder")
@@ -39,7 +39,7 @@ fn main() -> Result<(), failure::Error> {
         .subcommand(cmdlet::webserver::get_subcommand());
 
     #[cfg(feature = "with-fuse")]
-    let matches = matches.subcommand(cmdlet::fuse_mount::get_subcommand());
+    let app = matches.subcommand(cmdlet::fuse_mount::get_subcommand());
     let matches = matches.get_matches();
 
     let verbosity = matches.occurrences_of("v");
