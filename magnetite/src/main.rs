@@ -40,7 +40,7 @@ fn main() -> Result<(), failure::Error> {
 
     #[cfg(feature = "with-fuse")]
     let app = matches.subcommand(cmdlet::fuse_mount::get_subcommand());
-    let matches = matches.get_matches();
+    let matches = app.get_matches();
 
     let verbosity = matches.occurrences_of("v");
     let print_test_logging = 4 < verbosity;
