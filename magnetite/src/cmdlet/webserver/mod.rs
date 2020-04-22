@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
-use fuse::FileType;
 use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Body;
@@ -21,7 +20,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
-use crate::cmdlet::fuse_mount::{FilesystemImpl, FilesystemImplMutable};
 use crate::model::TorrentMeta;
 use crate::model::{TorrentID, TorrentMetaWrapped};
 use crate::storage::disk_cache_layer::CacheWrapper;
@@ -31,7 +29,7 @@ use crate::storage::{
 };
 use crate::vfs::{
     Directory, DirectoryChild, FileData, FileEntry, FileEntryData, NoEntityExists, NotADirectory,
-    Vfs,
+    Vfs, FileType, FilesystemImpl, FilesystemImplMutable,
 };
 use crate::CARGO_PKG_VERSION;
 
@@ -137,7 +135,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let storage_engine = rt.block_on(async {
         use crate::storage::remote_magnetite::RemoteMagnetite;
 
-        RemoteMagnetite::connected("[2001:470:b:1e9:2000::8]:17862")
+        RemoteMagnetite::connected("localhost:17862")
     });
     let storage_engine = cache.build(cache_file.into(), storage_engine);
     // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::Always);
@@ -220,9 +218,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                             FileType::Directory => {
                                 file_type_str = "DIR";
                                 dir_trailer = "/";
-                            }
-                            _ => {
-                                file_type_str = "???";
                             }
                         }
                         write!(

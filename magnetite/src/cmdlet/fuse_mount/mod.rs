@@ -27,7 +27,7 @@ use crate::storage::{
 };
 use crate::vfs::{
     Directory, DirectoryChild, FileData, FileEntry, FileEntryData, NoEntityExists, NotADirectory,
-    Vfs,
+    Vfs, FileType as VfsFileType, FilesystemImpl, FilesystemImplMutable,
 };
 
 mod adapter;
@@ -42,28 +42,6 @@ use fuse_api::{
     magnetite_fuse_host_server::MagnetiteFuseHost, AddTorrentRequest, AddTorrentResponse,
     RemoveTorrentRequest, RemoveTorrentResponse,
 };
-
-#[derive(Debug)]
-enum OpenState {
-    Directory {
-        sent_parent: bool,
-        sent_self: bool,
-        directory_inode: u64,
-        last_sent_inode: u64,
-        // next_index: usize,
-    },
-}
-
-#[derive(Debug)]
-pub struct FilesystemImplMutable<P> {
-    // any directory or file that has been updated.  If an owner (torrent) is removed
-    // then the info_hash_owner_counter will decrement.  If the info_hash_owner_counter
-    // counter drops to 0, that file shall be deallocated.
-    pub storage_backend: P,
-    pub content_info: state_wrapper::ContentInfoManager,
-    // info_hash_damage: BTreeSet<(TorrentID, u64)>,
-    pub vfs: Vfs,
-}
 
 fn file_entry_attrs(fe: &FileEntry) -> FileAttr {
     let kind;
@@ -97,96 +75,6 @@ fn file_entry_attrs(fe: &FileEntry) -> FileAttr {
         rdev: 0,
         flags: 0,
     }
-}
-
-impl<P> FilesystemImplMutable<P>
-where
-    P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
-{
-    pub fn add_torrent(&mut self, tm: &TorrentMetaWrapped) -> Result<(), failure::Error> {
-        use smallvec::SmallVec;
-
-        let mut cur_offset: u64 = 0;
-        for f in &tm.meta.info.files {
-            let torrent_global_offset = cur_offset;
-            cur_offset += f.length;
-            if f.path == Path::new("") {
-                continue;
-            }
-
-            let dir_path = f.path.parent().unwrap();
-            let file_name = f.path.file_name().unwrap();
-
-            let mut assert_path = SmallVec::<[u64; 8]>::new();
-
-            let mut parent = 1;
-            parent = self.vfs.mkdir(parent, &tm.meta.info.name, tm.info_hash)?;
-            assert_path.push(parent);
-
-            for p in dir_path.components() {
-                parent = self.vfs.mkdir(parent, p, tm.info_hash)?;
-                assert_path.push(parent);
-            }
-
-            let created_inode = self.vfs.inode_seq;
-            self.vfs.inode_seq += 1;
-
-            assert_path.push(created_inode);
-
-            self.vfs.inodes.insert(
-                created_inode,
-                FileEntry {
-                    info_hash_owner_counter: 1,
-                    inode: created_inode,
-                    size: f.length,
-                    data: FileEntryData::File(FileData {
-                        content_key: tm.info_hash,
-                        torrent_global_offset,
-                    }),
-                },
-            );
-
-            let target = self.vfs.inodes.get_mut(&parent).unwrap();
-            if let FileEntryData::Dir(ref mut dir) = target.data {
-                dir.child_inodes.push(DirectoryChild {
-                    file_name: AsRef::<OsStr>::as_ref(file_name).to_owned(),
-                    ft: FileType::RegularFile,
-                    inode: created_inode,
-                });
-            }
-
-            // {
-            //     println!("asserting {:#?} on {:#?}", assert_path, self);
-            //     let mut inode_path = Vec::new();
-            //     let mut current = self.inodes.get(&1).unwrap();
-            //     for assert_inode in &assert_path {
-            //         inode_path.push(current);
-            //         let cur_dir = current.get_directory().unwrap();
-
-            //         let mut reachable = false;
-            //         for chino in &cur_dir.child_inodes {
-            //             println!("checking for {} in {:#?}", assert_inode, cur_dir);
-            //             if chino.inode == *assert_inode {
-            //                 reachable = true;
-            //             }
-            //         }
-
-            //         if !reachable {
-            //             println!("asserting {:#?} on {:#?} -- {:#?}", assert_path, self, inode_path);
-            //             panic!("failed to make file reachable - this is a bug");
-            //         }
-
-            //         current = self.inodes.get(assert_inode).unwrap();
-            //     }
-            // }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct FilesystemImpl<P> {
-    pub mutable: Arc<Mutex<FilesystemImplMutable<P>>>,
 }
 
 const HELLO_TXT_CONTENT: &str = "Hello World!\n";
@@ -323,7 +211,11 @@ where
                 // later, we can reserve the lower few bits of the offset for internal stuff,
                 // and bitshift it to get the resumption inode.
                 for (i, chino) in dir.child_inodes.iter().enumerate().skip(idx) {
-                    if reply.add(chino.inode, (i + 3) as i64, chino.ft, &chino.file_name) {
+                    let ft = match chino.ft {
+                        VfsFileType::RegularFile => FileType::RegularFile,
+                        VfsFileType::Directory => FileType::Directory,
+                    };
+                    if reply.add(chino.inode, (i + 3) as i64, ft, &chino.file_name) {
                         return Ok(());
                     }
                 }
@@ -429,21 +321,21 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
         let piece_count = tm.piece_shas.len() as u32;
 
-        let pf = File::open(&s.source_file).unwrap();
+        // let pf = File::open(&s.source_file).unwrap();
 
-        let mut crypto = None;
-        if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
-            crypto = Some(salsa);
-        }
+        // let mut crypto = None;
+        // if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
+        //     crypto = Some(salsa);
+        // }
 
-        pf_builder.register_info_hash(
-            &tm.info_hash,
-            piece_file::Registration {
-                piece_count: piece_count,
-                crypto: crypto,
-                piece_file: pf.into(),
-            },
-        );
+        // pf_builder.register_info_hash(
+        //     &tm.info_hash,
+        //     piece_file::Registration {
+        //         piece_count: piece_count,
+        //         crypto: crypto,
+        //         piece_file: pf.into(),
+        //     },
+        // );
 
         state_builder.register_info_hash(
             &tm.info_hash,
@@ -459,6 +351,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     }
 
     // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::None);
+
     let mut cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
 
     let zero_iv = TorrentID::zero();
@@ -477,12 +370,12 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         .open("magnetite.cache")
         .unwrap();
 
-    let storage_engine = pf_builder.build();
-    // let storage_engine = rt.block_on(async {
-    //     use crate::storage::remote_magnetite::RemoteMagnetite;
+    // let storage_engine = pf_builder.build();
+    let storage_engine = rt.block_on(async {
+        use crate::storage::remote_magnetite::RemoteMagnetite;
 
-    //     RemoteMagnetite::connected("10.0.1.2:17862")
-    // });
+        RemoteMagnetite::connected("[2604:3d09:2a7c:7f00:21b:21ff:fec0:7fe4]:17862")
+    });
     let storage_engine = cache.build(cache_file.into(), storage_engine);
     let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::Always);
 

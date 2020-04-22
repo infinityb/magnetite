@@ -20,7 +20,7 @@ const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 fn main() -> Result<(), failure::Error> {
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
-    let matches = App::new(CARGO_PKG_NAME)
+    let app = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
         .about("Demonstration Torrent Seeder")
@@ -35,10 +35,12 @@ fn main() -> Result<(), failure::Error> {
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
         .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
         .subcommand(cmdlet::validate_mse_tome::get_subcommand())
-        .subcommand(cmdlet::fuse_mount::get_subcommand())
         .subcommand(cmdlet::host::get_subcommand())
-        .subcommand(cmdlet::webserver::get_subcommand())
-        .get_matches();
+        .subcommand(cmdlet::webserver::get_subcommand());
+
+    #[cfg(feature = "with-fuse")]
+    let app = app.subcommand(cmdlet::fuse_mount::get_subcommand());
+    let matches = app.get_matches();
 
     let verbosity = matches.occurrences_of("v");
     let print_test_logging = 4 < verbosity;
@@ -74,6 +76,7 @@ fn main() -> Result<(), failure::Error> {
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main,
         cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main,
         cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main,
+        #[cfg(feature = "with-fuse")]
         cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main,
         cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main,
         cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main,
