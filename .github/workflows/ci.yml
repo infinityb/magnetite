@@ -16,7 +16,7 @@ jobs:
       - name: Set up test
         run: "rustup component add clippy && rustup component add rustfmt"
       - name: Install target dependencies
-        run: "apt-get install libfuse-dev"
+        run: "sudo apt-get install libfuse-dev"
       - name: Check
         run: "cargo check"
       - name: Build
