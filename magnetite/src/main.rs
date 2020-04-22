@@ -39,7 +39,7 @@ fn main() -> Result<(), failure::Error> {
         .subcommand(cmdlet::webserver::get_subcommand());
 
     #[cfg(feature = "with-fuse")]
-    let app = matches.subcommand(cmdlet::fuse_mount::get_subcommand());
+    let app = app.subcommand(cmdlet::fuse_mount::get_subcommand());
     let matches = app.get_matches();
 
     let verbosity = matches.occurrences_of("v");
