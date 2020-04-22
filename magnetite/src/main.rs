@@ -36,6 +36,7 @@ fn main() -> Result<(), failure::Error> {
         .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
         .subcommand(cmdlet::validate_mse_tome::get_subcommand())
         .subcommand(cmdlet::host::get_subcommand())
+        .subcommand(cmdlet::assemble_torrent::get_subcommand())
         .subcommand(cmdlet::webserver::get_subcommand());
 
     #[cfg(feature = "with-fuse")]
@@ -80,7 +81,8 @@ fn main() -> Result<(), failure::Error> {
         cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main,
         cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main,
         cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main,
-        _ => panic!("bad argument parse"),
+        cmdlet::assemble_torrent::SUBCOMMAND_NAME => cmdlet::assemble_torrent::main,
+        _ => panic!("unknown subcommand"),
     };
     main_function(args.expect("subcommand args"))
 }
