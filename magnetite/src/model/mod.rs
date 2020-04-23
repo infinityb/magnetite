@@ -224,7 +224,7 @@ impl TorrentID {
                 return false;
             }
         }
-        return true;
+        true
     }
 
     pub fn from_slice(r: &[u8]) -> Result<TorrentID, failure::Error> {
@@ -400,7 +400,7 @@ impl TorrentMetaWrapped {
             meta,
             total_length,
             info_hash,
-            piece_shas: piece_shas,
+            piece_shas,
         })
     }
 }
@@ -470,7 +470,7 @@ impl BitField {
             v.push(last_byte);
         }
         BitField {
-            bit_length: bit_length,
+            bit_length,
             set_count: bit_length,
             data: v.into_boxed_slice(),
         }
@@ -482,7 +482,7 @@ impl BitField {
             byte_length += 1;
         }
         BitField {
-            bit_length: bit_length,
+            bit_length,
             set_count: 0,
             data: vec![0; byte_length].into_boxed_slice(),
         }

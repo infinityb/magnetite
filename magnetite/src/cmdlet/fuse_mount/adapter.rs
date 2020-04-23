@@ -74,23 +74,23 @@ where
 {
     match f(&mut responder) {
         Ok(result) => FuseCompleter {
-            responder: responder,
+            responder,
             inner: FuseCompleterInner::Respond(result),
         },
         Err(err) => {
             if err.downcast_ref::<NoEntityExists>().is_some() {
                 FuseCompleter {
-                    responder: responder,
+                    responder,
                     inner: FuseCompleterInner::Error(ENOENT),
                 }
             } else if err.downcast_ref::<InvalidPath>().is_some() {
                 FuseCompleter {
-                    responder: responder,
+                    responder,
                     inner: FuseCompleterInner::Error(EINVAL),
                 }
             } else if err.downcast_ref::<NotADirectory>().is_some() {
                 FuseCompleter {
-                    responder: responder,
+                    responder,
                     inner: FuseCompleterInner::Error(ENOTDIR),
                 }
             } else {
@@ -100,7 +100,7 @@ where
                     err
                 );
                 FuseCompleter {
-                    responder: responder,
+                    responder,
                     inner: FuseCompleterInner::Error(EIO),
                 }
             }

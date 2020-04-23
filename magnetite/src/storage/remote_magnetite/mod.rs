@@ -41,8 +41,8 @@ fn xx() {
     let gp = GetPieceRequest {
         content_key: TorrentID::zero(),
         piece_sha: TorrentID::zero(),
-        piece_length: 16777216,
-        total_length: 287396254600,
+        piece_length: 0x0100_0000,
+        total_length: 287_396_254_600,
         piece_index: 17130,
     };
 
@@ -74,7 +74,7 @@ impl PiecePendingRequestFactory {
             piece_slab_index,
             content_key: gp.content_key,
             piece_index: gp.piece_index,
-            piece_length: piece_length,
+            piece_length,
             piece_requested_length: 0,
         }
     }
@@ -111,11 +111,11 @@ impl Iterator for PiecePendingRequestFactory {
 }
 
 impl PendingRequest {
-    fn make_request_state(&self, now: &Instant) -> RequestState {
+    fn make_request_state(&self, now: Instant) -> RequestState {
         let PendingRequest::ChunkRequest(ref p) = self;
         RequestState {
             piece_slab_index: p.piece_slab_index,
-            req_submit_time: *now,
+            req_submit_time: now,
             req_kind: MagnetiteRequestKind::Piece,
             txid_cookie: p.cookie_data & TXID_RANDOM_MASK,
             piece_offset: p.piece_offset,
@@ -130,7 +130,7 @@ impl PendingRequest {
         txid |= p.cookie_data & TXID_RANDOM_MASK;
 
         MagnetiteWireRequest {
-            txid: txid,
+            txid,
             payload: MagnetiteWireRequestPayload::Piece(MagnetiteWirePieceRequest {
                 content_key: p.content_key,
                 piece_index: p.piece_index,
@@ -178,7 +178,7 @@ impl PieceState {
         responder: oneshot::Sender<Result<Bytes, MagnetiteError>>,
     ) -> PieceState {
         PieceState {
-            piece_length: piece_length,
+            piece_length,
             data_slices: Default::default(),
             data: BytesMut::with_capacity(piece_length as usize),
             responder,
@@ -270,7 +270,6 @@ fn resolve_response(
         return Err(ProtocolViolation.into());
     }
 
-    drop(request_state);
     let request_state = inflight.remove(txid_value);
 
     latency_stats.add(request_state.req_submit_time.elapsed());
@@ -332,7 +331,7 @@ async fn run_connected(
             }
             if LATENCY_TARGET_MAX_MILLISECONDS < average {
                 let prev_window_size = current_window_size;
-                current_window_size = current_window_size / 2;
+                current_window_size /= 2;
                 if current_window_size < 2 {
                     current_window_size = 2;
                 }
@@ -347,12 +346,11 @@ async fn run_connected(
             }
         }
 
-        let take_count;
-        if inflight.len() < current_window_size {
-            take_count = current_window_size - inflight.len();
+        let take_count = if inflight.len() < current_window_size {
+            current_window_size - inflight.len()
         } else {
-            take_count = 0;
-        }
+            0
+        };
 
         // opportunistically fill split_request_queue
         while split_request_queue.len() < take_count && request_queue_open {
@@ -378,14 +376,14 @@ async fn run_connected(
         for _ in 0..take_count {
             let now = Instant::now();
             if let Some(ri) = split_request_queue.pop_front() {
-                enqueue_request_partial(&now, &mut wbuf, &mut inflight, ri)?;
+                enqueue_request_partial(now, &mut wbuf, &mut inflight, ri)?;
             } else {
                 break;
             }
         }
 
         let to_write = wbuf.split().freeze();
-        if to_write.len() > 0 {
+        if !to_write.is_empty() {
             socket.write_all(&to_write[..]).await?;
         }
         drop(to_write);
@@ -399,10 +397,8 @@ async fn run_connected(
             }
         }
 
-        if !request_queue_open && inflight.is_empty() {
-            if split_request_queue.is_empty() {
-                break;
-            }
+        if !request_queue_open && inflight.is_empty() && split_request_queue.is_empty() {
+            break;
         }
 
         // event!(Level::ERROR, "request_queue_open={:?} inflight.len()={:?} split_request_queue.len()={:?}",
@@ -568,7 +564,7 @@ where
                     };
                     write_response_to_buffer(&mut wbuf, &resp)?;
 
-                    while wbuf.len() > 0 {
+                    while !wbuf.is_empty() {
                         socket.write_buf(&mut wbuf).await?;
                     }
                 }
@@ -578,7 +574,7 @@ where
 }
 
 fn enqueue_request_partial(
-    now: &Instant,
+    now: Instant,
     wbuf: &mut BytesMut,
     inflight: &mut Slab<RequestState>,
     payload: PendingRequest,
@@ -595,7 +591,7 @@ impl PieceStorageEngineDumb for RemoteMagnetite {
         get_piece_req: &GetPieceRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         let mut self_cloned: Self = self.clone();
-        let gp: GetPieceRequest = get_piece_req.clone();
+        let gp: GetPieceRequest = *get_piece_req;
 
         async move {
             let (responder, resp_rx) = oneshot::channel();

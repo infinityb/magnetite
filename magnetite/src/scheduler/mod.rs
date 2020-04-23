@@ -19,7 +19,6 @@ impl PieceSet {
         if let Some((k, v)) = self.pieces.range(..piece_id).rev().next() {
             let start = *k;
             let end = *k + *v;
-            drop((k, v));
 
             if start <= piece_id && piece_id < end {
                 let piece_next = piece_id + 1;
@@ -87,19 +86,16 @@ impl PieceSet {
             // extend the found slice, if we border it.
             let start = *k;
             let end = *k + *v;
-            drop(k);
 
             if start <= piece_id {
                 if piece_id < end {
                     *v += length - end + piece_id;
-                    drop(v);
                     self.cleanup_range(piece_id, length);
                     self.join_parts(start);
                     return true;
                 }
                 return false;
             }
-            drop(v);
             self.pieces.insert(piece_id, length);
             self.join_parts(start);
             return true;
@@ -108,7 +104,7 @@ impl PieceSet {
         self.pieces.insert(piece_id, length);
         self.join_parts(piece_id);
 
-        return true;
+        true
     }
 
     pub fn add(&mut self, piece_id: u32) -> bool {
@@ -194,7 +190,7 @@ fn add_one_clamping_lob_u8(value: u8) -> u8 {
     if value & 0x80 > 0 {
         return value;
     }
-    return value + 1;
+    value + 1
 }
 
 #[inline]
@@ -205,7 +201,7 @@ fn sub_one_clamping_lob_u8(value: u8) -> u8 {
     if value & 0x80 > 0 {
         return value;
     }
-    return value - 1;
+    value - 1
 }
 
 impl SummingBitField {
@@ -268,24 +264,24 @@ impl DefaultPieceSelectionStrategy {
         //
     }
 
-    pub fn get_work<A>(&mut self, bytes: u64, _into: &mut SmallVec<A>)
+    pub fn get_work<A>(&mut self, _bytes: u64, _into: &mut SmallVec<A>)
     where
         A: Array<Item = (TorrentID, u32, u32)>,
     {
         // find the 100 rarest pieces which are of high priority. if we don't
         // yet have 100 pieces, continue the same logic but with normal
         // priority pieces.
-        let submitted_bytes = 0;
+        let _submitted_bytes = 0;
         let _high_p = self.high_priority.iter();
         let _normal_p = self.normal_priority.iter();
 
         // into.append(())
         // DOWNLOAD_CHUNK_SIZE
-        while submitted_bytes < bytes {
-            for (_k, _v) in self.in_progress.iter() {
-                //
-            }
-        }
+        // while submitted_bytes < bytes {
+        //     for (_k, _v) in self.in_progress.iter() {
+        //         //
+        //     }
+        // }
 
         unimplemented!();
     }

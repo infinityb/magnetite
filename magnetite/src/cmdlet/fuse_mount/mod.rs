@@ -190,22 +190,15 @@ where
                     .get_directory()
                     .ok_or(NotADirectory)?;
 
-                if offset <= 0 {
-                    if reply.add(ino, 1, FileType::Directory, ".") {
-                        return Ok(());
-                    }
+                if offset <= 0 && reply.add(ino, 1, FileType::Directory, ".") {
+                    return Ok(());
                 }
 
-                if offset <= 1 {
-                    if reply.add(dir.parent, 2, FileType::Directory, "..") {
-                        return Ok(());
-                    }
+                if offset <= 1 && reply.add(dir.parent, 2, FileType::Directory, "..") {
+                    return Ok(());
                 }
 
-                let mut idx: usize = 0;
-                if 2 <= offset {
-                    idx = offset as usize - 2;
-                }
+                let idx = if 2 <= offset { offset as usize - 2 } else { 0 };
 
                 // later, we can reserve the lower few bits of the offset for internal stuff,
                 // and bitshift it to get the resumption inode.
@@ -341,7 +334,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             state_wrapper::Registration {
                 total_length: tm.total_length,
                 piece_length: tm.meta.info.piece_length,
-                piece_shas: tm.piece_shas.clone().into(),
+                piece_shas: tm.piece_shas.clone(),
             },
         );
 

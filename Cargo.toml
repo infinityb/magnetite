@@ -1,7 +1,6 @@
 [workspace]
 members = [
 	"bencode",
-	"fallocate",
 	"iresult",
 	"magnetite",
 ]

@@ -168,7 +168,6 @@ impl<'de> Tokenizer<'de> {
             }
 
             if self.scratch_offset < self.scratch.len() {
-                assert!(self.scratch[self.scratch_offset..].len() > 0);
                 return match parse_next_item(&self.scratch[self.scratch_offset..]) {
                     IResult::Done((length, value)) => {
                         if !is_peek {
@@ -450,10 +449,10 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 );
             }
             Node::Integer(ii) => {
-                if ii.starts_with("-") {
-                    return self.deserialize_i64(visitor);
+                if ii.starts_with('-') {
+                    self.deserialize_i64(visitor)
                 } else {
-                    return self.deserialize_u64(visitor);
+                    self.deserialize_u64(visitor)
                 }
             }
             Node::Bytes(Cow::Borrowed(bb)) => {
@@ -558,12 +557,12 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         match into_result(res, &self.tokenizer)? {
             Node::Bytes(Cow::Borrowed(data)) => {
                 let str_data = str::from_utf8(data)?;
-                return visitor.visit_borrowed_str(str_data);
+                visitor.visit_borrowed_str(str_data)
             }
             Node::Bytes(Cow::Owned(data)) => {
                 str::from_utf8(&data)?;
                 let str_data = String::from_utf8(data).unwrap();
-                return visitor.visit_string(str_data);
+                visitor.visit_string(str_data)
             }
             v => {
                 expect_assert(Node::Bytes(Cow::Borrowed(&[])), v)?;
@@ -587,12 +586,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     {
         let res = self.tokenizer.next(false);
         match into_result(res, &self.tokenizer)? {
-            Node::Bytes(Cow::Borrowed(data)) => {
-                return visitor.visit_borrowed_bytes(data);
-            }
-            Node::Bytes(Cow::Owned(data)) => {
-                return visitor.visit_byte_buf(data);
-            }
+            Node::Bytes(Cow::Borrowed(data)) => visitor.visit_borrowed_bytes(data),
+            Node::Bytes(Cow::Owned(data)) => visitor.visit_byte_buf(data),
             v => {
                 unimplemented!("unhandled value {:?}", v);
             }
@@ -623,7 +618,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             {
                 let res = self.de.tokenizer.next(true);
                 match into_result(res, &self.de.tokenizer)? {
-                    Node::ContainerEnd => return Ok(None),
+                    Node::ContainerEnd => Ok(None),
                     _ => seed.deserialize(&mut *self.de).map(Some),
                 }
             }
@@ -685,9 +680,9 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             {
                 let res = self.de.tokenizer.next(true);
                 match into_result(res, &self.de.tokenizer)? {
-                    Node::ContainerEnd => return Ok(None),
+                    Node::ContainerEnd => Ok(None),
                     n @ Node::ArrayStart | n @ Node::DictionaryStart | n @ Node::Integer(..) => {
-                        return Err(Error::expected_string(&self.de.tokenizer, &n));
+                        Err(Error::expected_string(&self.de.tokenizer, &n))
                     }
                     Node::Bytes(..) => seed.deserialize(&mut *self.de).map(Some),
                 }
@@ -753,7 +748,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 visitor.visit_enum(IntoDeserializer::into_deserializer(data))
             }
             n @ Node::ArrayStart | n @ Node::Integer(..) => {
-                return Err(Error::expected_string(&self.tokenizer, &n));
+                Err(Error::expected_string(&self.tokenizer, &n))
             }
             Node::ContainerEnd => Err(Error::unexpected_container_end()),
         }

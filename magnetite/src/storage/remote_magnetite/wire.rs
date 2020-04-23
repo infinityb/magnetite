@@ -70,8 +70,6 @@ mod request {
                 ProtocolViolation
             })?;
 
-        drop(header_bytes);
-
         drop(rbuf.split_to(total_length + 4));
 
         Ok(Some(match resp_header.payload {
@@ -132,7 +130,7 @@ mod request {
         use super::*;
 
         const MW_TEST0: MagnetiteWireRequest = MagnetiteWireRequest {
-            txid: 0xAAAAA9,
+            txid: 0x00AA_AAA9,
             payload: MagnetiteWireRequestPayload::Piece(MagnetiteWirePieceRequest {
                 content_key: TorrentID([
                     0x1A, 0x5C, 0x64, 0x8C, 0xB0, 0x0B, 0xF3, 0xE2, 0xB9, 0x27, 0x58, 0x08, 0x06,
@@ -228,9 +226,6 @@ mod response {
             })?;
 
         let data_bytes = rbuf[4..][..total_length][4..][header_length as usize..].to_vec();
-
-        drop(header_bytes);
-
         drop(rbuf.split_to(total_length + 4));
 
         Ok(Some(match resp_header.payload {
@@ -290,9 +285,9 @@ mod response {
             use bencode::BinStr;
 
             let mw = MagnetiteWireResponse {
-                txid: 0xAAAAA9,
+                txid: 0x00AA_AAA9,
                 payload: MagnetiteWireResponsePayload::Piece(MagnetiteWirePieceResponse {
-                    data: "hello world".as_bytes().to_vec(),
+                    data: b"hello world".to_vec(),
                 }),
             };
             let mut wbuf = BytesMut::new();
@@ -315,9 +310,9 @@ mod response {
             assert_eq!(
                 out,
                 MagnetiteWireResponse {
-                    txid: 0xAAAAA9,
+                    txid: 0x00AA_AAA9,
                     payload: MagnetiteWireResponsePayload::Piece(MagnetiteWirePieceResponse {
-                        data: "hello world".as_bytes().to_vec(),
+                        data: b"hello world".to_vec(),
                     }),
                 }
             );

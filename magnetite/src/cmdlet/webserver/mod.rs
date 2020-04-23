@@ -97,7 +97,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             state_wrapper::Registration {
                 total_length: tm.total_length,
                 piece_length: tm.meta.info.piece_length,
-                piece_shas: tm.piece_shas.clone().into(),
+                piece_shas: tm.piece_shas.clone(),
             },
         );
 
@@ -132,7 +132,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     // let storage_backend = ShaVerify::new(storage_backend, ShaVerifyMode::Always);
 
     let mut fs_impl = FilesystemImplMutable {
-        storage_backend: storage_backend,
+        storage_backend,
         content_info: state_builder.build_content_info_manager(),
         vfs: Vfs {
             inodes: BTreeMap::new(),
@@ -178,12 +178,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
         async move {
             let fs_impl = fs_impl.clone();
-            let remote_addr = remote_addr.clone();
-
             let service = service_fn(move |req: Request<Body>| {
                 let fs_impl = fs_impl.clone();
-                let remote_addr = remote_addr.clone();
-
                 async move {
                     let v = service_request(fs_impl, remote_addr, req).await;
                     Ok::<_, Infallible>(v)
@@ -237,7 +233,7 @@ where
                 return response_http_internal_server_error();
             }
 
-            return response_http_internal_server_error();
+            response_http_internal_server_error()
         }
     }
 }
@@ -252,7 +248,7 @@ where
     use crate::storage::utils::compute_piece_index_lb;
     use crate::storage::GetPieceRequest;
 
-    let path = req.uri().path().split("/").filter(|x| x.len() != 0);
+    let path = req.uri().path().split('/').filter(|x| !x.is_empty());
 
     let fs = fsi.mutable.lock().await;
     let storage_backend = fs.storage_backend.clone();
@@ -263,7 +259,7 @@ where
     let torrent_global_offset_start;
     match fe.data {
         FileEntryData::Dir(ref dir) => {
-            if !req.uri().path().ends_with("/") {
+            if !req.uri().path().ends_with('/') {
                 let uri = format!("{}/", req.uri().path());
                 return Ok(response_http_found(&uri));
             }
@@ -323,7 +319,7 @@ where
             }
 
             let boundary_string = std::str::from_utf8(&boundary_tmp[..]).unwrap().to_string();
-            boundary = Some(boundary_string.to_string());
+            boundary = Some(boundary_string);
         } else {
             let onespan = &spans[0];
             builder = builder.header(
@@ -349,19 +345,17 @@ where
         );
     }
 
-    let mut file_mime_type = "application/octet-stream";
-    if req.uri().path().ends_with(".jpg") {
-        file_mime_type = "image/jpeg";
-    }
-    if req.uri().path().ends_with(".png") {
-        file_mime_type = "image/png";
-    }
-    if req.uri().path().ends_with(".gif") {
-        file_mime_type = "image/gif";
-    }
-    if req.uri().path().ends_with(".mp4") {
-        file_mime_type = "video/mp4";
-    }
+    let file_mime_type = if req.uri().path().ends_with(".jpg") {
+        "image/jpeg"
+    } else if req.uri().path().ends_with(".png") {
+        "image/png"
+    } else if req.uri().path().ends_with(".gif") {
+        "image/gif"
+    } else if req.uri().path().ends_with(".mp4") {
+        "video/mp4"
+    } else {
+        "application/octet-stream"
+    };
 
     if let Some(ref b) = boundary {
         builder = builder.header(
@@ -434,7 +428,7 @@ where
                             "failed to send error to response handler: bad piece index {}",
                             p,
                         );
-                        if let Err(err) = tx.send(Err(format!("bad piece index"))).await {
+                        if let Err(err) = tx.send(Err("bad piece index".to_string())).await {
                             event!(
                                 Level::ERROR,
                                 "failed to send error to response handler: bad piece index {}: {}",
@@ -448,8 +442,8 @@ where
                 };
 
                 let req = GetPieceRequest {
-                    content_key: content_key,
-                    piece_sha: piece_sha,
+                    content_key,
+                    piece_sha,
                     piece_length: content_info.piece_length,
                     total_length: content_info.total_length,
                     piece_index: p,
@@ -527,7 +521,7 @@ fn get_ranges(
 
     let mut out = Vec::new();
     for part in value_str[6..].split(", ") {
-        let mut part_iter = part.splitn(2, "-");
+        let mut part_iter = part.splitn(2, '-');
         let start: u64 = part_iter.next().ok_or(ClientError)?.parse()?;
 
         if total_size <= start {
@@ -538,15 +532,14 @@ fn get_ranges(
         let end = if end_str.is_empty() {
             total_size - 1
         } else {
-            let rv = end_str.parse()?;
-            rv
+            end_str.parse()?
         };
         if end <= start {
             return Err(OutOfRange.into());
         }
 
         out.push(HttpRangeSpan {
-            start: start,
+            start,
             length: end - start + 1,
         });
     }
@@ -581,7 +574,7 @@ fn response_http_bad_request() -> Response<Body> {
         .header(hyper::header::SERVER, SERVER_NAME)
         .status(StatusCode::BAD_REQUEST);
 
-    return builder.body(PAGE_CONTENT.into()).unwrap();
+    builder.body(PAGE_CONTENT.into()).unwrap()
 }
 
 fn repsonse_http_range_not_satisfiable() -> Response<Body> {
@@ -591,7 +584,7 @@ fn repsonse_http_range_not_satisfiable() -> Response<Body> {
         .header(hyper::header::SERVER, SERVER_NAME)
         .status(StatusCode::RANGE_NOT_SATISFIABLE);
 
-    return builder.body(PAGE_CONTENT.into()).unwrap();
+    builder.body(PAGE_CONTENT.into()).unwrap()
 }
 
 fn response_http_not_found() -> Response<Body> {
@@ -601,7 +594,7 @@ fn response_http_not_found() -> Response<Body> {
         .header(hyper::header::SERVER, SERVER_NAME)
         .status(StatusCode::NOT_FOUND);
 
-    return builder.body(PAGE_CONTENT.into()).unwrap();
+    builder.body(PAGE_CONTENT.into()).unwrap()
 }
 
 fn response_http_internal_server_error() -> Response<Body> {
@@ -611,7 +604,7 @@ fn response_http_internal_server_error() -> Response<Body> {
         .header(hyper::header::SERVER, SERVER_NAME)
         .status(StatusCode::INTERNAL_SERVER_ERROR);
 
-    return builder.body(PAGE_CONTENT.into()).unwrap();
+    builder.body(PAGE_CONTENT.into()).unwrap()
 }
 
 fn response_http_found(new_path: &str) -> Response<Body> {
@@ -621,7 +614,7 @@ fn response_http_found(new_path: &str) -> Response<Body> {
 
     let content = format!("Redirecting you to <a href=\"{0}\">{0}</a>", new_path);
 
-    return builder.body(content.into()).unwrap();
+    builder.body(content.into()).unwrap()
 }
 
 fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
@@ -656,7 +649,7 @@ fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
             hyper::header::HeaderValue::from_static("text/html"),
         );
 
-    return builder.body(data[..].to_vec().into()).unwrap();
+    builder.body(data[..].to_vec().into()).unwrap()
 }
 
 // --

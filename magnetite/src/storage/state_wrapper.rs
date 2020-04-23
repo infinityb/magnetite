@@ -70,15 +70,14 @@ where
                 .await
                 .ok_or(ProtocolViolation)?;
 
-            let piece_sha = content_info
+            let piece_sha = *content_info
                 .piece_shas
                 .get(piece_id as usize)
-                .ok_or_else(|| ProtocolViolation)?
-                .clone();
+                .ok_or_else(|| ProtocolViolation)?;
 
             let preq = GetPieceRequest {
                 content_key: piece_key.0,
-                piece_sha: piece_sha,
+                piece_sha,
                 piece_length: content_info.piece_length,
                 total_length: content_info.total_length,
                 piece_index: piece_key.1,
@@ -97,7 +96,7 @@ impl Builder {
             ContentInfo {
                 total_length: ci.total_length,
                 piece_length: ci.piece_length,
-                piece_shas: ci.piece_shas.clone().into(),
+                piece_shas: ci.piece_shas.into(),
             },
         );
     }

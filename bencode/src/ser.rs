@@ -33,7 +33,7 @@ where
     /// Creates a new Bencode serializer.
     #[inline]
     pub fn new(writer: W) -> Self {
-        Serializer { writer: writer }
+        Serializer { writer }
     }
 
     /// Unwrap the `Writer` from the `Serializer`.
