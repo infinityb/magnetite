@@ -81,8 +81,7 @@ pub mod utils {
     #[inline]
     pub fn compute_piece_index_lb(position: u64, atom_length: u32) -> u32 {
         let atom_length = u64::from(atom_length);
-        let piece_index = (position / atom_length) as u32;
-        piece_index
+        (position / atom_length) as u32
     }
 
     #[inline]
@@ -148,7 +147,7 @@ where
     for pi in piece_index..piece_index_end {
         let req = GetPieceRequest {
             content_key: request.content_key,
-            piece_sha: request.piece_shas.get(pi as usize).unwrap().clone(),
+            piece_sha: request.piece_shas[pi as usize],
             piece_length: request.piece_length,
             total_length: request.total_length,
             piece_index: pi,

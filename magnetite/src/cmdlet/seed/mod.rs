@@ -179,7 +179,7 @@ impl PeerState {
 // }
 
 pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSalsa20> {
-    if crypto_secret.len() > 0 {
+    if !crypto_secret.is_empty() {
         let mut nonce_data = [0; 24];
         nonce_data[4..].copy_from_slice(info_hash.as_bytes());
         let nonce = GenericArray::from_slice(&nonce_data[..]);
@@ -300,8 +300,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         pf_builder.register_info_hash(
             &tm.info_hash,
             piece_file::Registration {
-                piece_count: piece_count,
-                crypto: crypto,
+                piece_count,
+                crypto,
                 piece_file: pf.into(),
             },
         );
@@ -310,7 +310,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             state_wrapper::Registration {
                 total_length: tm.total_length,
                 piece_length: tm.meta.info.piece_length,
-                piece_shas: tm.piece_shas.clone().into(),
+                piece_shas: tm.piece_shas.clone(),
             },
         );
 
@@ -336,7 +336,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             let (mut socket, addr) = listener.accept().await.unwrap();
 
             // let state_channel_tx = state_channel_tx.clone();
-            let peer_id = peer_id.clone();
             let storage_engine = storage_engine.clone();
             let cc = Arc::clone(&cc);
 
@@ -386,8 +385,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 .unwrap();
                 socket.write(&hs).await.unwrap();
 
-                drop(torrent);
-
                 let torrent_meta = Arc::clone(&torrent.meta);
                 let target = torrent_meta.info_hash;
                 let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
@@ -406,7 +403,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                         id: session_id,
                         addr,
                         handshake,
-                        target: target,
+                        target,
                         state: PeerState::new(bf_length),
                     },
                 );
@@ -483,7 +480,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
                         event!(Level::DEBUG, session_id = session_id, "processing-work");
                         requests.clear();
-                        if work.len() > 0 {
+                        if !work.is_empty() {
                             state.last_read = now;
                         }
                         if state.next_keepalive < now {
@@ -540,14 +537,10 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                                 Message::Cancel(ref _ps) => {
                                     // nothing, we don't support cancellations yet. maybe we never will.
                                 }
-                                Message::Piece {
-                                    index: _,
-                                    begin: _,
-                                    data: _,
-                                } => {
+                                Message::Piece { .. } => {
                                     // nothing, we don't support downloading.
                                 }
-                                Message::Port { dht_port: _ } => {
+                                Message::Port { .. } => {
                                     // nothing, we don't support DHT.
                                 }
                             }

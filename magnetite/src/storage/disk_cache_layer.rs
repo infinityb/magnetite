@@ -46,7 +46,7 @@ impl PieceCacheEntry {
     pub fn new_with_piece_length(piece_length: u32) -> PieceCacheEntry {
         PieceCacheEntry {
             last_touched: SystemTime::now(),
-            piece_length: piece_length,
+            piece_length,
             position: None,
             inflight: None,
         }
@@ -188,11 +188,9 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     let mut discard_credit = batch_size as i64;
 
     for (k, v) in cache.pieces.iter() {
-        event!(Level::TRACE, "credit = {} bytes", discard_credit);
         while let Some(v) = discard.peek() {
             if discard_credit < 0 {
                 discard_credit += i64::from(v.piece_length);
-                drop(v);
                 drop(discard.pop().unwrap());
             } else {
                 break;
@@ -210,7 +208,6 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     }
 
     let mut out = Vec::with_capacity(discard.len());
-    event!(Level::TRACE, "discard {:?}", discard);
 
     for h in discard.into_vec() {
         let v = cache.pieces.remove(&h.btree_key).unwrap();
@@ -223,8 +220,6 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
             });
         }
     }
-
-    event!(Level::TRACE, "panchi {:?} bytes", out);
 
     out
 }
@@ -277,7 +272,7 @@ where
 
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
-        let req: GetPieceRequest = req.clone();
+        let req: GetPieceRequest = *req;
 
         async move {
             let mut piece_cache = self_cloned.piece_cache.lock().await;
@@ -291,8 +286,6 @@ where
 
             if let Some(ref infl) = cache_entry.inflight {
                 let completion_fut = infl.clone().complete();
-                drop(infl);
-                drop(cache_entry);
                 drop(piece_cache);
                 return completion_fut.await;
             }
@@ -303,7 +296,6 @@ where
             let infl = Inflight { finished: rx };
             cache_entry.inflight = Some(infl.clone());
 
-            drop(cache_entry);
             drop(piece_cache);
             tokio::spawn(async move {
                 let (_, piece_length_nopad) = super::utils::compute_offset_length(

@@ -100,10 +100,6 @@ impl Vfs {
                 if chino.file_name == name.as_ref() {
                     let inode = chino.inode;
                     affected_inodes.push(inode);
-
-                    drop(chino);
-                    drop(dir);
-
                     // for v in affected_inodes {
                     //     fs.info_hash_damage.insert((owner, v));
                     // }
@@ -120,7 +116,6 @@ impl Vfs {
                 inode: created_inode,
             });
             affected_inodes.push(created_inode);
-            drop(dir);
 
             self.inodes.insert(
                 created_inode,
@@ -131,9 +126,9 @@ impl Vfs {
             //     fs.info_hash_damage.insert((owner, v));
             // }
 
-            return Ok(created_inode);
+            Ok(created_inode)
         } else {
-            return Err(NotADirectory.into());
+            Err(NotADirectory.into())
         }
     }
 
@@ -194,7 +189,7 @@ fn sensible_directory_file_entry(parent: u64, inode: u64) -> FileEntry {
         inode,
         size: 0,
         data: FileEntryData::Dir(Directory {
-            parent: parent,
+            parent,
             child_inodes: Default::default(),
         }),
     }

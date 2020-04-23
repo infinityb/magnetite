@@ -111,22 +111,22 @@ impl<'de> de::Deserialize<'de> for Value {
 
             #[inline]
             fn visit_borrowed_bytes<E>(self, value: &'de [u8]) -> Result<Self::Value, E> {
-                Ok(Value::Bytes(value.to_vec().into()))
+                Ok(Value::Bytes(value.to_vec()))
             }
 
             #[inline]
             fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E> {
-                Ok(Value::Bytes(value.to_vec().into()))
+                Ok(Value::Bytes(value.to_vec()))
             }
 
             #[inline]
             fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E> {
-                Ok(Value::Bytes(From::from(value)))
+                Ok(Value::Bytes(value))
             }
 
             #[inline]
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(Value::Bytes(value.as_bytes().to_vec().into()))
+                Ok(Value::Bytes(value.as_bytes().to_vec()))
             }
         }
 

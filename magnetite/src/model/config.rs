@@ -55,6 +55,7 @@ pub struct TorrentFactory {
     secret: String,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 mod validate_mode {
     // lets keep this private to the config module, I guess.
 

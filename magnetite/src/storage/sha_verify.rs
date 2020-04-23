@@ -70,7 +70,7 @@ where
         }
 
         let self_cloned: Self = self.clone();
-        let req: GetPieceRequest = req.clone();
+        let req: GetPieceRequest = *req;
 
         if let ShaVerifyMode::Always = self.mode {
             return async move {
@@ -105,7 +105,6 @@ where
             });
 
             let run_verify = !state.has(req.piece_index);
-            drop(state);
             drop(verify_pieces);
 
             let piece = self_cloned.upstream.get_piece_dumb(&req).await?;

@@ -152,7 +152,6 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
                 return IResult::Err(funky_size());
             }
             let piece_id = BigEndian::read_u32(&rest[1..]);
-            drop(rest);
             drop(from.split_to(size + 4));
             IResult::Done(Message::Have { piece_id })
         }
@@ -167,10 +166,9 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
             if size != 13 {
                 return IResult::Err(funky_size());
             }
-            let index = BigEndian::read_u32(&mut rest[1..]);
-            let begin = BigEndian::read_u32(&mut rest[5..]);
-            let length = BigEndian::read_u32(&mut rest[9..]);
-            drop(rest);
+            let index = BigEndian::read_u32(&rest[1..]);
+            let begin = BigEndian::read_u32(&rest[5..]);
+            let length = BigEndian::read_u32(&rest[9..]);
             drop(from.split_to(size + 4));
             IResult::Done(Message::Request(PieceSlice {
                 index,
@@ -179,8 +177,8 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
             }))
         }
         PIECE_BYTE => {
-            let index = BigEndian::read_u32(&mut rest[1..]);
-            let begin = BigEndian::read_u32(&mut rest[5..]);
+            let index = BigEndian::read_u32(&rest[1..]);
+            let begin = BigEndian::read_u32(&rest[5..]);
             let mut message = from.split_to(size + 4);
             drop(message.split_to(5 + 4 + 4)); // remove header, index and begin
 
@@ -194,9 +192,9 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
             if size != 13 {
                 return IResult::Err(funky_size());
             }
-            let index = BigEndian::read_u32(&mut rest[1..]);
-            let begin = BigEndian::read_u32(&mut rest[5..]);
-            let length = BigEndian::read_u32(&mut rest[9..]);
+            let index = BigEndian::read_u32(&rest[1..]);
+            let begin = BigEndian::read_u32(&rest[5..]);
+            let length = BigEndian::read_u32(&rest[9..]);
             drop(from.split_to(size + 4));
             IResult::Done(Message::Cancel(PieceSlice {
                 index,
@@ -208,8 +206,7 @@ pub fn deserialize(from: &mut BytesMut) -> IResult<Message<'static>, MagnetiteEr
             if size != 3 {
                 return IResult::Err(funky_size());
             }
-            let dht_port = BigEndian::read_u16(&mut rest[1..]);
-            drop(rest);
+            let dht_port = BigEndian::read_u16(&rest[1..]);
             drop(from.split_to(size + 4));
             IResult::Done(Message::Port { dht_port })
         }

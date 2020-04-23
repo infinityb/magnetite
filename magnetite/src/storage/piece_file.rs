@@ -225,7 +225,7 @@ impl PieceStorageEngineDumb for PieceFileStorageEngine {
         req: &GetPieceRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         let self_cloned: Self = self.clone();
-        let req: GetPieceRequest = req.clone();
+        let req: GetPieceRequest = *req;
 
         async move {
             let ts: TorrentState = {

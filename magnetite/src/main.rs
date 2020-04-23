@@ -43,31 +43,21 @@ fn main() -> Result<(), failure::Error> {
     let matches = app.get_matches();
 
     let verbosity = matches.occurrences_of("v");
-    let print_test_logging = 4 < verbosity;
+    let should_print_test_logging = 4 < verbosity;
 
-    match verbosity {
-        0 => {
-            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::ERROR)
-        }
-        1 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::WARN),
-        2 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::INFO),
-        3 => {
-            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::DEBUG)
-        }
-        _ => {
-            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::TRACE)
-        }
-    };
+    my_subscriber_builder = my_subscriber_builder.with_max_level(match verbosity {
+        0 => TracingLevelFilter::ERROR,
+        1 => TracingLevelFilter::WARN,
+        2 => TracingLevelFilter::INFO,
+        3 => TracingLevelFilter::DEBUG,
+        _ => TracingLevelFilter::TRACE,
+    });
 
     tracing::subscriber::set_global_default(my_subscriber_builder.finish())
         .expect("setting tracing default failed");
 
-    if print_test_logging {
-        event!(Level::TRACE, "logger initialized - trace check");
-        event!(Level::DEBUG, "logger initialized - debug check");
-        event!(Level::INFO, "logger initialized - info check");
-        event!(Level::WARN, "logger initialized - warn check");
-        event!(Level::ERROR, "logger initialized - error check");
+    if should_print_test_logging {
+        print_test_logging();
     }
 
     let (sub_name, args) = matches.subcommand();
@@ -83,4 +73,13 @@ fn main() -> Result<(), failure::Error> {
         _ => panic!("bad argument parse"),
     };
     main_function(args.expect("subcommand args"))
+}
+
+#[allow(clippy::cognitive_complexity)] // ???
+fn print_test_logging() {
+    event!(Level::TRACE, "logger initialized - trace check");
+    event!(Level::DEBUG, "logger initialized - debug check");
+    event!(Level::INFO, "logger initialized - info check");
+    event!(Level::WARN, "logger initialized - warn check");
+    event!(Level::ERROR, "logger initialized - error check");
 }
