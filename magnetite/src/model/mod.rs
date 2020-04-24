@@ -1,10 +1,12 @@
+use std::fmt;
+use std::io;
+use std::ops::{BitAnd, BitXor};
+use std::path::PathBuf;
+
 use failure::Fail;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::fmt;
-use std::io;
-use std::path::PathBuf;
 
 pub mod config;
 pub mod proto;
@@ -193,6 +195,38 @@ impl TorrentID {
     }
 }
 
+impl BitAnd for TorrentID {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let mut out = TorrentID::zero();
+        let lhs_bytes = self.as_bytes().iter();
+        let rhs_bytes = rhs.as_bytes().iter();
+
+        for (o, (a, b)) in out.as_mut_bytes().iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
+            *o = *a & *b;
+        }
+
+        out
+    }
+}
+
+impl BitXor for TorrentID {
+    type Output = Self;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        let mut out = TorrentID::zero();
+        let lhs_bytes = self.as_bytes().iter();
+        let rhs_bytes = rhs.as_bytes().iter();
+
+        for (o, (a, b)) in out.as_mut_bytes().iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
+            *o = *a ^ *b;
+        }
+
+        out
+    }
+}
+
 impl fmt::Debug for TorrentID {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("TorrentID")
@@ -257,6 +291,27 @@ impl TorrentID {
             copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
         r.fill_bytes(rest);
         TorrentID(data)
+    }
+
+    pub fn count_ones(&self) -> u32 {
+        let mut acc = 0;
+        for b in self.as_bytes() {
+            acc += b.count_ones();
+        }
+        acc
+    }
+
+    pub fn leading_zeros(&self) -> u32 {
+        let mut acc = 0;
+        for b in self.as_bytes() {
+            let lz = b.leading_zeros();
+            acc += lz;
+
+            if lz != 8 {
+                break;
+            }
+        }
+        acc
     }
 }
 
