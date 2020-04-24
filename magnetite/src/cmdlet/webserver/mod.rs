@@ -610,6 +610,8 @@ fn response_http_internal_server_error() -> Response<Body> {
 fn response_http_found(new_path: &str) -> Response<Body> {
     let builder = Response::builder()
         .header(hyper::header::SERVER, SERVER_NAME)
+        .header(hyper::header::CONTENT_TYPE, "text/html")
+        .header(hyper::header::LOCATION, new_path)
         .status(StatusCode::FOUND);
 
     let content = format!("Redirecting you to <a href=\"{0}\">{0}</a>", new_path);
