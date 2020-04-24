@@ -123,7 +123,7 @@ async fn load_from_disk(
     file: Arc<Mutex<TokioFile>>,
     crypto: Option<Arc<Mutex<XSalsa20>>>,
     piece_length: u32,
-    _piece_length_nopad: u32,
+    piece_length_nopad: u32,
     file_position: u64,
 ) -> Result<Bytes, MagnetiteError> {
     let mut piece_data = vec![0; piece_length as usize];
@@ -138,6 +138,8 @@ async fn load_from_disk(
         crlocked.seek(file_position);
         crlocked.apply_keystream(&mut piece_data[..]);
     }
+
+    piece_data.truncate(piece_length_nopad as usize);
 
     Ok(Bytes::from(piece_data))
 }
@@ -383,8 +385,9 @@ where
                 let mut cache_position = None;
                 if let Ok(ref bytes) = res {
                     let mut cache_padded = bytes.len() as u64;
+
                     if cache_padded % self_cloned.cache_alignment != 0 {
-                        cache_padded %= self_cloned.cache_alignment;
+                        cache_padded -= cache_padded % self_cloned.cache_alignment;
                         cache_padded += self_cloned.cache_alignment;
 
                         event!(
@@ -411,6 +414,7 @@ where
                             crlocked.apply_keystream(&mut piece_padded[..]);
                         }
 
+                        assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
                         file.write_all(&piece_padded[..]).await?;
 
                         Result::<(), MagnetiteError>::Ok(())
