@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::ffi::OsString;
 use std::fmt::{self, Write};
 use std::fs::File;
 use std::io::Read;
@@ -13,7 +14,6 @@ use hyper::Body;
 use hyper::{Request, Response, Server, StatusCode};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
@@ -238,6 +238,28 @@ where
     }
 }
 
+#[cfg(any(unix, target_os = "redox"))]
+fn percent_decode_str(x: &str) -> OsString {
+    use std::borrow::Cow;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    use percent_encoding::percent_decode_str;
+
+    let bytes: Cow<[u8]> = percent_decode_str(x).into();
+    OsStr::from_bytes(&bytes[..]).into()
+}
+
+#[cfg(windows)]
+fn percent_decode_str(x: &str) -> OsString {
+    use std::borrow::Cow;
+    use std::os::windows::ffi::OsStrExt;
+
+    use percent_encoding::percent_decode_str;
+
+    percent_decode_str(x).decode_utf8_lossy().into()
+}
+
 async fn service_request_helper<P>(
     fsi: FilesystemImpl<P>,
     req: Request<Body>,
@@ -248,10 +270,21 @@ where
     use crate::storage::utils::compute_piece_index_lb;
     use crate::storage::GetPieceRequest;
 
-    let path = req.uri().path().split('/').filter(|x| !x.is_empty());
+    let path = req
+        .uri()
+        .path()
+        .split('/')
+        .filter(|x| !x.is_empty())
+        .map(percent_decode_str);
 
     let fs = fsi.mutable.lock().await;
     let storage_backend = fs.storage_backend.clone();
+    event!(
+        Level::DEBUG,
+        "HTTP access {:?}",
+        path.clone().collect::<Vec<_>>()
+    );
+
     let fe = fs.vfs.traverse_path(1, path).map(Clone::clone)?;
     drop(fs);
 
@@ -353,6 +386,8 @@ where
         "image/gif"
     } else if req.uri().path().ends_with(".mp4") {
         "video/mp4"
+    } else if req.uri().path().ends_with(".cue") {
+        "text/plain; charset=utf-8"
     } else {
         "application/octet-stream"
     };
@@ -610,7 +645,7 @@ fn response_http_internal_server_error() -> Response<Body> {
 fn response_http_found(new_path: &str) -> Response<Body> {
     let builder = Response::builder()
         .header(hyper::header::SERVER, SERVER_NAME)
-        .header(hyper::header::CONTENT_TYPE, "text/html")
+        .header(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(hyper::header::LOCATION, new_path)
         .status(StatusCode::FOUND);
 
@@ -648,7 +683,7 @@ fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
         .header(hyper::header::SERVER, SERVER_NAME)
         .header(
             hyper::header::CONTENT_TYPE,
-            hyper::header::HeaderValue::from_static("text/html"),
+            hyper::header::HeaderValue::from_static("text/html; charset=utf-8"),
         );
 
     builder.body(data[..].to_vec().into()).unwrap()
