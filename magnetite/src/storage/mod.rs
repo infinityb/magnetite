@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use tokio::sync::Mutex;
 
-pub mod disk_cache_layer;
+pub mod disk_cache;
 pub mod piece_file;
 pub mod piggyback;
 pub mod remote_magnetite;

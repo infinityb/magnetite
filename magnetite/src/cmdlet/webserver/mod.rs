@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use crate::model::{InternalError, TorrentID, TorrentMetaWrapped};
-use crate::storage::disk_cache_layer::CacheWrapper;
+use crate::storage::disk_cache::CacheWrapper;
 use crate::storage::{state_wrapper, PieceFileStorageEngine, PieceStorageEngineDumb, StateWrapper};
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType, FilesystemImpl, FilesystemImplMutable,

@@ -11,7 +11,7 @@ use tokio::runtime::Runtime;
 use tracing::{event, Level};
 
 use crate::model::{TorrentID, TorrentMetaWrapped};
-use crate::storage::disk_cache_layer::CacheWrapper;
+use crate::storage::disk_cache::CacheWrapper;
 use crate::storage::remote_magnetite::start_server;
 use crate::storage::{piece_file, state_wrapper, PieceFileStorageEngine, StateWrapper};
 use crate::CARGO_PKG_VERSION;

@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use crate::model::{TorrentID, TorrentMetaWrapped};
-use crate::storage::disk_cache_layer::CacheWrapper;
+use crate::storage::disk_cache::CacheWrapper;
 use crate::storage::{
     multi_piece_read, state_wrapper, MultiPieceReadRequest, PieceFileStorageEngine,
     PieceStorageEngineDumb, ShaVerify, ShaVerifyMode, StateWrapper,
