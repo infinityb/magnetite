@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fmt::{self, Write};
 use std::fs::File;
 use std::io::Read;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::BytesMut;
@@ -18,9 +19,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
-use crate::model::{InternalError, TorrentID, TorrentMetaWrapped};
-use crate::storage::disk_cache::CacheWrapper;
-use crate::storage::{state_wrapper, PieceFileStorageEngine, PieceStorageEngineDumb, StateWrapper};
+use crate::model::config::build_storage_engine_states;
+use crate::model::{InternalError, TorrentID};
+use crate::storage::PieceStorageEngineDumb;
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType, FilesystemImpl, FilesystemImplMutable,
     NoEntityExists, Vfs,
@@ -53,7 +54,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    use crate::model::config::LegacyConfig as Config;
+    use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
@@ -61,79 +62,15 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     cfg_fi.read_to_end(&mut cfg_by).unwrap();
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
-    let _bind_address = matches.value_of_os("bind-address").unwrap();
+    let bind_address = matches.value_of("bind-address").unwrap().to_string();
 
     let mut rt = Runtime::new()?;
-    let mut state_builder = StateWrapper::builder();
-    let _pf_builder = PieceFileStorageEngine::builder();
 
-    let mut torrents = Vec::new();
-    for s in &config.torrents {
-        let mut fi = File::open(&s.torrent_file).unwrap();
-        let mut by = Vec::new();
-        fi.read_to_end(&mut by).unwrap();
-
-        let torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
-        let tm = Arc::new(torrent);
-
-        let _piece_count = tm.piece_shas.len() as u32;
-
-        // let pf = File::open(&s.source_file).unwrap();
-        // let mut crypto = None;
-        // if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
-        //     crypto = Some(salsa);
-        // }
-        // pf_builder.register_info_hash(
-        //     &tm.info_hash,
-        //     piece_file::Registration {
-        //         piece_count: piece_count,
-        //         crypto: crypto,
-        //         piece_file: pf.into(),
-        //     },
-        // );
-
-        state_builder.register_info_hash(
-            &tm.info_hash,
-            state_wrapper::Registration {
-                total_length: tm.total_length,
-                piece_length: tm.meta.info.piece_length,
-                piece_shas: tm.piece_shas.clone(),
-            },
-        );
-
-        torrents.push(tm);
-    }
-
-    let mut cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
-
-    let zero_iv = TorrentID::zero();
-    use crate::cmdlet::seed::get_torrent_salsa;
-    if let Some(salsa) = get_torrent_salsa(&config.cache_secret, &zero_iv) {
-        cache.set_crypto(salsa);
-    }
-
-    use std::fs::OpenOptions;
-
-    let cache_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("magnetite.cache")
-        .unwrap();
-
-    // let storage_backend = pf_builder.build();
-    let storage_backend = rt.block_on(async {
-        use crate::storage::remote_magnetite::RemoteMagnetite;
-
-        RemoteMagnetite::connected("[2001:470:b:1e9:2000::8]:17862")
-    });
-    let storage_backend = cache.build(cache_file.into(), storage_backend);
-    // let storage_backend = ShaVerify::new(storage_backend, ShaVerifyMode::Always);
+    let states = build_storage_engine_states(&mut rt, &config).unwrap();
 
     let mut fs_impl = FilesystemImplMutable {
-        storage_backend,
-        content_info: state_builder.build_content_info_manager(),
+        storage_backend: states.storage_engine,
+        content_info: states.content_info_manager,
         vfs: Vfs {
             inodes: BTreeMap::new(),
             inode_seq: 3,
@@ -151,7 +88,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             }),
         },
     );
-    for t in &torrents {
+    for t in states.path_to_torrent.values() {
         if let Err(err) = fs_impl.add_torrent(t) {
             event!(
                 Level::ERROR,
@@ -191,9 +128,9 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     });
 
     rt.block_on(async {
-        // Then bind and serve...
-        let addr = ("::".parse::<std::net::Ipv6Addr>().unwrap(), 8081).into();
-        let server = Server::bind(&addr).serve(make_svc);
+        let sa: SocketAddr = bind_address.parse().unwrap();
+        let server = Server::bind(&sa).serve(make_svc);
+        event!(Level::INFO, "binding to {}", bind_address);
 
         // Finally, spawn `server` onto an Executor...
         if let Err(e) = server.await {
@@ -402,7 +339,7 @@ where
     }
 
     event!(
-        Level::ERROR,
+        Level::DEBUG,
         "fetching spans: {:?} -- {:#?}",
         spans,
         req.headers()

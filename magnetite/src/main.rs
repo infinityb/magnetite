@@ -75,7 +75,7 @@ fn main() -> Result<(), failure::Error> {
     main_function(args.expect("subcommand args"))
 }
 
-#[allow(clippy::cognitive_complexity)] // ???
+#[allow(clippy::cognitive_complexity)] // macro bug around event!()
 fn print_test_logging() {
     event!(Level::TRACE, "logger initialized - trace check");
     event!(Level::DEBUG, "logger initialized - debug check");

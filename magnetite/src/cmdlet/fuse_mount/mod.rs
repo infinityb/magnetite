@@ -18,12 +18,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
-use crate::model::{TorrentID, TorrentMetaWrapped};
-use crate::storage::disk_cache::CacheWrapper;
-use crate::storage::{
-    multi_piece_read, state_wrapper, MultiPieceReadRequest, PieceFileStorageEngine,
-    PieceStorageEngineDumb, ShaVerify, ShaVerifyMode, StateWrapper,
-};
+use crate::model::config::build_storage_engine_states;
+
+use crate::storage::{multi_piece_read, MultiPieceReadRequest, PieceStorageEngineDumb};
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType as VfsFileType, FilesystemImpl,
     FilesystemImplMutable, NoEntityExists, NotADirectory, Vfs,
@@ -224,7 +221,7 @@ where
 
 use crate::CARGO_PKG_VERSION;
 
-pub const SUBCOMMAND_NAME: &str = "mount-daemon";
+pub const SUBCOMMAND_NAME: &str = "fuse-mount";
 
 pub fn get_subcommand() -> App<'static, 'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
@@ -284,8 +281,9 @@ impl MagnetiteFuseHost for FuseHost {
 }
 
 #[cfg(unix)]
+#[allow(clippy::cognitive_complexity)] // macro bug around event!()
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    use crate::model::config::LegacyConfig as Config;
+    use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
@@ -299,81 +297,12 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mount_point = Path::new(mount_point).to_owned();
 
     let mut rt = Runtime::new()?;
-    let mut state_builder = StateWrapper::builder();
-    let _pf_builder = PieceFileStorageEngine::builder();
 
-    let mut torrents = Vec::new();
-    for s in &config.torrents {
-        let mut fi = File::open(&s.torrent_file).unwrap();
-        let mut by = Vec::new();
-        fi.read_to_end(&mut by).unwrap();
-
-        let torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
-        let tm = Arc::new(torrent);
-
-        let _piece_count = tm.piece_shas.len() as u32;
-
-        // let pf = File::open(&s.source_file).unwrap();
-
-        // let mut crypto = None;
-        // if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
-        //     crypto = Some(salsa);
-        // }
-
-        // pf_builder.register_info_hash(
-        //     &tm.info_hash,
-        //     piece_file::Registration {
-        //         piece_count: piece_count,
-        //         crypto: crypto,
-        //         piece_file: pf.into(),
-        //     },
-        // );
-
-        state_builder.register_info_hash(
-            &tm.info_hash,
-            state_wrapper::Registration {
-                total_length: tm.total_length,
-                piece_length: tm.meta.info.piece_length,
-                piece_shas: tm.piece_shas.clone(),
-            },
-        );
-
-        println!("added info_hash: {:?}", tm.info_hash);
-        torrents.push(tm);
-    }
-
-    // let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::None);
-
-    let mut cache = CacheWrapper::build_with_capacity_bytes(3 * 1024 * 1024 * 1024);
-
-    let zero_iv = TorrentID::zero();
-    use crate::cmdlet::seed::get_torrent_salsa;
-    if let Some(salsa) = get_torrent_salsa(&config.cache_secret, &zero_iv) {
-        cache.set_crypto(salsa);
-    }
-
-    use std::fs::OpenOptions;
-
-    let cache_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("magnetite.cache")
-        .unwrap();
-
-    // let storage_engine = pf_builder.build();
-    let storage_engine = rt.block_on(async {
-        use crate::storage::remote_magnetite::RemoteMagnetite;
-
-        RemoteMagnetite::connected("[2604:3d09:2a7c:7f00:21b:21ff:fec0:7fe4]:17862")
-    });
-    let storage_engine = cache.build(cache_file.into(), storage_engine);
-    let storage_engine = ShaVerify::new(storage_engine, ShaVerifyMode::Always);
+    let states = build_storage_engine_states(&mut rt, &config).unwrap();
 
     let mut fs_impl = FilesystemImplMutable {
-        storage_backend: storage_engine,
-        content_info: state_builder.build_content_info_manager(),
+        storage_backend: states.storage_engine,
+        content_info: states.content_info_manager,
         vfs: Vfs {
             inodes: BTreeMap::new(),
             inode_seq: 3,
@@ -391,7 +320,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             }),
         },
     );
-    for t in &torrents {
+    for t in states.path_to_torrent.values() {
         if let Err(err) = fs_impl.add_torrent(t) {
             event!(
                 Level::ERROR,
@@ -401,6 +330,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 err
             );
         }
+        event!(Level::INFO, "added {:?} to filesystem", t.info_hash);
     }
 
     event!(

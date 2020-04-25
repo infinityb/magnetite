@@ -182,6 +182,21 @@ impl std::error::Error for InternalError {}
 
 // --
 
+#[derive(Debug)]
+pub struct FileError {
+    pub msg: String,
+}
+
+impl fmt::Display for FileError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "FileError: {}", self.msg)
+    }
+}
+
+impl std::error::Error for FileError {}
+
+// --
+
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TorrentID(pub [u8; TORRENT_ID_LENGTH]);
 
