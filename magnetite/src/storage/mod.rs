@@ -1,10 +1,11 @@
 use std::pin::Pin;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 
 use tokio::sync::Mutex;
 
-pub mod disk_cache_layer;
+pub mod disk_cache;
 pub mod piece_file;
 pub mod piggyback;
 pub mod remote_magnetite;
@@ -171,4 +172,54 @@ pub async fn get_content_info(
     let c = cim.lock().await;
     let ci = c.data.get(content_key)?;
     Some(ci.clone())
+}
+
+impl<T> PieceStorageEngine for Box<T>
+where
+    T: PieceStorageEngine + ?Sized,
+{
+    fn get_piece(
+        &self,
+        content_key: &TorrentID,
+        piece_id: u32,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+        PieceStorageEngine::get_piece(&**self, content_key, piece_id)
+    }
+}
+
+impl<T> PieceStorageEngineDumb for Box<T>
+where
+    T: PieceStorageEngineDumb + ?Sized,
+{
+    fn get_piece_dumb(
+        &self,
+        req: &GetPieceRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+        PieceStorageEngineDumb::get_piece_dumb(&**self, req)
+    }
+}
+
+impl<T> PieceStorageEngine for Arc<T>
+where
+    T: PieceStorageEngine + ?Sized,
+{
+    fn get_piece(
+        &self,
+        content_key: &TorrentID,
+        piece_id: u32,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+        PieceStorageEngine::get_piece(&**self, content_key, piece_id)
+    }
+}
+
+impl<T> PieceStorageEngineDumb for Arc<T>
+where
+    T: PieceStorageEngineDumb + ?Sized,
+{
+    fn get_piece_dumb(
+        &self,
+        req: &GetPieceRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+        PieceStorageEngineDumb::get_piece_dumb(&**self, req)
+    }
 }

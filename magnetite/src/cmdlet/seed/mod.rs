@@ -9,9 +9,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
 use iresult::IResult;
-use salsa20::stream_cipher::generic_array::GenericArray;
-use salsa20::stream_cipher::NewStreamCipher;
-use salsa20::XSalsa20;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -19,6 +17,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use crate::model::config::get_torrent_salsa;
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
 use crate::model::{
@@ -177,18 +176,6 @@ impl PeerState {
 //     acceptable_peers: Arc<Mutex<BTreeSet<TorrentID>>>,
 
 // }
-
-pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSalsa20> {
-    if !crypto_secret.is_empty() {
-        let mut nonce_data = [0; 24];
-        nonce_data[4..].copy_from_slice(info_hash.as_bytes());
-        let nonce = GenericArray::from_slice(&nonce_data[..]);
-        let key = GenericArray::from_slice(crypto_secret.as_bytes());
-        Some(XSalsa20::new(&key, &nonce))
-    } else {
-        None
-    }
-}
 
 struct TorrentDownloadStateManager {
     torrents: HashMap<TorrentID, TorrentDownloadState>,
