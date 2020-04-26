@@ -4,9 +4,9 @@ use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
+use std::fmt::Write;
 
 use bytes::{Bytes, BytesMut};
-
 use futures::future::FutureExt;
 use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
@@ -307,7 +307,7 @@ where
                 );
 
                 event!(
-                    Level::DEBUG,
+                    Level::TRACE,
                     "loading request {:?}::{:?}",
                     piece_key,
                     cache_entry_cloned
@@ -356,8 +356,6 @@ where
                     return;
                 }
 
-                event!(Level::DEBUG, "loading request from upstream");
-
                 let mut piece_cache = self_cloned.piece_cache.lock().await;
                 let punch_spans = cache_cleanup(
                     &mut *piece_cache,
@@ -368,12 +366,6 @@ where
                 drop(piece_cache);
 
                 let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
-                event!(
-                    Level::DEBUG,
-                    "loading request from upstream: {}",
-                    if res.is_ok() { "ok" } else { "err" }
-                );
-
                 let mut file = self_cloned.cache_file.lock().await;
 
                 if let Err(err) = punch_cache(&mut file, &punch_spans) {
@@ -438,7 +430,7 @@ where
                 let mut piece_cache = self_cloned.piece_cache.lock().await;
                 if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                     event!(
-                        Level::DEBUG,
+                        Level::TRACE,
                         "setting local disk cache location to {:?}::{:?}",
                         piece_key,
                         cache_position
@@ -456,9 +448,9 @@ where
                 if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                     event!(
                         Level::DEBUG,
-                        "clearing memory-cached piece {:?}::{:?}",
-                        piece_key,
-                        e
+                        "clearing memory-cached piece {}#{}",
+                        HexStr(piece_key.0.as_bytes()),
+                        piece_key.1,
                     );
                     e.inflight = None;
                 }
@@ -469,5 +461,18 @@ where
             return infl.complete().await;
         }
         .boxed()
+    }
+}
+
+pub struct HexStr<'a>(pub &'a [u8]);
+
+impl<'a> fmt::Display for HexStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+        for c in self.0.iter() {
+            f.write_char(HEX_CHARS[usize::from(c >> 4)] as char)?;
+            f.write_char(HEX_CHARS[usize::from(c & 0xF)] as char)?;
+        }
+        Ok(())
     }
 }

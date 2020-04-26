@@ -183,13 +183,14 @@ impl std::error::Error for InternalError {}
 // --
 
 #[derive(Debug)]
-pub struct FileError {
-    pub msg: String,
+struct FileError {
+    path: PathBuf,
+    cause: io::Error,
 }
 
 impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "FileError: {}", self.msg)
+        write!(f, "{}: {}", self.path.display(), self.cause)
     }
 }
 
