@@ -1,15 +1,7 @@
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 use nix::fcntl::{fcntl, FcntlArg};
-use nix::unistd::{read, write};
-
-#[cfg(target_os = "macos")]
-use nix::unistd::lseek as lseek64;
-
-#[cfg(target_os = "linux")]
-use nix::unistd::lseek64;
 
 #[derive(Debug)]
 pub struct OwnedFd {
@@ -18,7 +10,7 @@ pub struct OwnedFd {
 
 impl OwnedFd {
     pub fn dup(raw: RawFd) -> Result<OwnedFd, nix::Error> {
-        fcntl(raw, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(0)).map(|raw_fd| OwnedFd { raw_fd })
+        fcntl(raw, FcntlArg::F_DUPFD_CLOEXEC(0)).map(|raw_fd| OwnedFd { raw_fd })
     }
 
     pub fn set_capacity(&mut self, size: i64) -> Result<(), nix::Error> {

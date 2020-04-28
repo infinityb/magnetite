@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write;
 use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
-use std::fmt::Write;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
@@ -15,6 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{watch, Mutex};
 use tracing::{event, Level};
 
+#[cfg(target_os = "linux")]
+use crate::utils::OwnedFd;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{fallocate, FallocateFlags};
 
@@ -226,18 +229,18 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     out
 }
 
-#[cfg(not(target_os = "linux"))]
-fn punch_cache(_: &mut TokioFile, _: &[FileSpan]) -> Result<(), nix::Error> {
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
-fn punch_cache(cache: &mut TokioFile, punch_spans: &[FileSpan]) -> Result<(), nix::Error> {
+async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), nix::Error> {
+    use std::os::unix::io::AsRawFd;
+
     let start = std::time::Instant::now();
+    let mut sched_yield_time = Duration::new(0, 0);
     let mut byte_acc: u64 = 0;
 
-    for punch in punch_spans {
-        use std::os::unix::io::AsRawFd;
+    for punch in &punch_spans {
+        let yield_start = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        sched_yield_time += yield_start.elapsed();
 
         byte_acc += punch.length;
         let flags = FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
@@ -252,10 +255,11 @@ fn punch_cache(cache: &mut TokioFile, punch_spans: &[FileSpan]) -> Result<(), ni
     if byte_acc > 0 {
         event!(
             Level::INFO,
-            "punched {} bytes out with {} calls in {:?}",
+            "punched {} bytes out with {} calls in {:?}, {:?} yielded",
             byte_acc,
             punch_spans.len(),
             start.elapsed(),
+            sched_yield_time,
         );
     }
 
@@ -270,8 +274,6 @@ where
         &self,
         req: &GetPieceRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
-        use std::time::Duration;
-
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
@@ -365,15 +367,24 @@ where
 
                 drop(piece_cache);
 
-                let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
-                let mut file = self_cloned.cache_file.lock().await;
+                if !punch_spans.is_empty() {
+                    #[cfg(target_os = "linux")]
+                    async {
+                        use std::os::unix::io::AsRawFd;
+                        let file = self_cloned.cache_file.lock().await;
+                        let fallocate_fd = OwnedFd::dup(file.as_raw_fd()).unwrap();
+                        drop(file);
 
-                if let Err(err) = punch_cache(&mut file, &punch_spans) {
-                    event!(Level::ERROR, "failed to punch hole: {}", err);
-                    let _ = tx.broadcast(Some(Err(MagnetiteError::StorageEngineCorruption)));
-                    return;
+                        if let Err(err) = punch_cache(fallocate_fd, punch_spans).await {
+                            event!(Level::ERROR, "failed to punch hole: {}", err);
+                            return;
+                        }
+                    }
+                    .await;
                 }
 
+                let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
+                let mut file = self_cloned.cache_file.lock().await;
                 let mut cache_position = None;
                 if let Ok(ref bytes) = res {
                     let mut cache_padded = bytes.len() as u64;
@@ -408,6 +419,8 @@ where
 
                         assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
                         file.write_all(&piece_padded[..]).await?;
+                        let position = file.seek(SeekFrom::End(0)).await?;
+                        assert_eq!(position % self_cloned.cache_alignment, 0);
 
                         Result::<(), MagnetiteError>::Ok(())
                     }
