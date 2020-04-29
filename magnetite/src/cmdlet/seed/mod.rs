@@ -21,17 +21,13 @@ use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use crate::bittorrent::peer_state::{
-    merge_global_payload_stats, ClientContext, PeerState, Session, Stats,
+    merge_global_payload_stats, GlobalState, PeerState, Session, Stats,
 };
-use crate::model::config::get_torrent_salsa;
+use crate::model::config::{build_storage_engine, Config, Frontend, FrontendSeed};
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
-use crate::model::{
-    BadHandshake, BitField, ProtocolViolation, TorrentID, TorrentMetaWrapped, Truncated,
-};
-use crate::storage::{
-    piece_file, state_wrapper, PieceFileStorageEngine, PieceStorageEngine, StateWrapper,
-};
+use crate::model::{BadHandshake, BitField, ProtocolViolation, TorrentID, Truncated};
+use crate::storage::PieceStorageEngine;
 use crate::utils::BytesCow;
 use crate::CARGO_PKG_VERSION;
 
@@ -307,8 +303,6 @@ fn apply_work_state(
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    use crate::model::config::LegacyConfig as Config;
-
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
     let mut cfg_by = Vec::new();
@@ -317,284 +311,282 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let peer_id = TorrentID::generate_peer_id_seeded(&config.client_secret);
     let mut rt = Runtime::new()?;
-
-    let cc: ClientContext = Default::default();
-
-    let mut pf_builder = PieceFileStorageEngine::builder();
-    let mut state_builder = StateWrapper::builder();
-
-    for s in &config.torrents {
-        let mut fi = File::open(&s.torrent_file).unwrap();
-        let mut by = Vec::new();
-        fi.read_to_end(&mut by).unwrap();
-
-        let pf = File::open(&s.source_file).unwrap();
-
-        let mut torrent = TorrentMetaWrapped::from_bytes(&by).unwrap();
-
-        // deallocate files, we don't need them for seed on piece file engine
-        torrent.meta.info.files = Vec::new();
-
-        let tm = Arc::new(torrent);
-
-        let piece_count = tm.piece_shas.len() as u32;
-
-        let mut crypto = None;
-        if let Some(salsa) = get_torrent_salsa(&s.secret, &tm.info_hash) {
-            crypto = Some(salsa);
-        }
-
-        pf_builder.register_info_hash(
-            &tm.info_hash,
-            piece_file::Registration {
-                piece_count,
-                crypto,
-                piece_file: pf.into(),
-            },
-        );
-        state_builder.register_info_hash(
-            &tm.info_hash,
-            state_wrapper::Registration {
-                total_length: tm.total_length,
-                piece_length: tm.meta.info.piece_length,
-                piece_shas: tm.piece_shas.clone(),
-            },
-        );
-
-        println!("added info_hash: {:?}", tm.info_hash);
-    }
-
-    let storage_engine = state_builder.build(pf_builder.build());
-    let cc = Arc::new(Mutex::new(cc));
+    let storage_engine = build_storage_engine(&mut rt, &config).unwrap();
 
     let torrent_stats: Arc<Mutex<HashMap<TorrentID, Arc<Mutex<Stats>>>>> = Default::default();
+    let gs: Arc<Mutex<GlobalState>> = Default::default();
 
-    rt.block_on(async {
-        // suppress connections to these until the value has expired.
-        // let connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
-
-        let mut listener = TcpListener::bind(&config.seed_bind_addr).await.unwrap();
-        // let (state_channel_tx, mut state_channel_rx) = tokio::sync::mpsc::channel(10);
-        // tokio::spawn(async move {
-        //     while let Some(stat_update) = state_channel_rx.recv().await {
-        //         // stat_update
-        //     }
-        // });
-
-        loop {
-            let torrent_stats = torrent_stats.clone();
-            let (mut socket, addr) = listener.accept().await.unwrap();
-
-            // let state_channel_tx = state_channel_tx.clone();
+    let mut futures = Vec::new();
+    for fe in &config.frontends {
+        if let Frontend::Seed(ref seed) = fe {
+            let seed: FrontendSeed = seed.clone();
             let storage_engine = storage_engine.clone();
-            let cc = Arc::clone(&cc);
-
-            tokio::spawn(async move {
-                let mut rbuf = BytesMut::new();
-                let handshake =
-                    match read_to_completion(&mut socket, &mut rbuf, Handshake::parse2).await {
-                        Ok(hs) => hs,
-                        Err(_err) => {
-                            event!(Level::INFO,
-                            name = "bad-handshake",
-                            addr = ?addr,
-                            "bad handshake {:?}", bencode::BinStr(&rbuf[..]));
-                            return;
-                        }
-                    };
-
-                let mut ccl = cc.lock().await;
-
-                event!(Level::INFO,
-                    name = "bittorrent-connection",
-                    info_hash = ?handshake.info_hash,
-                    peer_id = ?handshake.peer_id,
-                    addr = ?addr);
-
-                let session_id = ccl.session_id_seq;
-                ccl.session_id_seq += 1;
-
-                let mut torrent_stats_locked = torrent_stats.lock().await;
-                let self_torrent_stats = torrent_stats_locked
-                    .entry(handshake.info_hash)
-                    .or_insert_with(|| {
-                        Arc::new(Mutex::new(Stats {
-                            sent_payload_bytes: 0,
-                            recv_payload_bytes: 0,
-                        }))
-                    })
-                    .clone();
-                drop(torrent_stats_locked);
-
-                let torrent = match ccl.torrents.get(&handshake.info_hash) {
-                    Some(tt) => tt,
-                    None => {
-                        event!(Level::INFO,
-                            peer_id = ?handshake.peer_id,
-                            addr = ?addr,
-                            "unknown-info-hash");
-                        return;
-                    }
-                };
-
-                let mut hs_buf = [0; HANDSHAKE_SIZE];
-                let hs = Handshake::serialize_bytes(
-                    &mut hs_buf[..],
-                    &handshake.info_hash,
-                    &peer_id,
-                    &[],
-                )
-                .unwrap();
-                socket.write(&hs).await.unwrap();
-
-                let torrent_meta = Arc::clone(&torrent.meta);
-                let target = torrent_meta.info_hash;
-                let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
-
-                event!(Level::INFO,
-                    session_id = session_id,
-                    info_hash = ?handshake.info_hash,
-                    peer_id = ?handshake.peer_id,
-                    "configured");
-
-                ccl.sessions.insert(
-                    session_id,
-                    Session {
-                        id: session_id,
-                        addr,
-                        handshake,
-                        target,
-                        state: PeerState::new(bf_length),
-                    },
-                );
-
-                drop(ccl);
-
-                let (srh, mut swh) = socket.split();
-
-                let mut request_queue_rx = client_stream_reader(rbuf, srh);
-                let handler = async {
-                    let mut state = PeerState::new(bf_length);
-                    let mut msg_buf = vec![0; 64 * 1024];
-                    let mut requests = Vec::<PieceSlice>::new();
-                    let piece_count = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
-
-                    {
-                        let have_bitfield = BitField::all(piece_count);
-
-                        let ss = serialize(
-                            &mut msg_buf[..],
-                            &Message::Bitfield {
-                                field_data: BytesCow::Borrowed(have_bitfield.as_raw_slice()),
-                            },
-                        )
-                        .unwrap();
-                        swh.write_all(ss).await?;
-
-                        let ss = serialize(&mut msg_buf[..], &Message::Unchoke).unwrap();
-                        swh.write_all(ss).await?;
-                    }
-
-                    let mut next_bytes_out_milestone: u64 = 1024 * 1024;
-                    let mut next_global_stats_update = Instant::now() + Duration::new(120, 0);
-
-                    while let Some(work) = request_queue_rx.next().await {
-                        let work = work?;
-
-                        let now = Instant::now();
-                        event!(Level::DEBUG, session_id = session_id, "processing-work");
-                        requests.clear();
-
-                        if state.next_keepalive < now {
-                            let ss = serialize(&mut msg_buf[..], &Message::Keepalive).unwrap();
-                            swh.write_all(ss).await?;
-                            state.next_keepalive = now + Duration::new(90, 0);
-                        }
-
-                        apply_work_state(&mut state, &work, now, session_id)?;
-
-                        if let StreamReaderItem::Message(Message::Request(ps)) = work {
-                            requests.push(ps);
-                        }
-
-                        let sent_len = send_pieces(
-                            &torrent_meta.info_hash,
-                            &mut msg_buf[..],
-                            addr,
-                            &mut swh,
-                            &requests,
-                            &storage_engine,
-                        )
-                        .await?;
-
-                        state.stats.sent_payload_bytes += sent_len;
-                        state.global_uncommitted_stats.sent_payload_bytes += sent_len;
-
-                        let mut stats_locked = self_torrent_stats.lock().await;
-                        stats_locked.sent_payload_bytes += sent_len;
-                        drop(stats_locked);
-
-                        if next_bytes_out_milestone < state.stats.sent_payload_bytes {
-                            next_bytes_out_milestone += 100 << 20;
-                            let completed = state.peer_bitfield.count_ones();
-                            let total_pieces = state.peer_bitfield.bit_length;
-                            event!(
-                                Level::INFO,
-                                name = "update",
-                                session_id = session_id,
-                                bandwidth_milestone_bytes = state.stats.sent_payload_bytes,
-                                completed_pieces = completed,
-                                total_pieces = state.peer_bitfield.bit_length,
-                                "#{}: bw-out milestone of {} MB, {:.2}% confirmed",
-                                session_id,
-                                state.stats.sent_payload_bytes / 1024 / 1024,
-                                100.0 * completed as f64 / total_pieces as f64
-                            );
-                        }
-
-                        if next_global_stats_update < now {
-                            next_global_stats_update = now + Duration::new(12, 0);
-
-                            let mut ccl = cc.lock().await;
-                            merge_global_payload_stats(&mut ccl, &mut state);
-                            if let Some(s) = ccl.sessions.get_mut(&session_id) {
-                                s.state = state.clone();
-                            }
-                            drop(ccl);
-                        }
-                    }
-
-                    Ok(())
-                };
-
-                let res1: Result<(), MagnetiteError> = handler.await;
-
-                let mut ccl = cc.lock().await;
-                let mut removed = ccl.sessions.remove(&session_id).unwrap();
-                merge_global_payload_stats(&mut ccl, &mut removed.state);
-                let remaining_connections = ccl.sessions.len();
-                drop(ccl);
-
+            let torrent_stats = torrent_stats.clone();
+            let gs = gs.clone();
+            futures.push(async move {
+                let mut listener = TcpListener::bind(&seed.bind_address).await.unwrap();
                 event!(
-                    Level::WARN,
-                    name = "disconnected",
-                    session_id = session_id,
-                    sent_payload_bytes = removed.state.stats.sent_payload_bytes,
-                    recv_payload_bytes = removed.state.stats.recv_payload_bytes,
-                    remaining_connections = remaining_connections
+                    Level::INFO,
+                    "seed backend bind successful: {:?}",
+                    seed.bind_address
                 );
 
-                if let Err(err) = res1 {
-                    event!(
-                        Level::INFO,
-                        session_id = session_id,
-                        "err from client reader: {:?}",
-                        err
-                    );
+                loop {
+                    let storage_engine = storage_engine.clone();
+                    let torrent_stats = torrent_stats.clone();
+                    let gs = gs.clone();
+
+                    let (socket, addr) = listener.accept().await.unwrap();
+                    event!(Level::INFO, "got connection from {:?}", addr);
+
+                    // suppress connections to these until the value has expired.
+                    // let connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
+                    //
+                    // ???
+                    // let (state_channel_tx, mut state_channel_rx) = tokio::sync::mpsc::channel(10);
+                    // tokio::spawn(async move {
+                    //     while let Some(stat_update) = state_channel_rx.recv().await {
+                    //         // stat_update
+                    //     }
+                    // });
+
+                    tokio::spawn(async move {
+                        if let Err(err) =
+                            start_server(socket, storage_engine, addr, torrent_stats, gs, peer_id)
+                                .await
+                        {
+                            event!(Level::ERROR, "error: {}", err);
+                        }
+                    });
                 }
             });
         }
-    });
+    }
+
+    rt.block_on(futures::future::join_all(futures));
+
+    Ok(())
+}
+
+async fn start_server<S>(
+    mut socket: TcpStream,
+    storage_engine: S,
+    addr: SocketAddr,
+    torrent_stats: Arc<Mutex<HashMap<TorrentID, Arc<Mutex<Stats>>>>>,
+    gs: Arc<Mutex<GlobalState>>,
+    peer_id: TorrentID,
+) -> Result<(), MagnetiteError>
+where
+    S: PieceStorageEngine + Sync + Send + 'static,
+{
+    let torrent_stats = torrent_stats.clone();
+
+    // let state_channel_tx = state_channel_tx.clone();
+
+    let mut rbuf = BytesMut::new();
+    let handshake = match read_to_completion(&mut socket, &mut rbuf, Handshake::parse2).await {
+        Ok(hs) => hs,
+        Err(err) => {
+            let hs_err = BadHandshake::junk_data();
+            event!(Level::INFO,
+                name = "bad-handshake",
+                addr = ?addr,
+                handshake_error = ?hs_err,
+                data = ?bencode::BinStr(&rbuf[..]),
+                "bad handshake: {}",
+                err);
+
+            return Err(hs_err.into());
+        }
+    };
+
+    let mut gsl = gs.lock().await;
+
+    event!(Level::INFO,
+        name = "bittorrent-connection",
+        info_hash = ?handshake.info_hash,
+        peer_id = ?handshake.peer_id,
+        addr = ?addr);
+
+    let session_id = gsl.session_id_seq;
+    gsl.session_id_seq += 1;
+
+    let mut torrent_stats_locked = torrent_stats.lock().await;
+    let self_torrent_stats = torrent_stats_locked
+        .entry(handshake.info_hash)
+        .or_insert_with(|| {
+            Arc::new(Mutex::new(Stats {
+                sent_payload_bytes: 0,
+                recv_payload_bytes: 0,
+            }))
+        })
+        .clone();
+    drop(torrent_stats_locked);
+
+    let torrent = match gsl.torrents.get(&handshake.info_hash) {
+        Some(tt) => tt,
+        None => {
+            let hs_err = BadHandshake::unknown_info_hash(&handshake.info_hash);
+            event!(Level::INFO,
+                name = "bad-handshake",
+                addr = ?addr,
+                handshake_error = ?hs_err,
+                "bad handshake: unknown info hash");
+
+            return Err(hs_err.into());
+        }
+    };
+
+    let mut hs_buf = [0; HANDSHAKE_SIZE];
+    let hs =
+        Handshake::serialize_bytes(&mut hs_buf[..], &handshake.info_hash, &peer_id, &[]).unwrap();
+    socket.write(&hs).await.unwrap();
+
+    let torrent_meta = Arc::clone(&torrent.meta);
+    let target = torrent_meta.info_hash;
+    let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
+
+    event!(Level::INFO,
+        session_id = session_id,
+        info_hash = ?handshake.info_hash,
+        peer_id = ?handshake.peer_id,
+        "configured");
+
+    gsl.sessions.insert(
+        session_id,
+        Session {
+            id: session_id,
+            addr,
+            handshake,
+            target,
+            state: PeerState::new(bf_length),
+        },
+    );
+
+    drop(gsl);
+
+    let (srh, mut swh) = socket.split();
+
+    let mut request_queue_rx = client_stream_reader(rbuf, srh);
+    let handler = async {
+        let mut state = PeerState::new(bf_length);
+        let mut msg_buf = vec![0; 64 * 1024];
+        let mut requests = Vec::<PieceSlice>::new();
+        let piece_count = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
+
+        {
+            let have_bitfield = BitField::all(piece_count);
+
+            let ss = serialize(
+                &mut msg_buf[..],
+                &Message::Bitfield {
+                    field_data: BytesCow::Borrowed(have_bitfield.as_raw_slice()),
+                },
+            )
+            .unwrap();
+            swh.write_all(ss).await?;
+
+            let ss = serialize(&mut msg_buf[..], &Message::Unchoke).unwrap();
+            swh.write_all(ss).await?;
+        }
+
+        let mut next_bytes_out_milestone: u64 = 1024 * 1024;
+        let mut next_global_stats_update = Instant::now() + Duration::new(120, 0);
+
+        while let Some(work) = request_queue_rx.next().await {
+            let work = work?;
+
+            let now = Instant::now();
+            event!(Level::DEBUG, session_id = session_id, "processing-work");
+            requests.clear();
+
+            if state.next_keepalive < now {
+                let ss = serialize(&mut msg_buf[..], &Message::Keepalive).unwrap();
+                swh.write_all(ss).await?;
+                state.next_keepalive = now + Duration::new(90, 0);
+            }
+
+            apply_work_state(&mut state, &work, now, session_id)?;
+
+            if let StreamReaderItem::Message(Message::Request(ps)) = work {
+                requests.push(ps);
+            }
+
+            let sent_len = send_pieces(
+                &torrent_meta.info_hash,
+                &mut msg_buf[..],
+                addr,
+                &mut swh,
+                &requests,
+                &storage_engine,
+            )
+            .await?;
+
+            state.stats.sent_payload_bytes += sent_len;
+            state.global_uncommitted_stats.sent_payload_bytes += sent_len;
+
+            let mut stats_locked = self_torrent_stats.lock().await;
+            stats_locked.sent_payload_bytes += sent_len;
+            drop(stats_locked);
+
+            if next_bytes_out_milestone < state.stats.sent_payload_bytes {
+                next_bytes_out_milestone += 100 << 20;
+                let completed = state.peer_bitfield.count_ones();
+                let total_pieces = state.peer_bitfield.bit_length;
+                event!(
+                    Level::INFO,
+                    name = "update",
+                    session_id = session_id,
+                    bandwidth_milestone_bytes = state.stats.sent_payload_bytes,
+                    completed_pieces = completed,
+                    total_pieces = state.peer_bitfield.bit_length,
+                    "#{}: bw-out milestone of {} MB, {:.2}% confirmed",
+                    session_id,
+                    state.stats.sent_payload_bytes / 1024 / 1024,
+                    100.0 * completed as f64 / total_pieces as f64
+                );
+            }
+
+            if next_global_stats_update < now {
+                next_global_stats_update = now + Duration::new(12, 0);
+
+                let mut gsl = gs.lock().await;
+                merge_global_payload_stats(&mut gsl, &mut state);
+                if let Some(s) = gsl.sessions.get_mut(&session_id) {
+                    s.state = state.clone();
+                }
+                drop(gsl);
+            }
+        }
+
+        Ok(())
+    };
+
+    let res1: Result<(), MagnetiteError> = handler.await;
+
+    let mut gsl = gs.lock().await;
+    let mut removed = gsl.sessions.remove(&session_id).unwrap();
+    merge_global_payload_stats(&mut gsl, &mut removed.state);
+    let remaining_connections = gsl.sessions.len();
+    drop(gsl);
+
+    event!(
+        Level::WARN,
+        name = "disconnected",
+        session_id = session_id,
+        sent_payload_bytes = removed.state.stats.sent_payload_bytes,
+        recv_payload_bytes = removed.state.stats.recv_payload_bytes,
+        remaining_connections = remaining_connections
+    );
+
+    if let Err(err) = res1 {
+        event!(
+            Level::INFO,
+            session_id = session_id,
+            "err from client reader: {:?}",
+            err
+        );
+    }
 
     Ok(())
 }

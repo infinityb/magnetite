@@ -42,6 +42,8 @@ pub struct LegacyTorrentFactory {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
     pub storage_engine: Vec<StorageEngineElement>,
     #[serde(default)]
     pub frontends: Vec<Frontend>,
@@ -53,10 +55,16 @@ pub struct Config {
 #[serde(tag = "name", rename_all = "snake_case")]
 pub enum Frontend {
     Host(FrontendHost),
+    Seed(FrontendSeed),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FrontendHost {
+    pub bind_address: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FrontendSeed {
     pub bind_address: String,
 }
 
