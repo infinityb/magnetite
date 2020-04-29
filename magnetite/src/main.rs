@@ -6,6 +6,7 @@ use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
+mod bittorrent;
 mod cmdlet;
 mod model;
 mod scheduler;
