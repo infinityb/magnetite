@@ -49,6 +49,11 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 let storage_engine = storage_engine.clone();
                 futures.push(async move {
                     let mut listener = TcpListener::bind(&host.bind_address).await.unwrap();
+                    event!(
+                        Level::INFO,
+                        "host backend bind successful: {:?}",
+                        host.bind_address
+                    );
                     loop {
                         let storage_engine = storage_engine.clone();
                         let (socket, addr) = listener.accept().await.unwrap();

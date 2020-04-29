@@ -391,9 +391,14 @@ async fn run_connected(
         // now: either slab is full or split_request_queue is empty.  If slab is full, we shouldn't
         // take any more requests, and we must complete a response read.
         while inflight.len() == current_window_size {
-            socket.read_buf(&mut rbuf).await?;
+            let is_eof = socket.read_buf(&mut rbuf).await? == 0;
+
             while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
                 resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
+            }
+
+            if is_eof {
+                break;
             }
         }
 
@@ -472,7 +477,7 @@ impl RemoteMagnetite {
         task::spawn(async move {
             const FAILURE_DELAY_MILLISECONDS_MAX: u64 = 60_000;
             const FAILURE_DELAY_MILLISECONDS_START: u64 = 100;
-            let mut failure_delay_milliseconds: u64 = FAILURE_DELAY_MILLISECONDS_START;
+            let mut failure_delay_milliseconds: u64 = 0;
 
             loop {
                 let socket = match TcpStream::connect(&addr).await {
@@ -521,7 +526,9 @@ where
     let mut rbuf = BytesMut::with_capacity(BUF_SIZE_REQUEST);
 
     loop {
-        socket.read_buf(&mut rbuf).await?;
+        if socket.read_buf(&mut rbuf).await? == 0 {
+            return Ok(());
+        }
 
         let mut fast_cache: HashMap<(TorrentID, u32), Bytes> = Default::default();
 

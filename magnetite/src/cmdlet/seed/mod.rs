@@ -1,22 +1,28 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::marker::Unpin;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
+use futures::future::Future;
+use futures::stream::{Stream, StreamExt};
 use iresult::IResult;
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use crate::bittorrent::peer_state::{
+    merge_global_payload_stats, ClientContext, PeerState, Session, Stats,
+};
 use crate::model::config::get_torrent_salsa;
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
@@ -112,65 +118,6 @@ async fn send_pieces(
     Ok(bytes_written)
 }
 
-struct ClientContext {
-    session_id_seq: u64,
-    torrents: HashMap<TorrentID, Torrent>,
-    sessions: HashMap<u64, Session>,
-}
-
-struct Torrent {
-    id: TorrentID,
-    meta: Arc<TorrentMetaWrapped>,
-    have_bitfield: BitField,
-    piece_file_path: PathBuf,
-    crypto_secret: Option<String>,
-    tracker_groups: Vec<TrackerGroup>,
-}
-
-struct TrackerGroup {
-    //
-}
-
-struct Session {
-    id: u64,
-    addr: SocketAddr,
-    handshake: Handshake,
-    target: TorrentID,
-    // Arc<TorrentMetaWrapped>,
-    state: PeerState,
-    // storage_engine: PieceFileStorageEngine,
-}
-
-#[derive(Clone)]
-struct PeerState {
-    last_read: std::time::Instant,
-    next_keepalive: std::time::Instant,
-    sent_bytes: u64,
-    recv_bytes: u64,
-    peer_bitfield: BitField,
-    choking: bool,
-    interesting: bool,
-    choked: bool,
-    interested: bool,
-}
-
-impl PeerState {
-    pub fn new(bf_length: u32) -> PeerState {
-        let now = std::time::Instant::now();
-        PeerState {
-            last_read: now,
-            next_keepalive: now,
-            sent_bytes: 0,
-            recv_bytes: 0,
-            peer_bitfield: BitField::none(bf_length),
-            choking: true,
-            interesting: false,
-            choked: true,
-            interested: false,
-        }
-    }
-}
-
 // struct ConnectHandlerState {
 //     self_peer_id: TorrentID,
 //     acceptable_peers: Arc<Mutex<BTreeSet<TorrentID>>>,
@@ -242,6 +189,123 @@ async fn start_connection(
     Ok(remote_handshake)
 }
 
+enum StreamReaderItem {
+    Message(Message<'static>),
+    AntiIdle,
+}
+
+fn client_stream_reader<R>(
+    mut rbuf: BytesMut,
+    mut reader: R,
+) -> impl Stream<Item = Result<StreamReaderItem, MagnetiteError>>
+where
+    R: AsyncRead + Unpin,
+{
+    use futures::ready;
+    use tokio::time::{delay_for, Instant};
+
+    let ping_interval: Duration = Duration::new(40, 0);
+
+    futures::stream::poll_fn(move |cx| {
+        let mut anti_idle_timer = delay_for(ping_interval);
+        let mut must_read: usize = 0;
+        let mut stream_ended = false;
+
+        loop {
+            if must_read == 0 {
+                match deserialize(&mut rbuf) {
+                    IResult::Done(v) => return Poll::Ready(Some(Ok(StreamReaderItem::Message(v)))),
+                    IResult::ReadMore(bytes) => must_read = bytes,
+                    IResult::Err(err) => {
+                        event!(
+                            Level::TRACE,
+                            "read+deserialize error (protocol violation): buffer = {:?}",
+                            rbuf
+                        );
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
+            }
+
+            let anti_idle_timer_pin = Pin::new(&mut anti_idle_timer);
+            if let Poll::Ready(()) = Future::poll(anti_idle_timer_pin, cx) {
+                anti_idle_timer.reset(Instant::now() + ping_interval);
+                return Poll::Ready(Some(Ok(StreamReaderItem::AntiIdle)));
+            }
+
+            if stream_ended {
+                return Poll::Ready(None);
+            }
+
+            let reader_pin = Pin::new(&mut reader);
+            match ready!(reader_pin.poll_read_buf(cx, &mut rbuf)) {
+                Ok(0) => stream_ended = true,
+                Ok(len) => must_read = must_read.saturating_sub(len),
+                Err(err) => {
+                    event!(Level::INFO, "read error: {}", err);
+                    stream_ended = true;
+                }
+            }
+        }
+    })
+}
+
+fn apply_work_state(
+    ps: &mut PeerState,
+    work: &StreamReaderItem,
+    now: Instant,
+    session_id: u64,
+) -> Result<(), MagnetiteError> {
+    if let StreamReaderItem::Message(..) = work {
+        ps.last_read = now;
+    }
+
+    match work {
+        StreamReaderItem::Message(Message::Choke) => {
+            ps.choked = true;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Unchoke) => {
+            ps.choked = false;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Interested) => {
+            ps.interested = true;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Uninterested) => {
+            ps.interested = false;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Have { piece_id }) => {
+            if *piece_id < ps.peer_bitfield.bit_length {
+                ps.peer_bitfield.set(*piece_id, true);
+            }
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Bitfield { ref field_data }) => {
+            if field_data.as_slice().len() != ps.peer_bitfield.data.len() {
+                return Err(ProtocolViolation.into());
+            }
+            ps.peer_bitfield.data = field_data.as_slice().to_vec().into_boxed_slice();
+            let completed = ps.peer_bitfield.count_ones();
+            let total_pieces = ps.peer_bitfield.bit_length;
+            event!(
+                Level::TRACE,
+                name = "update-bitfield",
+                session_id = session_id,
+                completed_pieces = completed,
+                total_pieces = ps.peer_bitfield.bit_length,
+                "#{}: {:.2}% confirmed",
+                session_id,
+                100.0 * completed as f64 / total_pieces as f64
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     use crate::model::config::LegacyConfig as Config;
 
@@ -254,11 +318,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let peer_id = TorrentID::generate_peer_id_seeded(&config.client_secret);
     let mut rt = Runtime::new()?;
 
-    let cc = ClientContext {
-        session_id_seq: 0,
-        torrents: HashMap::new(),
-        sessions: HashMap::new(),
-    };
+    let cc: ClientContext = Default::default();
 
     let mut pf_builder = PieceFileStorageEngine::builder();
     let mut state_builder = StateWrapper::builder();
@@ -307,6 +367,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let storage_engine = state_builder.build(pf_builder.build());
     let cc = Arc::new(Mutex::new(cc));
 
+    let torrent_stats: Arc<Mutex<HashMap<TorrentID, Arc<Mutex<Stats>>>>> = Default::default();
+
     rt.block_on(async {
         // suppress connections to these until the value has expired.
         // let connect_blacklist: HashMap<SocketAddr, Instant> = Default::default();
@@ -320,6 +382,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         // });
 
         loop {
+            let torrent_stats = torrent_stats.clone();
             let (mut socket, addr) = listener.accept().await.unwrap();
 
             // let state_channel_tx = state_channel_tx.clone();
@@ -351,6 +414,18 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 let session_id = ccl.session_id_seq;
                 ccl.session_id_seq += 1;
 
+                let mut torrent_stats_locked = torrent_stats.lock().await;
+                let self_torrent_stats = torrent_stats_locked
+                    .entry(handshake.info_hash)
+                    .or_insert_with(|| {
+                        Arc::new(Mutex::new(Stats {
+                            sent_payload_bytes: 0,
+                            recv_payload_bytes: 0,
+                        }))
+                    })
+                    .clone();
+                drop(torrent_stats_locked);
+
                 let torrent = match ccl.torrents.get(&handshake.info_hash) {
                     Some(tt) => tt,
                     None => {
@@ -375,8 +450,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 let torrent_meta = Arc::clone(&torrent.meta);
                 let target = torrent_meta.info_hash;
                 let bf_length = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
-                let _have_bitfield =
-                    BitField::all(torrent_meta.meta.info.pieces.chunks(20).count() as u32);
 
                 event!(Level::INFO,
                     session_id = session_id,
@@ -397,54 +470,17 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
                 drop(ccl);
 
-                let _last_handshake = std::time::Instant::now();
-                let (mut request_queue_tx, mut request_queue_rx) = tokio::sync::mpsc::channel(10);
-                let (mut srh, mut swh) = socket.split();
+                let (srh, mut swh) = socket.split();
 
-                let reader = async {
-                    loop {
-                        use tokio::time::{timeout, Duration};
-
-                        let mut reqs = Vec::new();
-                        pop_messages_into(&mut rbuf, &mut reqs)?;
-                        event!(Level::DEBUG, read_requests=?reqs);
-                        if let Err(err) = request_queue_tx.send(reqs).await {
-                            event!(Level::WARN, "writer-disappeared: {}", err);
-                            break;
-                        }
-
-                        let length =
-                            match timeout(Duration::new(40, 0), srh.read_buf(&mut rbuf)).await {
-                                Ok(res) => res?,
-                                Err(err) => {
-                                    let _: tokio::time::Elapsed = err;
-                                    if let Err(err) = request_queue_tx.send(Vec::new()).await {
-                                        event!(Level::WARN, "writer-disappeared: {}", err);
-                                        break;
-                                    }
-                                    continue;
-                                }
-                            };
-
-                        if length == 0 {
-                            event!(Level::DEBUG, session_id = session_id, "read-closed");
-                            break;
-                        }
-                    }
-
-                    drop(request_queue_tx);
-
-                    Ok(())
-                };
-
+                let mut request_queue_rx = client_stream_reader(rbuf, srh);
                 let handler = async {
                     let mut state = PeerState::new(bf_length);
                     let mut msg_buf = vec![0; 64 * 1024];
                     let mut requests = Vec::<PieceSlice>::new();
+                    let piece_count = torrent_meta.meta.info.pieces.chunks(20).count() as u32;
 
                     {
-                        let have_bitfield =
-                            BitField::all(torrent_meta.meta.info.pieces.chunks(20).count() as u32);
+                        let have_bitfield = BitField::all(piece_count);
 
                         let ss = serialize(
                             &mut msg_buf[..],
@@ -460,80 +496,28 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                     }
 
                     let mut next_bytes_out_milestone: u64 = 1024 * 1024;
-                    let mut next_global_stats_update =
-                        std::time::Instant::now() + std::time::Duration::new(120, 0);
-                    while let Some(work) = request_queue_rx.recv().await {
-                        let now = std::time::Instant::now();
+                    let mut next_global_stats_update = Instant::now() + Duration::new(120, 0);
 
+                    while let Some(work) = request_queue_rx.next().await {
+                        let work = work?;
+
+                        let now = Instant::now();
                         event!(Level::DEBUG, session_id = session_id, "processing-work");
                         requests.clear();
-                        if !work.is_empty() {
-                            state.last_read = now;
-                        }
+
                         if state.next_keepalive < now {
                             let ss = serialize(&mut msg_buf[..], &Message::Keepalive).unwrap();
                             swh.write_all(ss).await?;
-                            state.next_keepalive = now + std::time::Duration::new(90, 0);
+                            state.next_keepalive = now + Duration::new(90, 0);
                         }
 
-                        for w in work {
-                            match w {
-                                Message::Keepalive => {
-                                    // nothing. keepalives are discarded
-                                }
-                                Message::Choke => {
-                                    state.choked = true;
-                                }
-                                Message::Unchoke => {
-                                    state.choked = false;
-                                }
-                                Message::Interested => {
-                                    state.interested = true;
-                                }
-                                Message::Uninterested => {
-                                    state.interested = false;
-                                }
-                                Message::Have { piece_id } => {
-                                    if piece_id < state.peer_bitfield.bit_length {
-                                        state.peer_bitfield.set(piece_id, true);
-                                    }
-                                }
-                                Message::Bitfield { ref field_data } => {
-                                    if field_data.as_slice().len() != state.peer_bitfield.data.len()
-                                    {
-                                        return Err(ProtocolViolation.into());
-                                    }
-                                    state.peer_bitfield.data =
-                                        field_data.as_slice().to_vec().into_boxed_slice();
-                                    let completed = state.peer_bitfield.count_ones();
-                                    let total_pieces = state.peer_bitfield.bit_length;
-                                    event!(
-                                        Level::INFO,
-                                        name = "update-bitfield",
-                                        session_id = session_id,
-                                        completed_pieces = completed,
-                                        total_pieces = state.peer_bitfield.bit_length,
-                                        "#{}: {:.2}% confirmed",
-                                        session_id,
-                                        100.0 * completed as f64 / total_pieces as f64
-                                    );
-                                }
-                                Message::Request(ps) => {
-                                    requests.push(ps);
-                                }
-                                Message::Cancel(ref _ps) => {
-                                    // nothing, we don't support cancellations yet. maybe we never will.
-                                }
-                                Message::Piece { .. } => {
-                                    // nothing, we don't support downloading.
-                                }
-                                Message::Port { .. } => {
-                                    // nothing, we don't support DHT.
-                                }
-                            }
+                        apply_work_state(&mut state, &work, now, session_id)?;
+
+                        if let StreamReaderItem::Message(Message::Request(ps)) = work {
+                            requests.push(ps);
                         }
 
-                        state.sent_bytes += send_pieces(
+                        let sent_len = send_pieces(
                             &torrent_meta.info_hash,
                             &mut msg_buf[..],
                             addr,
@@ -543,30 +527,36 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                         )
                         .await?;
 
-                        if next_bytes_out_milestone < state.sent_bytes {
-                            next_bytes_out_milestone += 100 << 20;
-                            let _completed = 0;
+                        state.stats.sent_payload_bytes += sent_len;
+                        state.global_uncommitted_stats.sent_payload_bytes += sent_len;
 
+                        let mut stats_locked = self_torrent_stats.lock().await;
+                        stats_locked.sent_payload_bytes += sent_len;
+                        drop(stats_locked);
+
+                        if next_bytes_out_milestone < state.stats.sent_payload_bytes {
+                            next_bytes_out_milestone += 100 << 20;
                             let completed = state.peer_bitfield.count_ones();
                             let total_pieces = state.peer_bitfield.bit_length;
                             event!(
                                 Level::INFO,
                                 name = "update",
                                 session_id = session_id,
-                                bandwidth_milestone_bytes = state.sent_bytes,
+                                bandwidth_milestone_bytes = state.stats.sent_payload_bytes,
                                 completed_pieces = completed,
                                 total_pieces = state.peer_bitfield.bit_length,
                                 "#{}: bw-out milestone of {} MB, {:.2}% confirmed",
                                 session_id,
-                                state.sent_bytes / 1024 / 1024,
+                                state.stats.sent_payload_bytes / 1024 / 1024,
                                 100.0 * completed as f64 / total_pieces as f64
                             );
                         }
 
                         if next_global_stats_update < now {
-                            next_global_stats_update = now + std::time::Duration::new(120, 0);
+                            next_global_stats_update = now + Duration::new(12, 0);
 
                             let mut ccl = cc.lock().await;
+                            merge_global_payload_stats(&mut ccl, &mut state);
                             if let Some(s) = ccl.sessions.get_mut(&session_id) {
                                 s.state = state.clone();
                             }
@@ -577,11 +567,11 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                     Ok(())
                 };
 
-                let (res1, res2): (Result<(), MagnetiteError>, Result<(), MagnetiteError>) =
-                    futures::future::join(reader, handler).await;
+                let res1: Result<(), MagnetiteError> = handler.await;
 
                 let mut ccl = cc.lock().await;
-                let removed = ccl.sessions.remove(&session_id).unwrap();
+                let mut removed = ccl.sessions.remove(&session_id).unwrap();
+                merge_global_payload_stats(&mut ccl, &mut removed.state);
                 let remaining_connections = ccl.sessions.len();
                 drop(ccl);
 
@@ -589,7 +579,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                     Level::WARN,
                     name = "disconnected",
                     session_id = session_id,
-                    sent_bytes = removed.state.sent_bytes,
+                    sent_payload_bytes = removed.state.stats.sent_payload_bytes,
+                    recv_payload_bytes = removed.state.stats.recv_payload_bytes,
                     remaining_connections = remaining_connections
                 );
 
@@ -598,14 +589,6 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                         Level::INFO,
                         session_id = session_id,
                         "err from client reader: {:?}",
-                        err
-                    );
-                }
-                if let Err(err) = res2 {
-                    event!(
-                        Level::INFO,
-                        session_id = session_id,
-                        "err from client handler: {:?}",
                         err
                     );
                 }

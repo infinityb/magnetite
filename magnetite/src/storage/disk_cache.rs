@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write;
 use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 
 use bytes::{Bytes, BytesMut};
-
 use futures::future::FutureExt;
 use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
@@ -15,6 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{watch, Mutex};
 use tracing::{event, Level};
 
+#[cfg(target_os = "linux")]
+use crate::utils::OwnedFd;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{fallocate, FallocateFlags};
 
@@ -226,18 +229,18 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     out
 }
 
-#[cfg(not(target_os = "linux"))]
-fn punch_cache(_: &mut TokioFile, _: &[FileSpan]) -> Result<(), nix::Error> {
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
-fn punch_cache(cache: &mut TokioFile, punch_spans: &[FileSpan]) -> Result<(), nix::Error> {
+async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), nix::Error> {
+    use std::os::unix::io::AsRawFd;
+
     let start = std::time::Instant::now();
+    let mut sched_yield_time = Duration::new(0, 0);
     let mut byte_acc: u64 = 0;
 
-    for punch in punch_spans {
-        use std::os::unix::io::AsRawFd;
+    for punch in &punch_spans {
+        let yield_start = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        sched_yield_time += yield_start.elapsed();
 
         byte_acc += punch.length;
         let flags = FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
@@ -252,10 +255,11 @@ fn punch_cache(cache: &mut TokioFile, punch_spans: &[FileSpan]) -> Result<(), ni
     if byte_acc > 0 {
         event!(
             Level::INFO,
-            "punched {} bytes out with {} calls in {:?}",
+            "punched {} bytes out with {} calls in {:?}, {:?} yielded",
             byte_acc,
             punch_spans.len(),
             start.elapsed(),
+            sched_yield_time,
         );
     }
 
@@ -270,8 +274,6 @@ where
         &self,
         req: &GetPieceRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
-        use std::time::Duration;
-
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
@@ -307,7 +309,7 @@ where
                 );
 
                 event!(
-                    Level::DEBUG,
+                    Level::TRACE,
                     "loading request {:?}::{:?}",
                     piece_key,
                     cache_entry_cloned
@@ -356,8 +358,6 @@ where
                     return;
                 }
 
-                event!(Level::DEBUG, "loading request from upstream");
-
                 let mut piece_cache = self_cloned.piece_cache.lock().await;
                 let punch_spans = cache_cleanup(
                     &mut *piece_cache,
@@ -367,21 +367,24 @@ where
 
                 drop(piece_cache);
 
-                let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
-                event!(
-                    Level::DEBUG,
-                    "loading request from upstream: {}",
-                    if res.is_ok() { "ok" } else { "err" }
-                );
+                if !punch_spans.is_empty() {
+                    #[cfg(target_os = "linux")]
+                    async {
+                        use std::os::unix::io::AsRawFd;
+                        let file = self_cloned.cache_file.lock().await;
+                        let fallocate_fd = OwnedFd::dup(file.as_raw_fd()).unwrap();
+                        drop(file);
 
-                let mut file = self_cloned.cache_file.lock().await;
-
-                if let Err(err) = punch_cache(&mut file, &punch_spans) {
-                    event!(Level::ERROR, "failed to punch hole: {}", err);
-                    let _ = tx.broadcast(Some(Err(MagnetiteError::StorageEngineCorruption)));
-                    return;
+                        if let Err(err) = punch_cache(fallocate_fd, punch_spans).await {
+                            event!(Level::ERROR, "failed to punch hole: {}", err);
+                            return;
+                        }
+                    }
+                    .await;
                 }
 
+                let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
+                let mut file = self_cloned.cache_file.lock().await;
                 let mut cache_position = None;
                 if let Ok(ref bytes) = res {
                     let mut cache_padded = bytes.len() as u64;
@@ -416,6 +419,8 @@ where
 
                         assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
                         file.write_all(&piece_padded[..]).await?;
+                        let position = file.seek(SeekFrom::End(0)).await?;
+                        assert_eq!(position % self_cloned.cache_alignment, 0);
 
                         Result::<(), MagnetiteError>::Ok(())
                     }
@@ -438,7 +443,7 @@ where
                 let mut piece_cache = self_cloned.piece_cache.lock().await;
                 if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                     event!(
-                        Level::DEBUG,
+                        Level::TRACE,
                         "setting local disk cache location to {:?}::{:?}",
                         piece_key,
                         cache_position
@@ -456,9 +461,9 @@ where
                 if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
                     event!(
                         Level::DEBUG,
-                        "clearing memory-cached piece {:?}::{:?}",
-                        piece_key,
-                        e
+                        "clearing memory-cached piece {}#{}",
+                        HexStr(piece_key.0.as_bytes()),
+                        piece_key.1,
                     );
                     e.inflight = None;
                 }
@@ -469,5 +474,18 @@ where
             return infl.complete().await;
         }
         .boxed()
+    }
+}
+
+pub struct HexStr<'a>(pub &'a [u8]);
+
+impl<'a> fmt::Display for HexStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+        for c in self.0.iter() {
+            f.write_char(HEX_CHARS[usize::from(c >> 4)] as char)?;
+            f.write_char(HEX_CHARS[usize::from(c & 0xF)] as char)?;
+        }
+        Ok(())
     }
 }

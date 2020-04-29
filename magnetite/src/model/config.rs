@@ -143,9 +143,15 @@ fn build_torrent_map(
     let mut path_to_torrent = HashMap::new();
 
     for s in &config.torrents {
-        let mut fi = File::open(&s.torrent_file)?;
+        let mut fi = File::open(&s.torrent_file).map_err(|e| FileError {
+            path: s.torrent_file.clone(),
+            cause: e,
+        })?;
         let mut by = Vec::new();
-        fi.read_to_end(&mut by)?;
+        fi.read_to_end(&mut by).map_err(|e| FileError {
+            path: s.torrent_file.clone(),
+            cause: e,
+        })?;
 
         let torrent = TorrentMetaWrapped::from_bytes(&by)?;
         path_to_torrent.insert(s.torrent_file.clone(), Arc::new(torrent));
@@ -174,9 +180,9 @@ fn piece_file(
     let mut pf_builder = PieceFileStorageEngine::builder();
 
     for s in &config.torrents {
-        let pf = File::open(&s.source_file).map_err(|err| {
-            let err = format!("failed to open {}: {}", s.source_file.display(), err);
-            FileError { msg: err }
+        let pf = File::open(&s.source_file).map_err(|e| FileError {
+            path: s.torrent_file.clone(),
+            cause: e,
         })?;
 
         let metainfo = path_to_torrent
