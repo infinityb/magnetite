@@ -6,6 +6,7 @@ use bytes::{Bytes, BytesMut};
 use tokio::sync::Mutex;
 
 pub mod disk_cache;
+pub mod memory_cache;
 pub mod piece_file;
 pub mod piggyback;
 pub mod remote_magnetite;
@@ -14,13 +15,13 @@ pub mod state_wrapper;
 
 pub const DOWNLOAD_CHUNK_SIZE: u32 = 16 * 1024;
 
+pub use self::disk_cache::DiskCacheWrapper;
 pub use self::piece_file::PieceFileStorageEngine;
 pub use self::sha_verify::{ShaVerify, ShaVerifyMode};
 pub use self::state_wrapper::StateWrapper;
 
 use crate::model::{MagnetiteError, TorrentID};
-use crate::storage::state_wrapper::ContentInfo;
-use crate::storage::state_wrapper::ContentInfoManager;
+use crate::storage::state_wrapper::{ContentInfo, ContentInfoManager};
 
 #[derive(Copy, Clone, Debug)]
 pub struct GetPieceRequest {

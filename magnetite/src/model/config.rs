@@ -15,9 +15,9 @@ use tracing::{event, Level};
 use crate::model::{FileError, InternalError, TorrentID, TorrentMetaWrapped};
 use crate::storage::state_wrapper::ContentInfoManager;
 use crate::storage::{
-    disk_cache::CacheWrapper, piece_file, remote_magnetite::RemoteMagnetite,
-    sha_verify::ShaVerifyMode, state_wrapper, PieceFileStorageEngine, PieceStorageEngine,
-    PieceStorageEngineDumb, ShaVerify, StateWrapper,
+    disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, piece_file,
+    remote_magnetite::RemoteMagnetite, sha_verify::ShaVerifyMode, state_wrapper,
+    PieceFileStorageEngine, PieceStorageEngine, PieceStorageEngineDumb, ShaVerify, StateWrapper,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +80,11 @@ pub struct StorageEngineElementShaValidate {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StorageEngineElementMemoryCache {
+    cache_size: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StorageEngineElementDiskCache {
     #[serde(default)]
     secret: String,
@@ -90,6 +95,7 @@ pub struct StorageEngineElementDiskCache {
 #[serde(tag = "name", rename_all = "snake_case")]
 pub enum StorageEngineElement {
     DiskCache(StorageEngineElementDiskCache),
+    MemoryCache(StorageEngineElementMemoryCache),
     MultiFile,
     PieceFile,
     RemoteMagnetite(StorageEngineElementRemoteMagnetite),
@@ -250,6 +256,12 @@ fn build_storage_engine_dumb_helper(
             StorageEngineElement::DiskCache(..) => {
                 return Err(InvalidRootStorage(InvalidStorage { name: "disk cache" }).into());
             }
+            StorageEngineElement::MemoryCache(..) => {
+                return Err(InvalidRootStorage(InvalidStorage {
+                    name: "memory cache",
+                })
+                .into());
+            }
             StorageEngineElement::MultiFile => {
                 unimplemented!();
             }
@@ -277,6 +289,14 @@ fn build_storage_engine_dumb_helper(
                 })
                 .into());
             }
+            StorageEngineElement::MemoryCache(ref mc) => {
+                event!(Level::INFO, "configuring MemoryCache backend - {:?}", mc);
+                let cache = MemoryCacheWrapper::build_with_capacity_bytes(mc.cache_size);
+
+                let boxed: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> =
+                    Box::new(cache.build(current_engine));
+                current_engine = boxed.into();
+            }
             StorageEngineElement::DiskCache(ref dc) => {
                 event!(Level::INFO, "configuring DiskCache backend - {:?}", dc);
                 let cache_file = OpenOptions::new()
@@ -286,7 +306,7 @@ fn build_storage_engine_dumb_helper(
                     .truncate(true)
                     .open("magnetite.cache")?;
 
-                let mut cache = CacheWrapper::build_with_capacity_bytes(dc.cache_size);
+                let mut cache = DiskCacheWrapper::build_with_capacity_bytes(dc.cache_size);
 
                 let zero_iv = TorrentID::zero();
                 if let Some(salsa) = get_torrent_salsa(&dc.secret, &zero_iv) {
