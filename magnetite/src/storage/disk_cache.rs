@@ -4,8 +4,7 @@ use std::fmt::Write;
 use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{SystemTime, Instant, Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
@@ -13,7 +12,7 @@ use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 #[cfg(target_os = "linux")]
@@ -21,50 +20,28 @@ use crate::utils::OwnedFd;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{fallocate, FallocateFlags};
 
-use super::piggyback::Inflight;
 use crate::model::{MagnetiteError, TorrentID};
 use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PieceCacheEntry {
     last_touched: SystemTime,
     piece_length: u32,
-    // none if it's not written yet, which may be the case if we're going upstream.
-    position: Option<u64>,
-    // none if we don't have any pending requests for this piece and it is merely cached.
-    inflight: Option<Inflight>,
-}
-
-impl fmt::Debug for PieceCacheEntry {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("PieceCacheEntry")
-            .field("last_touched", &self.last_touched)
-            .field("piece_length", &self.piece_length)
-            .field("position", &self.position)
-            .finish()
-    }
-}
-
-impl PieceCacheEntry {
-    pub fn new_with_piece_length(piece_length: u32) -> PieceCacheEntry {
-        PieceCacheEntry {
-            last_touched: SystemTime::now(),
-            piece_length,
-            position: None,
-            inflight: None,
-        }
-    }
+    position: u64,
 }
 
 struct PieceCacheInfo {
     cache_size_max: u64,
     cache_file_offset: u64,
     cache_size_cur: u64,
+    fetched_bytes: u64,
+    fetched_upstream_bytes: u64,
+    next_cache_report_print: Instant,
     pieces: BTreeMap<(TorrentID, u32), PieceCacheEntry>,
 }
 
 #[derive(Clone)]
-pub struct CacheWrapper<P> {
+pub struct DiskCacheWrapper<P> {
     // pieces and punched holes will always start at a multiple of this alignment
     // pieces will be padded to their piece_length, if shorter.
     cache_alignment: u64,
@@ -76,7 +53,7 @@ pub struct CacheWrapper<P> {
     upstream: P,
 }
 
-impl CacheWrapper<()> {
+impl DiskCacheWrapper<()> {
     pub fn build_with_capacity_bytes(cap_bytes: u64) -> Builder {
         Builder {
             cache_alignment: 128 * 1024,
@@ -97,11 +74,11 @@ impl Builder {
         self.crypto = Some(Arc::new(Mutex::new(crypto)));
     }
 
-    pub fn build<P>(self, file: TokioFile, upstream: P) -> CacheWrapper<P>
+    pub fn build<P>(self, file: TokioFile, upstream: P) -> DiskCacheWrapper<P>
     where
         P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
     {
-        CacheWrapper {
+        DiskCacheWrapper {
             cache_alignment: self.cache_alignment,
             cache_file: Arc::new(Mutex::new(file)),
             crypto: self.crypto,
@@ -109,6 +86,9 @@ impl Builder {
                 cache_size_max: self.cache_size_max,
                 cache_file_offset: 0,
                 cache_size_cur: 0,
+                fetched_bytes: 0,
+                fetched_upstream_bytes: 0,
+                next_cache_report_print: Instant::now() + Duration::new(60, 0),
                 pieces: Default::default(),
             })),
             upstream,
@@ -202,14 +182,12 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
             }
         }
 
-        if v.position.is_some() {
-            discard_credit -= i64::from(v.piece_length);
-            discard.push(HeapEntry {
-                last_touched: v.last_touched,
-                piece_length: v.piece_length,
-                btree_key: *k,
-            });
-        }
+        discard_credit -= i64::from(v.piece_length);
+        discard.push(HeapEntry {
+            last_touched: v.last_touched,
+            piece_length: v.piece_length,
+            btree_key: *k,
+        });
     }
 
     let mut out = Vec::with_capacity(discard.len());
@@ -217,13 +195,11 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     for h in discard.into_vec() {
         let v = cache.pieces.remove(&h.btree_key).unwrap();
 
-        if let Some(pos) = v.position {
-            cache.cache_size_cur -= u64::from(v.piece_length);
-            out.push(FileSpan {
-                start: pos,
-                length: u64::from(v.piece_length),
-            });
-        }
+        cache.cache_size_cur -= u64::from(v.piece_length);
+        out.push(FileSpan {
+            start: v.position,
+            length: u64::from(v.piece_length),
+        });
     }
 
     out
@@ -266,7 +242,7 @@ async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), n
     Ok(())
 }
 
-impl<P> PieceStorageEngineDumb for CacheWrapper<P>
+impl<P> PieceStorageEngineDumb for DiskCacheWrapper<P>
 where
     P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
 {
@@ -279,199 +255,155 @@ where
         let req: GetPieceRequest = *req;
 
         async move {
+            let (_, piece_length_actual) = super::utils::compute_offset_length(
+                req.piece_index,
+                req.piece_length,
+                req.total_length,
+            );
+
             let mut piece_cache = self_cloned.piece_cache.lock().await;
-
-            let cache_entry = piece_cache
-                .pieces
-                .entry(piece_key)
-                .or_insert_with(|| PieceCacheEntry::new_with_piece_length(req.piece_length));
-
-            cache_entry.last_touched = SystemTime::now();
-
-            if let Some(ref infl) = cache_entry.inflight {
-                let completion_fut = infl.clone().complete();
-                drop(piece_cache);
-                return completion_fut.await;
+            let now = Instant::now();
+            if piece_cache.next_cache_report_print < now {
+                piece_cache.next_cache_report_print = now + Duration::new(60, 0);
+                event!(Level::INFO,
+                    fetched_bytes=piece_cache.fetched_bytes,
+                    fetched_upstream_bytes=piece_cache.fetched_upstream_bytes,
+                    "cache hit rate: {:.1}%",
+                    (
+                        100.0 * (
+                            piece_cache.fetched_bytes as f64 -
+                            piece_cache.fetched_upstream_bytes as f64
+                        ) / piece_cache.fetched_upstream_bytes as f64
+                    ));
             }
 
-            let cache_entry_cloned: PieceCacheEntry = cache_entry.clone();
-
-            let (tx, rx) = watch::channel(None);
-            let infl = Inflight { finished: rx };
-            cache_entry.inflight = Some(infl.clone());
-
-            drop(piece_cache);
-            tokio::spawn(async move {
-                let (_, piece_length_nopad) = super::utils::compute_offset_length(
-                    req.piece_index,
-                    req.piece_length,
-                    req.total_length,
-                );
-
-                event!(
-                    Level::TRACE,
-                    "loading request {:?}::{:?}",
-                    piece_key,
-                    cache_entry_cloned
-                );
-
-                // now we determine if we need to fetch it from upstream or from local disk-based cache.
-                if let Some(pos) = cache_entry_cloned.position {
-                    // it's on disk - load it from there and issue a completion.
-                    let disk_load_res = load_from_disk(
-                        self_cloned.cache_file.clone(),
-                        self_cloned.crypto.clone(),
-                        cache_entry_cloned.piece_length,
-                        piece_length_nopad,
-                        pos,
-                    )
-                    .await;
-
-                    if let Ok(ref bytes) = disk_load_res {
-                        event!(
-                            Level::DEBUG,
-                            "got piece from cache: len()={:?}",
-                            bytes.len()
-                        );
-                    }
-
-                    if let Err(ref err) = disk_load_res {
-                        event!(
-                            Level::ERROR,
-                            "failed to load piece from disk cache: {}",
-                            err
-                        );
-                    }
-
-                    let _ = tx.broadcast(Some(disk_load_res));
-                    drop(tx);
-
-                    // schedule cleanup of inflight marker after a second
-                    tokio::time::delay_for(Duration::new(1, 0)).await;
-
-                    let mut piece_cache = self_cloned.piece_cache.lock().await;
-                    if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
-                        event!(Level::DEBUG, "clearing memory-cached piece");
-                        e.inflight = None;
-                    }
-                    drop(piece_cache);
-                    return;
-                }
-
-                let mut piece_cache = self_cloned.piece_cache.lock().await;
-                let punch_spans = cache_cleanup(
-                    &mut *piece_cache,
-                    cache_entry_cloned.piece_length as u64,
-                    1024 * 1024 * 1024,
-                );
-
+            if let Some(cache_entry) = piece_cache.pieces.get_mut(&piece_key) {
+                cache_entry.last_touched = SystemTime::now();
+                let cache_entry_cloned = cache_entry.clone();
                 drop(piece_cache);
 
-                if !punch_spans.is_empty() {
-                    #[cfg(target_os = "linux")]
-                    async {
-                        use std::os::unix::io::AsRawFd;
-                        let file = self_cloned.cache_file.lock().await;
-                        let fallocate_fd = OwnedFd::dup(file.as_raw_fd()).unwrap();
-                        drop(file);
+                let disk_load_res = load_from_disk(
+                    self_cloned.cache_file.clone(),
+                    self_cloned.crypto.clone(),
+                    cache_entry_cloned.piece_length,
+                    piece_length_actual,
+                    cache_entry_cloned.position,
+                )
+                .await;
 
-                        if let Err(err) = punch_cache(fallocate_fd, punch_spans).await {
-                            event!(Level::ERROR, "failed to punch hole: {}", err);
-                            return;
-                        }
-                    }
-                    .await;
+                if let Ok(ref bytes) = disk_load_res {
+                    event!(
+                        Level::DEBUG,
+                        "got piece from disk cache: len()={:?}",
+                        bytes.len()
+                    );
                 }
 
-                let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
-                let mut file = self_cloned.cache_file.lock().await;
-                let mut cache_position = None;
-                if let Ok(ref bytes) = res {
-                    let mut cache_padded = bytes.len() as u64;
+                if let Err(ref err) = disk_load_res {
+                    event!(
+                        Level::ERROR,
+                        "failed to load piece from disk cache: {}",
+                        err
+                    );
+                }
+                
+                if let Ok(ref bytes) = disk_load_res {
+                    let mut piece_cache = self_cloned.piece_cache.lock().await;
+                    piece_cache.fetched_bytes += bytes.len() as u64;
+                }
+                
+                return disk_load_res;
+            }
 
-                    if cache_padded % self_cloned.cache_alignment != 0 {
-                        cache_padded -= cache_padded % self_cloned.cache_alignment;
-                        cache_padded += self_cloned.cache_alignment;
+            const PUNCH_SIZE: u64 = 128 * 1024 * 1024;
+            let punch_spans =
+                cache_cleanup(&mut *piece_cache, piece_length_actual.into(), PUNCH_SIZE);
+            drop(piece_cache);
 
-                        event!(
-                            Level::DEBUG,
-                            "padded piece #{}: {} -> {}",
-                            req.piece_index,
-                            bytes.len(),
-                            cache_padded,
-                        );
-                    }
+            if !punch_spans.is_empty() {
+                #[cfg(target_os = "linux")]
+                async {
+                    use std::os::unix::io::AsRawFd;
+                    let file = self_cloned.cache_file.lock().await;
+                    let fallocate_fd = OwnedFd::dup(file.as_raw_fd()).unwrap();
+                    drop(file);
 
-                    let mut piece_padded = BytesMut::with_capacity(cache_padded as usize);
-                    piece_padded.extend_from_slice(&bytes[..]);
-                    piece_padded.resize(cache_padded as usize, 0);
-
-                    let write_res = async {
-                        let position = file.seek(SeekFrom::End(0)).await?;
-                        assert_eq!(position % self_cloned.cache_alignment, 0);
-                        cache_position = Some(position);
-
-                        if let Some(ref cr) = self_cloned.crypto {
-                            let mut crlocked = cr.lock().await;
-                            crlocked.seek(position);
-                            crlocked.apply_keystream(&mut piece_padded[..]);
-                        }
-
-                        assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
-                        file.write_all(&piece_padded[..]).await?;
-                        let position = file.seek(SeekFrom::End(0)).await?;
-                        assert_eq!(position % self_cloned.cache_alignment, 0);
-
-                        Result::<(), MagnetiteError>::Ok(())
-                    }
-                    .await;
-
-                    if let Err(err) = write_res {
-                        res = Err(err);
+                    if let Err(err) = punch_cache(fallocate_fd, punch_spans).await {
+                        event!(Level::ERROR, "failed to punch hole: {}", err);
+                        return;
                     }
                 }
+                .await;
+            }
 
-                drop(file);
+            let mut res = self_cloned.upstream.get_piece_dumb(&req).await;
+            if let Ok(ref bytes) = res {
+                let mut cache_padded = bytes.len() as u64;
 
-                if let Err(ref err) = res {
-                    event!(Level::ERROR, "failed to load piece from upstream: {}", err);
+                if cache_padded % self_cloned.cache_alignment != 0 {
+                    cache_padded -= cache_padded % self_cloned.cache_alignment;
+                    cache_padded += self_cloned.cache_alignment;
+
+                    event!(
+                        Level::DEBUG,
+                        "padded piece #{}: {} -> {}",
+                        req.piece_index,
+                        bytes.len(),
+                        cache_padded,
+                    );
                 }
 
-                let _ = tx.broadcast(Some(res));
-                drop(tx);
+                let mut piece_padded = BytesMut::with_capacity(cache_padded as usize);
+                piece_padded.extend_from_slice(&bytes[..]);
+                piece_padded.resize(cache_padded as usize, 0);
 
-                let mut piece_cache = self_cloned.piece_cache.lock().await;
-                if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
+                let write_res = async {
+                    let mut file = self_cloned.cache_file.lock().await;
+                    let position = file.seek(SeekFrom::End(0)).await?;
+                    assert_eq!(position % self_cloned.cache_alignment, 0);
+
+                    if let Some(ref cr) = self_cloned.crypto {
+                        let mut crlocked = cr.lock().await;
+                        crlocked.seek(position);
+                        crlocked.apply_keystream(&mut piece_padded[..]);
+                    }
+
+                    assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
+                    file.write_all(&piece_padded[..]).await?;
+                    let position = file.seek(SeekFrom::End(0)).await?;
+                    assert_eq!(position % self_cloned.cache_alignment, 0);
+                    drop(file);
+
                     event!(
                         Level::TRACE,
                         "setting local disk cache location to {:?}::{:?}",
                         piece_key,
-                        cache_position
+                        position
                     );
-                    e.position = cache_position;
-                    piece_cache.cache_size_cur += u64::from(e.piece_length);
+
+                    let mut piece_cache = self_cloned.piece_cache.lock().await;
+                    if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
+                        e.position = position;
+                        piece_cache.cache_size_cur += u64::from(e.piece_length);
+                        piece_cache.fetched_bytes += piece_length_actual as u64;
+                        piece_cache.fetched_upstream_bytes += piece_length_actual as u64;
+                    }
+
+                    drop(piece_cache);
+
+                    Result::<(), MagnetiteError>::Ok(())
                 }
+                .await;
 
-                drop(piece_cache);
-                // schedule cleanup of inflight marker after a second
-                tokio::time::delay_for(Duration::new(10, 0)).await;
-
-                let mut piece_cache = self_cloned.piece_cache.lock().await;
-
-                if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
-                    event!(
-                        Level::DEBUG,
-                        "clearing memory-cached piece {}#{}",
-                        HexStr(piece_key.0.as_bytes()),
-                        piece_key.1,
-                    );
-                    e.inflight = None;
+                if let Err(err) = write_res {
+                    res = Err(err);
                 }
+            }
+            if let Err(ref err) = res {
+                event!(Level::ERROR, "failed to load piece from upstream: {}", err);
+            }
 
-                drop(piece_cache);
-            });
-
-            return infl.complete().await;
+            return res;
         }
         .boxed()
     }

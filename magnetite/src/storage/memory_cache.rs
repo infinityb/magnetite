@@ -1,6 +1,7 @@
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Instant, Duration};
 
 use bytes::Bytes;
 use futures::future::FutureExt;
@@ -26,6 +27,9 @@ impl fmt::Debug for PieceCacheEntry {
 struct MemoryPieceCacheInfo {
     cache_size_max: u64,
     cache_size_cur: u64,
+    fetched_bytes: u64,
+    fetched_upstream_bytes: u64,
+    next_cache_report_print: Instant,
     pieces: LruCache<(TorrentID, u32), PieceCacheEntry>,
 }
 
@@ -56,6 +60,9 @@ impl Builder {
             piece_cache: Arc::new(Mutex::new(MemoryPieceCacheInfo {
                 cache_size_max: self.cache_size_max,
                 cache_size_cur: 0,
+                fetched_bytes: 0,
+                fetched_upstream_bytes: 0,
+                next_cache_report_print: Instant::now() + Duration::new(60, 0),
                 // we control the eviction manually by bytes instead of items.
                 pieces: LruCache::unbounded(),
             })),
@@ -110,10 +117,31 @@ where
         async move {
             let mut piece_cache = self_cloned.piece_cache.lock().await;
 
+            let now = Instant::now();
+            if piece_cache.next_cache_report_print < now {
+                piece_cache.next_cache_report_print = now + Duration::new(60, 0);
+                event!(Level::INFO,
+                    fetched_bytes=piece_cache.fetched_bytes,
+                    fetched_upstream_bytes=piece_cache.fetched_upstream_bytes,
+                    "cache hit rate: {:.1}%",
+                    (
+                        100.0 * (
+                            piece_cache.fetched_bytes as f64 -
+                            piece_cache.fetched_upstream_bytes as f64
+                        ) / piece_cache.fetched_upstream_bytes as f64
+                    ));
+            }
+
             if let Some(v) = piece_cache.pieces.get(&piece_key) {
                 let completion_fut = v.inflight.clone().complete();
                 drop(piece_cache);
-                return completion_fut.await;
+
+                let res = completion_fut.await;
+                if let Ok(ref bytes) = res {
+                    let mut piece_cache = self_cloned.piece_cache.lock().await;
+                    piece_cache.fetched_bytes += bytes.len() as u64;
+                }
+                return res;
             }
 
             let (tx, rx) = watch::channel(None);
@@ -127,24 +155,23 @@ where
             );
             drop(piece_cache);
 
+            let self_cloned2 = self_cloned.clone();
             tokio::spawn(async move {
-                let res = self_cloned.upstream.get_piece_dumb(&req).await;
+                let res = self_cloned2.upstream.get_piece_dumb(&req).await;
 
                 if let Ok(ref bytes) = res {
-                    let mut piece_cache = self_cloned.piece_cache.lock().await;
+                    let mut piece_cache = self_cloned2.piece_cache.lock().await;
                     piece_cache.cache_size_cur += bytes.len() as u64;
-                    drop(piece_cache);
+                    piece_cache.fetched_bytes += bytes.len() as u64;
+                    piece_cache.fetched_upstream_bytes += bytes.len() as u64;
                 }
 
                 let _ = tx.broadcast(Some(res));
                 drop(tx);
             });
 
-            return Inflight {
-                finished: rx.clone(),
-            }
-            .complete()
-            .await;
+            let completion_fut = Inflight { finished: rx.clone() }.complete();
+            return completion_fut.await;
         }
         .boxed()
     }
