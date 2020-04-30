@@ -19,14 +19,14 @@ pub struct Torrent {
 }
 
 #[derive(Default)]
-pub struct ClientContext {
+pub struct GlobalState {
     pub session_id_seq: u64,
     pub torrents: HashMap<TorrentID, Torrent>,
     pub sessions: HashMap<u64, Session>,
     pub global_stats: Stats,
 }
 
-pub fn merge_global_payload_stats(cc: &mut ClientContext, ps: &mut PeerState) {
+pub fn merge_global_payload_stats(cc: &mut GlobalState, ps: &mut PeerState) {
     cc.global_stats.recv_payload_bytes += ps.global_uncommitted_stats.recv_payload_bytes;
     cc.global_stats.sent_payload_bytes += ps.global_uncommitted_stats.sent_payload_bytes;
     ps.global_uncommitted_stats = Default::default();

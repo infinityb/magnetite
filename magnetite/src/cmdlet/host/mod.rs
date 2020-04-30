@@ -43,30 +43,28 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let mut futures = Vec::new();
     for fe in &config.frontends {
-        match fe {
-            Frontend::Host(ref host) => {
-                let host: FrontendHost = host.clone();
-                let storage_engine = storage_engine.clone();
-                futures.push(async move {
-                    let mut listener = TcpListener::bind(&host.bind_address).await.unwrap();
-                    event!(
-                        Level::INFO,
-                        "host backend bind successful: {:?}",
-                        host.bind_address
-                    );
-                    loop {
-                        let storage_engine = storage_engine.clone();
-                        let (socket, addr) = listener.accept().await.unwrap();
-                        event!(Level::INFO, "got connection from {:?}", addr);
+        if let Frontend::Host(ref host) = fe {
+            let host: FrontendHost = host.clone();
+            let storage_engine = storage_engine.clone();
+            futures.push(async move {
+                let mut listener = TcpListener::bind(&host.bind_address).await.unwrap();
+                event!(
+                    Level::INFO,
+                    "host backend bind successful: {:?}",
+                    host.bind_address
+                );
+                loop {
+                    let storage_engine = storage_engine.clone();
+                    let (socket, addr) = listener.accept().await.unwrap();
+                    event!(Level::INFO, "got connection from {:?}", addr);
 
-                        tokio::spawn(async move {
-                            if let Err(err) = start_server(socket, storage_engine).await {
-                                event!(Level::ERROR, "error: {}", err);
-                            }
-                        });
-                    }
-                });
-            }
+                    tokio::spawn(async move {
+                        if let Err(err) = start_server(socket, storage_engine).await {
+                            event!(Level::ERROR, "error: {}", err);
+                        }
+                    });
+                }
+            });
         }
     }
 
