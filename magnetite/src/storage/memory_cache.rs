@@ -1,7 +1,7 @@
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::future::FutureExt;
@@ -120,16 +120,16 @@ where
             let now = Instant::now();
             if piece_cache.next_cache_report_print < now {
                 piece_cache.next_cache_report_print = now + Duration::new(60, 0);
-                event!(Level::INFO,
-                    fetched_bytes=piece_cache.fetched_bytes,
-                    fetched_upstream_bytes=piece_cache.fetched_upstream_bytes,
+                event!(
+                    Level::INFO,
+                    fetched_bytes = piece_cache.fetched_bytes,
+                    fetched_upstream_bytes = piece_cache.fetched_upstream_bytes,
                     "cache hit rate: {:.1}%",
-                    (
-                        100.0 * (
-                            piece_cache.fetched_bytes as f64 -
-                            piece_cache.fetched_upstream_bytes as f64
-                        ) / piece_cache.fetched_upstream_bytes as f64
-                    ));
+                    (100.0
+                        * (piece_cache.fetched_bytes as f64
+                            - piece_cache.fetched_upstream_bytes as f64)
+                        / piece_cache.fetched_upstream_bytes as f64)
+                );
             }
 
             if let Some(v) = piece_cache.pieces.get(&piece_key) {
@@ -170,7 +170,10 @@ where
                 drop(tx);
             });
 
-            let completion_fut = Inflight { finished: rx.clone() }.complete();
+            let completion_fut = Inflight {
+                finished: rx.clone(),
+            }
+            .complete();
             return completion_fut.await;
         }
         .boxed()

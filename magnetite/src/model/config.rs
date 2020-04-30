@@ -249,7 +249,10 @@ fn build_storage_engine_dumb_helper(
                 return Err(InvalidRootStorage(InvalidStorage { name: "disk cache" }).into());
             }
             StorageEngineElement::MemoryCache(..) => {
-                return Err(InvalidRootStorage(InvalidStorage { name: "memory cache" }).into());
+                return Err(InvalidRootStorage(InvalidStorage {
+                    name: "memory cache",
+                })
+                .into());
             }
             StorageEngineElement::MultiFile => {
                 unimplemented!();
