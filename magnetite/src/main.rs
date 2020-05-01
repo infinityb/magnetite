@@ -37,7 +37,8 @@ fn main() -> Result<(), failure::Error> {
         .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
         .subcommand(cmdlet::validate_mse_tome::get_subcommand())
         .subcommand(cmdlet::host::get_subcommand())
-        .subcommand(cmdlet::webserver::get_subcommand());
+        .subcommand(cmdlet::webserver::get_subcommand())
+        .subcommand(cmdlet::validate_torrent_data::get_subcommand());
 
     #[cfg(feature = "with-fuse")]
     let app = app.subcommand(cmdlet::fuse_mount::get_subcommand());
@@ -71,6 +72,7 @@ fn main() -> Result<(), failure::Error> {
         cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main,
         cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main,
         cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main,
+        cmdlet::validate_torrent_data::SUBCOMMAND_NAME => cmdlet::validate_torrent_data::main,
         _ => panic!("bad argument parse"),
     };
     main_function(args.expect("subcommand args"))

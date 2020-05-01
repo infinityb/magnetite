@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::io;
-use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -10,10 +8,9 @@ use futures::future::FutureExt;
 use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
-use tokio::io::AsyncReadExt;
-
 use tokio::sync::Mutex;
 
+use super::utils::piece_file_pread_exact;
 use super::{GetPieceRequest, PieceStorageEngineDumb};
 use crate::model::{BitField, MagnetiteError, ProtocolViolation, TorrentID};
 
@@ -207,17 +204,6 @@ impl PieceFileStorageEngine {
 //         .boxed()
 //     }
 // }
-
-async fn piece_file_pread_exact(
-    file: &Mutex<TokioFile>,
-    offset: u64,
-    buf: &mut [u8],
-) -> io::Result<()> {
-    let mut piece_file = file.lock().await;
-    piece_file.seek(SeekFrom::Start(offset)).await?;
-    piece_file.read_exact(buf).await?;
-    Ok(())
-}
 
 impl PieceStorageEngineDumb for PieceFileStorageEngine {
     fn get_piece_dumb(

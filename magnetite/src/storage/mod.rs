@@ -2,11 +2,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use tokio::sync::Mutex;
 
 pub mod disk_cache;
 pub mod memory_cache;
+pub mod multi_file;
 pub mod piece_file;
 pub mod piggyback;
 pub mod remote_magnetite;
@@ -80,6 +80,23 @@ pub trait PieceStorageEngineDumb {
 // }
 
 pub mod utils {
+    use std::io::{self, SeekFrom};
+
+    use tokio::fs::File as TokioFile;
+    use tokio::io::AsyncReadExt;
+    use tokio::sync::Mutex;
+
+    pub async fn piece_file_pread_exact(
+        file: &Mutex<TokioFile>,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        let mut piece_file = file.lock().await;
+        piece_file.seek(SeekFrom::Start(offset)).await?;
+        piece_file.read_exact(buf).await?;
+        Ok(())
+    }
+
     #[inline]
     pub fn compute_piece_index_lb(position: u64, atom_length: u32) -> u32 {
         let atom_length = u64::from(atom_length);

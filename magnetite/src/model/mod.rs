@@ -526,7 +526,7 @@ impl<'a> BitAnd for &'a BitField {
                 bit_length: 0,
                 set_count: 0,
                 data: Vec::new().into(),
-            }
+            };
         }
 
         let mut out = BitField {
@@ -556,7 +556,7 @@ impl<'a> BitXor for &'a BitField {
                 bit_length: 0,
                 set_count: 0,
                 data: Vec::new().into(),
-            }
+            };
         }
 
         let mut out = BitField {
