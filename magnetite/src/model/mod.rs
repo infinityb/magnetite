@@ -517,6 +517,66 @@ pub struct BitField {
     pub data: Box<[u8]>,
 }
 
+impl<'a> BitAnd for &'a BitField {
+    type Output = BitField;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        if self.bit_length != rhs.bit_length {
+            return BitField {
+                bit_length: 0,
+                set_count: 0,
+                data: Vec::new().into(),
+            };
+        }
+
+        let mut out = BitField {
+            bit_length: self.bit_length,
+            set_count: 0,
+            data: vec![0; self.data.len()].into(),
+        };
+
+        let lhs_bytes = self.data.iter();
+        let rhs_bytes = rhs.data.iter();
+
+        for (o, (a, b)) in out.data.iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
+            *o = *a & *b;
+            out.set_count += o.count_ones() as u32;
+        }
+
+        out
+    }
+}
+
+impl<'a> BitXor for &'a BitField {
+    type Output = BitField;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        if self.bit_length != rhs.bit_length {
+            return BitField {
+                bit_length: 0,
+                set_count: 0,
+                data: Vec::new().into(),
+            };
+        }
+
+        let mut out = BitField {
+            bit_length: self.bit_length,
+            set_count: 0,
+            data: vec![0; self.data.len()].into(),
+        };
+
+        let lhs_bytes = self.data.iter();
+        let rhs_bytes = rhs.data.iter();
+
+        for (o, (a, b)) in out.data.iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
+            *o = *a & *b;
+            out.set_count += o.count_ones() as u32;
+        }
+
+        out
+    }
+}
+
 impl BitField {
     pub fn as_raw_slice(&self) -> &[u8] {
         &self.data

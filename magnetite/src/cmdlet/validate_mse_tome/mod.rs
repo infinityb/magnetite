@@ -9,6 +9,7 @@ use salsa20::XSalsa20;
 use sha1::{Digest, Sha1};
 
 use crate::model::TorrentMeta;
+use crate::utils::hex;
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "validate-mse-tome";
@@ -41,23 +42,6 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
-}
-
-pub fn hex<'a>(scratch: &'a mut [u8], input: &[u8]) -> Option<&'a str> {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-    if scratch.len() < input.len() * 2 {
-        return None;
-    }
-
-    let mut sciter = scratch.iter_mut();
-    for by in input {
-        *sciter.next().unwrap() = HEX_CHARS[usize::from(*by >> 4)];
-        *sciter.next().unwrap() = HEX_CHARS[usize::from(*by & 0xF)];
-    }
-    drop(sciter);
-
-    Some(std::str::from_utf8(&scratch[..input.len() * 2]).unwrap())
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {

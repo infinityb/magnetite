@@ -15,7 +15,7 @@ use tracing::{event, Level};
 use crate::model::{FileError, InternalError, TorrentID, TorrentMetaWrapped};
 use crate::storage::state_wrapper::ContentInfoManager;
 use crate::storage::{
-    disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, piece_file,
+    disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, multi_file, piece_file,
     remote_magnetite::RemoteMagnetite, sha_verify::ShaVerifyMode, state_wrapper,
     PieceFileStorageEngine, PieceStorageEngine, PieceStorageEngineDumb, ShaVerify, StateWrapper,
 };
@@ -186,6 +186,41 @@ pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<X
     }
 }
 
+fn multi_file(
+    config: &Config,
+    path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
+) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+    let mut mf_builder = multi_file::MultiFileStorageEngine::builder();
+
+    for s in &config.torrents {
+        let metainfo = path_to_torrent
+            .get(&s.torrent_file)
+            .ok_or_else(|| InternalError {
+                msg: "failed to find torrent metainfo from path",
+            })?;
+
+        let mut reg_files = Vec::new();
+        for file in &metainfo.meta.info.files {
+            reg_files.push(multi_file::FileInfo {
+                file_size: file.length,
+                rel_path: file.path.clone(),
+            });
+        }
+
+        mf_builder.register_info_hash(
+            &metainfo.info_hash,
+            multi_file::Registration {
+                base_dir: s.source_file.clone(),
+                files: reg_files,
+            },
+        );
+    }
+
+    let boxed: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> =
+        Box::new(mf_builder.build());
+    Ok(boxed.into())
+}
+
 fn piece_file(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
@@ -262,9 +297,7 @@ fn build_storage_engine_dumb_helper(
                 })
                 .into());
             }
-            StorageEngineElement::MultiFile => {
-                unimplemented!();
-            }
+            StorageEngineElement::MultiFile => multi_file(config, path_to_torrent)?,
             StorageEngineElement::PieceFile => piece_file(config, path_to_torrent)?,
             StorageEngineElement::RemoteMagnetite(ref rm) => remote_magnetite(runtime, rm)?,
             StorageEngineElement::ShaValidate(..) => {
