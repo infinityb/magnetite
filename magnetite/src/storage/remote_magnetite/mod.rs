@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
+use metrics::counter;
 use rand::{thread_rng, Rng};
 use slab::Slab;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -616,7 +617,11 @@ impl PieceStorageEngineDumb for RemoteMagnetite {
             }
 
             match resp_rx.await {
-                Ok(v) => v,
+                Ok(Ok(v)) => {
+                    counter!("remote_magnetite.upstream_fetched_bytes", v.len() as u64);
+                    Ok(v)
+                }
+                Ok(Err(err)) => Err(err),
                 Err(..) => Err(MagnetiteError::CompletionLost),
             }
         }
