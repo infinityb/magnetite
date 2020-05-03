@@ -34,7 +34,7 @@ struct PieceCacheInfo {
     cache_size_max: u64,
     cache_file_offset: u64,
     cache_size_cur: u64,
-    fetched_bytes: u64,
+    served_bytes: u64,
     fetched_upstream_bytes: u64,
     next_cache_report_print: Instant,
     pieces: BTreeMap<(TorrentID, u32), PieceCacheEntry>,
@@ -86,7 +86,7 @@ impl Builder {
                 cache_size_max: self.cache_size_max,
                 cache_file_offset: 0,
                 cache_size_cur: 0,
-                fetched_bytes: 0,
+                served_bytes: 0,
                 fetched_upstream_bytes: 0,
                 next_cache_report_print: Instant::now() + Duration::new(60, 0),
                 pieces: Default::default(),
@@ -275,21 +275,6 @@ where
             );
 
             let mut piece_cache = self_cloned.piece_cache.lock().await;
-            let now = Instant::now();
-            if piece_cache.next_cache_report_print < now {
-                piece_cache.next_cache_report_print = now + Duration::new(60, 0);
-                event!(
-                    Level::INFO,
-                    fetched_bytes = piece_cache.fetched_bytes,
-                    fetched_upstream_bytes = piece_cache.fetched_upstream_bytes,
-                    "cache hit rate: {:.1}%",
-                    (100.0
-                        * (piece_cache.fetched_bytes as f64
-                            - piece_cache.fetched_upstream_bytes as f64)
-                        / piece_cache.fetched_upstream_bytes as f64)
-                );
-            }
-
             if let Some(cache_entry) = piece_cache.pieces.get_mut(&piece_key) {
                 cache_entry.last_touched = SystemTime::now();
                 let cache_entry_cloned = cache_entry.clone();
@@ -322,10 +307,10 @@ where
 
                 if let Ok(ref bytes) = disk_load_res {
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
-                    piece_cache.fetched_bytes += bytes.len() as u64;
+                    piece_cache.served_bytes += bytes.len() as u64;
                     gauge!(
                         "disk_cache.served_bytes",
-                        piece_cache.fetched_bytes.try_into().unwrap()
+                        piece_cache.served_bytes.try_into().unwrap()
                     );
                     counter!("disk_cache.cache_hit", 1);
                 }
@@ -413,16 +398,16 @@ where
                     );
 
                     piece_cache.cache_size_cur += piece_length;
-                    piece_cache.fetched_bytes += piece_length;
+                    piece_cache.served_bytes += piece_length;
                     piece_cache.fetched_upstream_bytes += piece_length;
 
                     gauge!("disk_cache.cached_bytes", piece_cache.cache_size_cur as i64,);
                     gauge!(
                         "disk_cache.served_bytes",
-                        piece_cache.fetched_bytes.try_into().unwrap()
+                        piece_cache.served_bytes.try_into().unwrap()
                     );
                     gauge!(
-                        "disk_cache.fetched_bytes",
+                        "disk_cache.fetched_upstream_bytes",
                         piece_cache.fetched_upstream_bytes.try_into().unwrap()
                     );
                     counter!("disk_cache.cache_miss", 1);
