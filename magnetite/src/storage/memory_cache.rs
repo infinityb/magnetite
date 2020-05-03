@@ -83,7 +83,7 @@ fn cache_cleanup(cache: &mut MemoryPieceCacheInfo, adding: u64, batch_size: u64)
         batch_size
     );
     let cache_next = cache.cache_size_cur + adding;
-    if cache_next < cache.cache_size_max {
+    if cache_next <= cache.cache_size_max {
         return;
     }
 
@@ -100,6 +100,7 @@ fn cache_cleanup(cache: &mut MemoryPieceCacheInfo, adding: u64, batch_size: u64)
             drop(borrowed);
 
             must_pop = must_pop.saturating_sub(freeing);
+            cache.cache_size_cur -= freeing;
             event!(
                 Level::DEBUG,
                 "evicted {:?} from memory cache, freeing {}",
@@ -248,5 +249,54 @@ mod tests {
         assert!(res.is_ok());
 
         assert_eq!(18, *mock.request_counts.lock().unwrap());
+    }
+
+    #[test]
+    fn positive_cache_test() {
+        use crate::model::TorrentID;
+        use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
+        use tokio::runtime::Runtime;
+
+        // use tracing_subscriber::filter::LevelFilter;
+        // use tracing_subscriber::FmtSubscriber;
+        // tracing::subscriber::set_global_default(
+        //     FmtSubscriber::builder()
+        //         .with_max_level(LevelFilter::TRACE)
+        //         .finish(),
+        // )
+        // .unwrap();
+
+        let cache_builder = MemoryCacheWrapper::build_with_capacity_bytes(256 * 1024); // 16 cacheable
+        let mock = MockPieceStorageEngineDumb::new();
+        let storage_engine = cache_builder.build(mock.clone());
+
+        let mut rt = Runtime::new().unwrap();
+
+        // we're evicting an extra item right now, this should actually be 0..16,
+        // but this is okay for now.
+        for i in 0..15 {
+            let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
+                content_key: TorrentID::zero(),
+                piece_sha: TorrentID::zero(),
+                piece_length: 16 * 1024,
+                total_length: 0,
+                piece_index: i,
+            }));
+
+            assert!(res.is_ok());
+        }
+        for i in 0..15 {
+            let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
+                content_key: TorrentID::zero(),
+                piece_sha: TorrentID::zero(),
+                piece_length: 16 * 1024,
+                total_length: 0,
+                piece_index: i,
+            }));
+
+            assert!(res.is_ok());
+        }
+
+        assert_eq!(15, *mock.request_counts.lock().unwrap());
     }
 }
