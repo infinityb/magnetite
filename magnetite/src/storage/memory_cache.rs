@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures::future::FutureExt;
 use lru::LruCache;
+use metrics::{counter, gauge};
 use tokio::sync::{watch, Mutex};
 use tracing::{event, Level};
 
@@ -114,22 +116,16 @@ where
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
 
+        counter!("mem_cache.piece_requests", 1, "torrent" => req.content_key.hex().to_string());
+
         async move {
             let mut piece_cache = self_cloned.piece_cache.lock().await;
+            cache_cleanup(&mut piece_cache, req.piece_length as u64, 0);
+            gauge!("mem_cache.cached_bytes", piece_cache.cache_size_cur as i64,);
 
             let now = Instant::now();
             if piece_cache.next_cache_report_print < now {
                 piece_cache.next_cache_report_print = now + Duration::new(60, 0);
-                event!(
-                    Level::INFO,
-                    fetched_bytes = piece_cache.fetched_bytes,
-                    fetched_upstream_bytes = piece_cache.fetched_upstream_bytes,
-                    "cache hit rate: {:.1}%",
-                    (100.0
-                        * (piece_cache.fetched_bytes as f64
-                            - piece_cache.fetched_upstream_bytes as f64)
-                        / piece_cache.fetched_upstream_bytes as f64)
-                );
             }
 
             if let Some(v) = piece_cache.pieces.get(&piece_key) {
@@ -140,6 +136,11 @@ where
                 if let Ok(ref bytes) = res {
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
                     piece_cache.fetched_bytes += bytes.len() as u64;
+                    gauge!(
+                        "mem_cache.served_bytes",
+                        piece_cache.fetched_bytes.try_into().unwrap()
+                    );
+                    counter!("mem_cache.cache_hit", 1);
                 }
                 return res;
             }
@@ -164,6 +165,15 @@ where
                     piece_cache.cache_size_cur += bytes.len() as u64;
                     piece_cache.fetched_bytes += bytes.len() as u64;
                     piece_cache.fetched_upstream_bytes += bytes.len() as u64;
+                    gauge!(
+                        "mem_cache.served_bytes",
+                        piece_cache.fetched_bytes.try_into().unwrap()
+                    );
+                    gauge!(
+                        "mem_cache.fetched_bytes",
+                        piece_cache.fetched_upstream_bytes.try_into().unwrap()
+                    );
+                    counter!("mem_cache.cache_miss", 1);
                 }
 
                 let _ = tx.broadcast(Some(res));
