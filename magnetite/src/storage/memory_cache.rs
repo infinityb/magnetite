@@ -26,6 +26,7 @@ impl fmt::Debug for PieceCacheEntry {
     }
 }
 
+#[derive(Debug)]
 struct MemoryPieceCacheInfo {
     cache_size_max: u64,
     cache_size_cur: u64,
@@ -74,12 +75,19 @@ impl Builder {
 }
 
 fn cache_cleanup(cache: &mut MemoryPieceCacheInfo, adding: u64, batch_size: u64) {
+    event!(
+        Level::TRACE,
+        "cache_cleanup(cache={:?}, adding={}, batch_size={}) called",
+        cache,
+        adding,
+        batch_size
+    );
     let cache_next = cache.cache_size_cur + adding;
     if cache_next < cache.cache_size_max {
         return;
     }
 
-    let mut must_pop = batch_size;
+    let mut must_pop = std::cmp::max(batch_size, cache_next - cache.cache_size_max);
 
     while 0 < must_pop {
         if let Some((k, v)) = cache.pieces.pop_lru() {
@@ -187,5 +195,58 @@ where
             return completion_fut.await;
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryCacheWrapper;
+    use crate::storage::test_utils::MockPieceStorageEngineDumb;
+
+    #[test]
+    fn eviction_test() {
+        use crate::model::TorrentID;
+        use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
+        use tokio::runtime::Runtime;
+
+        // use tracing_subscriber::filter::LevelFilter;
+        // use tracing_subscriber::FmtSubscriber;
+        // tracing::subscriber::set_global_default(
+        //     FmtSubscriber::builder()
+        //         .with_max_level(LevelFilter::TRACE)
+        //         .finish(),
+        // )
+        // .unwrap();
+
+        let cache_builder = MemoryCacheWrapper::build_with_capacity_bytes(256 * 1024); // 16 cacheable
+        let mock = MockPieceStorageEngineDumb::new();
+        let storage_engine = cache_builder.build(mock.clone());
+
+        let mut rt = Runtime::new().unwrap();
+
+        for i in 0..17 {
+            let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
+                content_key: TorrentID::zero(),
+                piece_sha: TorrentID::zero(),
+                piece_length: 16 * 1024,
+                total_length: 0,
+                piece_index: i,
+            }));
+
+            assert!(res.is_ok());
+        }
+
+        // try index 0 again, should hit mock
+        let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
+            content_key: TorrentID::zero(),
+            piece_sha: TorrentID::zero(),
+            piece_length: 16 * 1024,
+            total_length: 0,
+            piece_index: 0,
+        }));
+
+        assert!(res.is_ok());
+
+        assert_eq!(18, *mock.request_counts.lock().unwrap());
     }
 }
