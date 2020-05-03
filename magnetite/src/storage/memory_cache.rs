@@ -125,12 +125,15 @@ where
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
 
-        counter!("mem_cache.piece_requests", 1, "torrent" => req.content_key.hex().to_string());
+        counter!("memorycache.piece_requests", 1, "torrent" => req.content_key.hex().to_string());
 
         async move {
             let mut piece_cache = self_cloned.piece_cache.lock().await;
             cache_cleanup(&mut piece_cache, req.piece_length as u64, 0);
-            gauge!("mem_cache.cached_bytes", piece_cache.cache_size_cur as i64,);
+            gauge!(
+                "memorycache.cached_bytes",
+                piece_cache.cache_size_cur as i64,
+            );
 
             let now = Instant::now();
             if piece_cache.next_cache_report_print < now {
@@ -146,10 +149,10 @@ where
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
                     piece_cache.fetched_bytes += bytes.len() as u64;
                     gauge!(
-                        "mem_cache.served_bytes",
+                        "memorycache.served_bytes",
                         piece_cache.fetched_bytes.try_into().unwrap()
                     );
-                    counter!("mem_cache.cache_hit", 1);
+                    counter!("memorycache.cache_hit", 1);
                 }
                 return res;
             }
@@ -175,14 +178,14 @@ where
                     piece_cache.fetched_bytes += bytes.len() as u64;
                     piece_cache.fetched_upstream_bytes += bytes.len() as u64;
                     gauge!(
-                        "mem_cache.served_bytes",
+                        "memorycache.served_bytes",
                         piece_cache.fetched_bytes.try_into().unwrap()
                     );
                     gauge!(
-                        "mem_cache.fetched_bytes",
+                        "memorycache.fetched_bytes",
                         piece_cache.fetched_upstream_bytes.try_into().unwrap()
                     );
-                    counter!("mem_cache.cache_miss", 1);
+                    counter!("memorycache.cache_miss", 1);
                 }
 
                 let _ = tx.broadcast(Some(res));

@@ -618,7 +618,7 @@ impl PieceStorageEngineDumb for RemoteMagnetite {
 
             match resp_rx.await {
                 Ok(Ok(v)) => {
-                    counter!("remote_magnetite.upstream_fetched_bytes", v.len() as u64);
+                    counter!("remotemagnetite.upstream_fetched_bytes", v.len() as u64);
                     Ok(v)
                 }
                 Ok(Err(err)) => Err(err),
