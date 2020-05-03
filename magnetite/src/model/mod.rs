@@ -209,6 +209,23 @@ impl TorrentID {
     pub fn as_mut_bytes(&mut self) -> &mut [u8] {
         &mut self.0[..]
     }
+
+    pub fn hex(&self) -> TorrentIDHexFormat {
+        TorrentIDHexFormat { torrent_id: self }
+    }
+}
+
+pub struct TorrentIDHexFormat<'a> {
+    torrent_id: &'a TorrentID,
+}
+
+impl fmt::Display for TorrentIDHexFormat<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for b in self.torrent_id.as_bytes() {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
+    }
 }
 
 impl BitAnd for TorrentID {
@@ -401,7 +418,7 @@ mod bt_pathbuf {
         type Value = PathBuf;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            write!(formatter, "a non-empty vector of paths")
+            write!(formatter, "a non-empty vector of path elements")
         }
 
         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>

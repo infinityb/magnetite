@@ -13,6 +13,9 @@ pub mod remote_magnetite;
 pub mod sha_verify;
 pub mod state_wrapper;
 
+#[cfg(test)]
+pub mod test_utils;
+
 pub const DOWNLOAD_CHUNK_SIZE: u32 = 16 * 1024;
 
 pub use self::disk_cache::DiskCacheWrapper;

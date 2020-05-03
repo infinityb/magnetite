@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-use std::fmt;
-use std::fmt::Write;
+use std::convert::TryInto;
 use std::io::SeekFrom;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
+use metrics::{counter, gauge};
 use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
@@ -209,6 +209,8 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
 async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), nix::Error> {
     use std::os::unix::io::AsRawFd;
 
+    use metrics::timing;
+
     let start = std::time::Instant::now();
     let mut sched_yield_time = Duration::new(0, 0);
     let mut byte_acc: u64 = 0;
@@ -219,6 +221,7 @@ async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), n
         sched_yield_time += yield_start.elapsed();
 
         byte_acc += punch.length;
+        let punch_start = std::time::Instant::now();
         let flags = FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
         fallocate(
             cache.as_raw_fd(),
@@ -226,7 +229,15 @@ async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), n
             punch.start as i64,
             punch.length as i64,
         )?;
+
+        timing!("disk_cache.punch_time", punch_start.elapsed());
     }
+
+    counter!(
+        "disk_cache.punch_span_count",
+        punch_spans.len().try_into().unwrap()
+    );
+    counter!("disk_cache.punch_bytes", byte_acc);
 
     if byte_acc > 0 {
         event!(
@@ -253,6 +264,8 @@ where
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
+
+        counter!("disk_cache.piece_requests", 1, "torrent" => req.content_key.hex().to_string());
 
         async move {
             let (_, piece_length_actual) = super::utils::compute_offset_length(
@@ -310,6 +323,11 @@ where
                 if let Ok(ref bytes) = disk_load_res {
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
                     piece_cache.fetched_bytes += bytes.len() as u64;
+                    gauge!(
+                        "disk_cache.served_bytes",
+                        piece_cache.fetched_bytes.try_into().unwrap()
+                    );
+                    counter!("disk_cache.cache_hit", 1);
                 }
 
                 return disk_load_res;
@@ -318,6 +336,7 @@ where
             const PUNCH_SIZE: u64 = 128 * 1024 * 1024;
             let punch_spans =
                 cache_cleanup(&mut *piece_cache, piece_length_actual.into(), PUNCH_SIZE);
+            gauge!("disk_cache.cached_bytes", piece_cache.cache_size_cur as i64,);
             drop(piece_cache);
 
             if !punch_spans.is_empty() {
@@ -370,8 +389,8 @@ where
 
                     assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
                     file.write_all(&piece_padded[..]).await?;
-                    let position = file.seek(SeekFrom::End(0)).await?;
-                    assert_eq!(position % self_cloned.cache_alignment, 0);
+                    let ending_position = file.seek(SeekFrom::End(0)).await?;
+                    assert_eq!(ending_position % self_cloned.cache_alignment, 0);
                     drop(file);
 
                     event!(
@@ -382,12 +401,31 @@ where
                     );
 
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
-                    if let Some(e) = piece_cache.pieces.get_mut(&piece_key) {
-                        e.position = position;
-                        piece_cache.cache_size_cur += u64::from(e.piece_length);
-                        piece_cache.fetched_bytes += piece_length_actual as u64;
-                        piece_cache.fetched_upstream_bytes += piece_length_actual as u64;
-                    }
+
+                    let piece_length: u64 = bytes.len().try_into().unwrap();
+                    piece_cache.pieces.insert(
+                        piece_key,
+                        PieceCacheEntry {
+                            last_touched: SystemTime::now(),
+                            piece_length: req.piece_length,
+                            position,
+                        },
+                    );
+
+                    piece_cache.cache_size_cur += piece_length;
+                    piece_cache.fetched_bytes += piece_length;
+                    piece_cache.fetched_upstream_bytes += piece_length;
+
+                    gauge!("disk_cache.cached_bytes", piece_cache.cache_size_cur as i64,);
+                    gauge!(
+                        "disk_cache.served_bytes",
+                        piece_cache.fetched_bytes.try_into().unwrap()
+                    );
+                    gauge!(
+                        "disk_cache.fetched_bytes",
+                        piece_cache.fetched_upstream_bytes.try_into().unwrap()
+                    );
+                    counter!("disk_cache.cache_miss", 1);
 
                     drop(piece_cache);
 
@@ -406,18 +444,5 @@ where
             return res;
         }
         .boxed()
-    }
-}
-
-pub struct HexStr<'a>(pub &'a [u8]);
-
-impl<'a> fmt::Display for HexStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-        for c in self.0.iter() {
-            f.write_char(HEX_CHARS[usize::from(c >> 4)] as char)?;
-            f.write_char(HEX_CHARS[usize::from(c & 0xF)] as char)?;
-        }
-        Ok(())
     }
 }

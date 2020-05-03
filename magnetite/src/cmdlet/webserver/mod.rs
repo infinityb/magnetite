@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::BytesMut;
 use clap::{App, Arg, SubCommand};
@@ -13,6 +14,7 @@ use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Body;
 use hyper::{Request, Response, Server, StatusCode};
+use metrics::{counter, timing};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use tokio::runtime::Runtime;
@@ -143,13 +145,13 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
 async fn service_request<P>(
     fsi: FilesystemImpl<P>,
-    _remote_addr: std::net::SocketAddr,
+    remote_addr: std::net::SocketAddr,
     req: Request<Body>,
 ) -> Response<Body>
 where
     P: PieceStorageEngineDumb + Unpin + Clone + Send + Sync + 'static,
 {
-    match service_request_helper(fsi, req).await {
+    match service_request_helper(fsi, remote_addr, req).await {
         Ok(resp) => resp,
         Err(err) => {
             if err.downcast_ref::<NoEntityExists>().is_some() {
@@ -199,6 +201,7 @@ fn percent_decode_str(x: &str) -> OsString {
 
 async fn service_request_helper<P>(
     fsi: FilesystemImpl<P>,
+    _remote_addr: std::net::SocketAddr,
     req: Request<Body>,
 ) -> Result<Response<Body>, failure::Error>
 where
@@ -216,13 +219,14 @@ where
 
     let fs = fsi.mutable.lock().await;
     let storage_backend = fs.storage_backend.clone();
+
     event!(
         Level::DEBUG,
         "HTTP access {:?}",
-        path.clone().collect::<Vec<_>>()
+        path.clone().collect::<Vec<_>>(),
     );
 
-    let fe = fs.vfs.traverse_path(1, path).map(Clone::clone)?;
+    let fe = fs.vfs.traverse_path(1, path.clone()).map(Clone::clone)?;
     drop(fs);
 
     let content_key;
@@ -314,6 +318,13 @@ where
             format!("{}", spans[0].length),
         );
     }
+
+    let mut requested_bytes = 0;
+    for span in &spans {
+        requested_bytes += span.length;
+    }
+
+    counter!("webserver.requested_bytes", requested_bytes);
 
     let file_mime_type = if req.uri().path().ends_with(".jpg") {
         "image/jpeg"
@@ -421,8 +432,15 @@ where
                     piece_index: p,
                 };
 
+                let get_piece_start = Instant::now();
                 match storage_backend.get_piece_dumb(&req).await {
                     Ok(mut by) => {
+                        let get_piece_finished = Instant::now();
+                        timing!(
+                            "webserver.piece_fetch_time",
+                            get_piece_start,
+                            get_piece_finished
+                        );
                         if piece_span_start != 0 {
                             drop(by.split_to(piece_span_start as usize));
                             piece_span_start = 0;
@@ -434,6 +452,7 @@ where
                         }
                         to_send -= by.len() as u64;
 
+                        let bytes_length = by.len() as u64;
                         // total_builder.extend_from_slice(&by[..]);
                         if let Err(err) = tx.send(Ok(by)).await {
                             event!(
@@ -443,6 +462,8 @@ where
                             );
                             return;
                         }
+
+                        counter!("webserver.served_bytes", bytes_length);
                     }
                     Err(err) => {
                         if let Err(err2) = tx.send(Err(format!("{}", err))).await {

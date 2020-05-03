@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures::future::FutureExt;
 use lru::LruCache;
+use metrics::{counter, gauge};
 use tokio::sync::{watch, Mutex};
 use tracing::{event, Level};
 
@@ -24,6 +26,7 @@ impl fmt::Debug for PieceCacheEntry {
     }
 }
 
+#[derive(Debug)]
 struct MemoryPieceCacheInfo {
     cache_size_max: u64,
     cache_size_cur: u64,
@@ -72,12 +75,19 @@ impl Builder {
 }
 
 fn cache_cleanup(cache: &mut MemoryPieceCacheInfo, adding: u64, batch_size: u64) {
+    event!(
+        Level::TRACE,
+        "cache_cleanup(cache={:?}, adding={}, batch_size={}) called",
+        cache,
+        adding,
+        batch_size
+    );
     let cache_next = cache.cache_size_cur + adding;
     if cache_next < cache.cache_size_max {
         return;
     }
 
-    let mut must_pop = batch_size;
+    let mut must_pop = std::cmp::max(batch_size, cache_next - cache.cache_size_max);
 
     while 0 < must_pop {
         if let Some((k, v)) = cache.pieces.pop_lru() {
@@ -114,22 +124,16 @@ where
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
 
+        counter!("mem_cache.piece_requests", 1, "torrent" => req.content_key.hex().to_string());
+
         async move {
             let mut piece_cache = self_cloned.piece_cache.lock().await;
+            cache_cleanup(&mut piece_cache, req.piece_length as u64, 0);
+            gauge!("mem_cache.cached_bytes", piece_cache.cache_size_cur as i64,);
 
             let now = Instant::now();
             if piece_cache.next_cache_report_print < now {
                 piece_cache.next_cache_report_print = now + Duration::new(60, 0);
-                event!(
-                    Level::INFO,
-                    fetched_bytes = piece_cache.fetched_bytes,
-                    fetched_upstream_bytes = piece_cache.fetched_upstream_bytes,
-                    "cache hit rate: {:.1}%",
-                    (100.0
-                        * (piece_cache.fetched_bytes as f64
-                            - piece_cache.fetched_upstream_bytes as f64)
-                        / piece_cache.fetched_upstream_bytes as f64)
-                );
             }
 
             if let Some(v) = piece_cache.pieces.get(&piece_key) {
@@ -140,6 +144,11 @@ where
                 if let Ok(ref bytes) = res {
                     let mut piece_cache = self_cloned.piece_cache.lock().await;
                     piece_cache.fetched_bytes += bytes.len() as u64;
+                    gauge!(
+                        "mem_cache.served_bytes",
+                        piece_cache.fetched_bytes.try_into().unwrap()
+                    );
+                    counter!("mem_cache.cache_hit", 1);
                 }
                 return res;
             }
@@ -164,6 +173,15 @@ where
                     piece_cache.cache_size_cur += bytes.len() as u64;
                     piece_cache.fetched_bytes += bytes.len() as u64;
                     piece_cache.fetched_upstream_bytes += bytes.len() as u64;
+                    gauge!(
+                        "mem_cache.served_bytes",
+                        piece_cache.fetched_bytes.try_into().unwrap()
+                    );
+                    gauge!(
+                        "mem_cache.fetched_bytes",
+                        piece_cache.fetched_upstream_bytes.try_into().unwrap()
+                    );
+                    counter!("mem_cache.cache_miss", 1);
                 }
 
                 let _ = tx.broadcast(Some(res));
@@ -177,5 +195,58 @@ where
             return completion_fut.await;
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryCacheWrapper;
+    use crate::storage::test_utils::MockPieceStorageEngineDumb;
+
+    #[test]
+    fn eviction_test() {
+        use crate::model::TorrentID;
+        use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
+        use tokio::runtime::Runtime;
+
+        // use tracing_subscriber::filter::LevelFilter;
+        // use tracing_subscriber::FmtSubscriber;
+        // tracing::subscriber::set_global_default(
+        //     FmtSubscriber::builder()
+        //         .with_max_level(LevelFilter::TRACE)
+        //         .finish(),
+        // )
+        // .unwrap();
+
+        let cache_builder = MemoryCacheWrapper::build_with_capacity_bytes(256 * 1024); // 16 cacheable
+        let mock = MockPieceStorageEngineDumb::new();
+        let storage_engine = cache_builder.build(mock.clone());
+
+        let mut rt = Runtime::new().unwrap();
+
+        for i in 0..17 {
+            let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
+                content_key: TorrentID::zero(),
+                piece_sha: TorrentID::zero(),
+                piece_length: 16 * 1024,
+                total_length: 0,
+                piece_index: i,
+            }));
+
+            assert!(res.is_ok());
+        }
+
+        // try index 0 again, should hit mock
+        let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
+            content_key: TorrentID::zero(),
+            piece_sha: TorrentID::zero(),
+            piece_length: 16 * 1024,
+            total_length: 0,
+            piece_index: 0,
+        }));
+
+        assert!(res.is_ok());
+
+        assert_eq!(18, *mock.request_counts.lock().unwrap());
     }
 }

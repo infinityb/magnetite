@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use clap::{App, AppSettings, Arg};
-
+use metrics_core::{Builder, Drain, Observe};
+use metrics_runtime::Receiver;
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
@@ -19,6 +20,27 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn main() -> Result<(), failure::Error> {
+    let metrics_rx = Receiver::builder()
+        .build()
+        .expect("failed to create receiver");
+
+    let metrics_controller = metrics_rx.controller();
+    metrics_rx.install();
+
+    std::thread::spawn(move || {
+        let mut json_obs = metrics_runtime::observers::JsonBuilder::new().build();
+
+        loop {
+            use std::thread::sleep;
+            use std::time::Duration;
+            sleep(Duration::new(10, 0));
+
+            metrics_controller.observe(&mut json_obs);
+            let metrics = json_obs.drain();
+            event!(Level::INFO, metrics=%metrics);
+        }
+    });
+
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
     let app = App::new(CARGO_PKG_NAME)

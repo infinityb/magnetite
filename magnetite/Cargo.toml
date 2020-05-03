@@ -37,6 +37,9 @@ nix = "0.17"
 rmp-serde = "0.14.3"
 hyper = "0.13"
 percent-encoding = "2.1"
+metrics-runtime = "0.13.0"
+metrics = "0.12.1"
+metrics-core = "0.5.0"
 
 [features]
 default = ["with-fuse"]
