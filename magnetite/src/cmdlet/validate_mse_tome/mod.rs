@@ -44,7 +44,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 

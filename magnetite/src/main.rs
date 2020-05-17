@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use clap::{App, AppSettings, Arg};
-use metrics_core::{Builder, Drain, Observe};
+use futures::future::FutureExt;
 use metrics_runtime::Receiver;
+use tokio::runtime::Runtime;
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
@@ -20,26 +21,14 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn main() -> Result<(), failure::Error> {
+    let mut rt = Runtime::new().unwrap();
+
     let metrics_rx = Receiver::builder()
         .build()
         .expect("failed to create receiver");
 
     let metrics_controller = metrics_rx.controller();
     metrics_rx.install();
-
-    std::thread::spawn(move || {
-        let mut json_obs = metrics_runtime::observers::JsonBuilder::new().build();
-
-        loop {
-            use std::thread::sleep;
-            use std::time::Duration;
-            sleep(Duration::new(10, 0));
-
-            metrics_controller.observe(&mut json_obs);
-            let metrics = json_obs.drain();
-            event!(Level::INFO, metrics=%metrics);
-        }
-    });
 
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
@@ -53,6 +42,13 @@ fn main() -> Result<(), failure::Error> {
                 .short("v")
                 .multiple(true)
                 .help("Sets the level of verbosity"),
+        )
+        .arg(
+            Arg::with_name("prometheus-bind-address")
+                .long("prometheus-bind-address")
+                .value_name("[ADDRESS]")
+                .help("The address to bind to for prometheus")
+                .takes_value(true),
         )
         .subcommand(cmdlet::seed::get_subcommand())
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
@@ -84,20 +80,40 @@ fn main() -> Result<(), failure::Error> {
         print_test_logging();
     }
 
+    if let Some(addr) = matches.value_of("prometheus-bind-address") {
+        let addr = addr.parse().unwrap();
+        rt.spawn(async move {
+            let prom = metrics_runtime::observers::PrometheusBuilder::new();
+
+            let ex = metrics_runtime::exporters::HttpExporter::new(metrics_controller, prom, addr);
+
+            if let Err(err) = ex.async_run().await {
+                event!(Level::ERROR, "metrics exporter returned an error: {}", err);
+            }
+        });
+    }
+
     let (sub_name, args) = matches.subcommand();
-    let main_function = match sub_name {
-        cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main,
-        cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main,
-        cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main,
-        cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main,
+    let args = args.expect("subcommand args");
+
+    let main_future = match sub_name {
+        cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(args).boxed(),
+        cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main(args).boxed(),
+        cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main(args).boxed(),
+        cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main(args).boxed(),
         #[cfg(feature = "with-fuse")]
-        cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main,
-        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main,
-        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main,
-        cmdlet::validate_torrent_data::SUBCOMMAND_NAME => cmdlet::validate_torrent_data::main,
+        cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main(args).boxed(),
+        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(args).boxed(),
+        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(args).boxed(),
+        cmdlet::validate_torrent_data::SUBCOMMAND_NAME => {
+            cmdlet::validate_torrent_data::main(args).boxed()
+        }
         _ => panic!("bad argument parse"),
     };
-    main_function(args.expect("subcommand args"))
+
+    rt.block_on(main_future)?;
+
+    Ok(())
 }
 
 #[allow(clippy::cognitive_complexity)] // macro bug around event!()

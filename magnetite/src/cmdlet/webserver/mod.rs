@@ -17,7 +17,6 @@ use hyper::{Request, Response, Server, StatusCode};
 use metrics::{counter, timing};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
@@ -67,7 +66,7 @@ struct Opts {
     enable_directory_listings: bool,
 }
 
-pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
@@ -82,9 +81,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         enable_directory_listings: matches.is_present("enable-directory-listings"),
     };
 
-    let mut rt = Runtime::new()?;
-
-    let states = build_storage_engine_states(&mut rt, &config).unwrap();
+    let states = build_storage_engine_states(&config).unwrap();
 
     let mut fs_impl = FilesystemImplMutable {
         storage_backend: states.storage_engine,
@@ -146,17 +143,11 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         }
     });
 
-    rt.block_on(async {
-        let sa: SocketAddr = bind_address.parse().unwrap();
-        let server = Server::bind(&sa).serve(make_svc);
-        event!(Level::INFO, "binding to {}", bind_address);
+    let sa: SocketAddr = bind_address.parse().unwrap();
+    let server = Server::bind(&sa).serve(make_svc);
+    event!(Level::INFO, "binding to {}", bind_address);
 
-        // Finally, spawn `server` onto an Executor...
-        if let Err(e) = server.await {
-            eprintln!("server error: {}", e);
-        }
-    });
-
+    server.await?;
     Ok(())
 }
 

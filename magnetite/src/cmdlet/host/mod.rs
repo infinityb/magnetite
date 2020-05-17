@@ -3,7 +3,6 @@ use std::io::Read;
 
 use clap::{App, Arg, SubCommand};
 use tokio::net::TcpListener;
-use tokio::runtime::Runtime;
 use tracing::{event, Level};
 
 use crate::model::config::build_storage_engine;
@@ -29,7 +28,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
@@ -38,8 +37,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     cfg_fi.read_to_end(&mut cfg_by).unwrap();
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
-    let mut rt = Runtime::new()?;
-    let storage_engine = build_storage_engine(&mut rt, &config).unwrap();
+    let storage_engine = build_storage_engine(&config).unwrap();
 
     let mut futures = Vec::new();
     for fe in &config.frontends {
@@ -68,7 +66,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         }
     }
 
-    rt.block_on(futures::future::join_all(futures));
+    futures::future::join_all(futures).await;
 
     Ok(())
 }
