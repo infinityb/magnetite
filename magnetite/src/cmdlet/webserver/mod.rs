@@ -21,8 +21,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use magnetite_common::TorrentId;
+
 use crate::model::config::build_storage_engine_states;
-use crate::model::{InternalError, TorrentID};
+use crate::model::InternalError;
 use crate::storage::PieceStorageEngineDumb;
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType, FilesystemImpl, FilesystemImplMutable,
@@ -403,7 +405,7 @@ where
                 if to_send == 0 {
                     break;
                 }
-                let piece_sha: TorrentID = match content_info.piece_shas.get(p as usize) {
+                let piece_sha: TorrentId = match content_info.piece_shas.get(p as usize) {
                     Some(v) => *v,
                     None => {
                         event!(

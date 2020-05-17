@@ -14,7 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task;
 use tracing::{event, Level};
 
-use crate::model::{MagnetiteError, ProtocolViolation, TorrentID};
+use magnetite_common::TorrentId;
+
+use crate::model::{MagnetiteError, ProtocolViolation};
 use crate::storage::{
     utils as storage_utils, GetPieceRequest, PieceStorageEngine, PieceStorageEngineDumb,
 };
@@ -40,8 +42,8 @@ const CHUNK_SIZE: u32 = 32 * 1024; // 26ms @ 10Mbps
 #[test]
 fn xx() {
     let gp = GetPieceRequest {
-        content_key: TorrentID::zero(),
-        piece_sha: TorrentID::zero(),
+        content_key: TorrentId::zero(),
+        piece_sha: TorrentId::zero(),
         piece_length: 0x0100_0000,
         total_length: 287_396_254_600,
         piece_index: 17130,
@@ -55,7 +57,7 @@ fn xx() {
 #[derive(Debug)]
 struct PiecePendingRequestFactory {
     piece_slab_index: usize,
-    content_key: TorrentID,
+    content_key: TorrentId,
     piece_index: u32,
     piece_length: u32,
     piece_requested_length: u32,
@@ -150,7 +152,7 @@ enum PendingRequest {
 #[derive(Debug)]
 struct PendingChunkRequest {
     piece_slab_index: usize,
-    content_key: TorrentID,
+    content_key: TorrentId,
     piece_index: u32,
     piece_offset: u32,
     fetch_length: u32,
@@ -531,7 +533,7 @@ where
             return Ok(());
         }
 
-        let mut fast_cache: HashMap<(TorrentID, u32), Bytes> = Default::default();
+        let mut fast_cache: HashMap<(TorrentId, u32), Bytes> = Default::default();
 
         while let Some(req) = read_request_from_buffer(&mut rbuf)? {
             let req: MagnetiteWireRequest = req;

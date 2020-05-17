@@ -4,9 +4,10 @@ use std::time::Instant;
 use smallvec::Array;
 use smallvec::SmallVec;
 
-use crate::model::proto::Message;
-use crate::model::proto::PieceSlice;
-use crate::model::{BitField, TorrentID};
+use magnetite_common::TorrentId;
+
+use crate::model::proto::{Message, PieceSlice};
+use crate::model::BitField;
 
 #[derive(Debug)]
 struct PieceSet {
@@ -248,11 +249,11 @@ struct DefaultPieceSelectionStrategy {
     // cached data
     last_target_update: Instant,
     target_chunks: VecDeque<PieceSlice>,
-    piece_assignments: HashMap<u32, TorrentID>,
+    piece_assignments: HashMap<u32, TorrentId>,
 
     // other
     in_progress: HashMap<u32, PieceState>,
-    peer_data: HashMap<TorrentID, Box<PeerState>>,
+    peer_data: HashMap<TorrentId, Box<PeerState>>,
 }
 
 impl DefaultPieceSelectionStrategy {
@@ -266,7 +267,7 @@ impl DefaultPieceSelectionStrategy {
 
     pub fn get_work<A>(&mut self, _bytes: u64, _into: &mut SmallVec<A>)
     where
-        A: Array<Item = (TorrentID, u32, u32)>,
+        A: Array<Item = (TorrentId, u32, u32)>,
     {
         // find the 100 rarest pieces which are of high priority. if we don't
         // yet have 100 pieces, continue the same logic but with normal
@@ -411,7 +412,7 @@ struct PieceState {
     last_update: Instant,
     chunks_downloaded: PieceSet,
     chunks_to_request: PieceSet,
-    involved_peers: HashSet<TorrentID>,
+    involved_peers: HashSet<TorrentId>,
 }
 
 pub struct ChunkLocation {

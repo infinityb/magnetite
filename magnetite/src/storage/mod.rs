@@ -4,6 +4,8 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::Mutex;
 
+use magnetite_common::TorrentId;
+
 pub mod disk_cache;
 pub mod memory_cache;
 pub mod multi_file;
@@ -23,13 +25,13 @@ pub use self::piece_file::PieceFileStorageEngine;
 pub use self::sha_verify::{ShaVerify, ShaVerifyMode};
 pub use self::state_wrapper::StateWrapper;
 
-use crate::model::{MagnetiteError, TorrentID};
+use crate::model::MagnetiteError;
 use crate::storage::state_wrapper::{ContentInfo, ContentInfoManager};
 
 #[derive(Copy, Clone, Debug)]
 pub struct GetPieceRequest {
-    pub content_key: TorrentID,
-    pub piece_sha: TorrentID,
+    pub content_key: TorrentId,
+    pub piece_sha: TorrentId,
     pub piece_length: u32,
     pub total_length: u64,
     pub piece_index: u32,
@@ -38,7 +40,7 @@ pub struct GetPieceRequest {
 pub trait PieceStorageEngine {
     fn get_piece(
         &self,
-        content_key: &TorrentID,
+        content_key: &TorrentId,
         piece_id: u32,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>>;
 }
@@ -53,7 +55,7 @@ pub trait PieceStorageEngineDumb {
 // pub trait PieceStorageEngineMut: PieceStorageEngine {
 //     fn write_chunk(
 //         &self,
-//         content_key: &TorrentID,
+//         content_key: &TorrentId,
 //         piece_id: u32,
 //         chunk_offset: u32,
 //         finalize_piece: bool,
@@ -62,7 +64,7 @@ pub trait PieceStorageEngineDumb {
 // }
 
 // pub struct CompletionEvent {
-//     info_hash: TorrentID,
+//     info_hash: TorrentId,
 //     piece_id: u32,
 // }
 
@@ -138,8 +140,8 @@ pub mod utils {
 }
 
 pub struct MultiPieceReadRequest<'a> {
-    pub content_key: TorrentID,
-    pub piece_shas: &'a [TorrentID],
+    pub content_key: TorrentId,
+    pub piece_shas: &'a [TorrentId],
     pub piece_length: u32,
     pub total_length: u64,
 
@@ -187,7 +189,7 @@ where
 
 pub async fn get_content_info(
     cim: &Mutex<ContentInfoManager>,
-    content_key: &TorrentID,
+    content_key: &TorrentId,
 ) -> Option<ContentInfo> {
     // FIXME: a readlock is fine here.
     let c = cim.lock().await;
@@ -201,7 +203,7 @@ where
 {
     fn get_piece(
         &self,
-        content_key: &TorrentID,
+        content_key: &TorrentId,
         piece_id: u32,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         PieceStorageEngine::get_piece(&**self, content_key, piece_id)
@@ -226,7 +228,7 @@ where
 {
     fn get_piece(
         &self,
-        content_key: &TorrentID,
+        content_key: &TorrentId,
         piece_id: u32,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         PieceStorageEngine::get_piece(&**self, content_key, piece_id)

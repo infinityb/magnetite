@@ -7,6 +7,7 @@ edition = "2018"
 [dependencies]
 # internal
 bencode = { path = "../bencode" }
+magnetite-common = { path = "../magnetite-common" }
 
 # external
 byteorder = "1"

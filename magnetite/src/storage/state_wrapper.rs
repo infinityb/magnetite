@@ -6,7 +6,9 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use tokio::sync::Mutex;
 
-use crate::model::{MagnetiteError, ProtocolViolation, TorrentID};
+use magnetite_common::TorrentId;
+
+use crate::model::{MagnetiteError, ProtocolViolation};
 use crate::storage::get_content_info;
 use crate::storage::{GetPieceRequest, PieceStorageEngine, PieceStorageEngineDumb};
 
@@ -18,7 +20,7 @@ pub struct StateWrapper<P> {
 
 #[derive(Default, Debug, Clone)]
 pub struct ContentInfoManager {
-    pub data: BTreeMap<TorrentID, ContentInfo>,
+    pub data: BTreeMap<TorrentId, ContentInfo>,
 }
 
 pub struct Builder {
@@ -29,14 +31,14 @@ pub struct Builder {
 pub struct ContentInfo {
     pub total_length: u64,
     pub piece_length: u32,
-    pub piece_shas: Arc<[TorrentID]>,
+    pub piece_shas: Arc<[TorrentId]>,
 }
 
 #[derive(Clone)]
 pub struct Registration {
     pub total_length: u64,
     pub piece_length: u32,
-    pub piece_shas: Vec<TorrentID>,
+    pub piece_shas: Vec<TorrentId>,
 }
 
 impl StateWrapper<()> {
@@ -48,7 +50,7 @@ impl StateWrapper<()> {
 }
 
 impl ContentInfoManager {
-    pub fn get_content_info(&self, content_key: &TorrentID) -> Option<ContentInfo> {
+    pub fn get_content_info(&self, content_key: &TorrentId) -> Option<ContentInfo> {
         self.data.get(content_key).map(Clone::clone)
     }
 }
@@ -59,7 +61,7 @@ where
 {
     fn get_piece(
         &self,
-        content_key: &TorrentID,
+        content_key: &TorrentId,
         piece_id: u32,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         let piece_key = (*content_key, piece_id);
@@ -90,7 +92,7 @@ where
 }
 
 impl Builder {
-    pub fn register_info_hash(&mut self, info_hash: &TorrentID, ci: Registration) {
+    pub fn register_info_hash(&mut self, info_hash: &TorrentId, ci: Registration) {
         self.state.data.insert(
             *info_hash,
             ContentInfo {

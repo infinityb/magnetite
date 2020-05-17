@@ -673,6 +673,7 @@ dependencies = [
  "libc 0.2.69 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "lru 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "magnetite-common 0.1.0",
  "metrics 0.12.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "metrics-core 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "metrics-runtime 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -694,6 +695,13 @@ dependencies = [
  "tonic-build 0.2.0 (git+https://github.com/hyperium/tonic.git)",
  "tracing 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "tracing-subscriber 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "magnetite-common"
+version = "0.1.0"
+dependencies = [
+ "serde 1.0.106 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

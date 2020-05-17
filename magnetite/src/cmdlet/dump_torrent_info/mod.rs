@@ -5,7 +5,8 @@ use std::path::Path;
 use clap::{App, Arg, SubCommand};
 use sha1::{Digest, Sha1};
 
-use crate::model::TorrentID;
+use magnetite_common::TorrentId;
+
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
@@ -36,7 +37,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let tm: bencode::Value = bencode::from_bytes(&by[..]).unwrap();
 
-    let mut infohash = TorrentID::zero();
+    let mut infohash = TorrentId::zero();
     if let bencode::Value::Dict(ref d) = tm {
         let mut hasher = Sha1::new();
         let info = bencode::to_bytes(d.get(&b"info"[..]).unwrap()).unwrap();
