@@ -55,6 +55,16 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("enable-directory-listings")
+                .long("enable-directory-listings")
+                .help("enables directory listings"),
+        )
+}
+
+#[derive(Clone)]
+struct Opts {
+    enable_directory_listings: bool,
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
@@ -67,6 +77,10 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
     let bind_address = matches.value_of("bind-address").unwrap().to_string();
+
+    let opts = Opts {
+        enable_directory_listings: matches.is_present("enable-directory-listings"),
+    };
 
     let mut rt = Runtime::new()?;
 
@@ -116,13 +130,14 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let make_svc = make_service_fn(move |socket: &AddrStream| {
         let fs_impl = fs_impl.clone();
         let remote_addr = socket.remote_addr();
+        let opts = opts.clone();
 
         async move {
-            let fs_impl = fs_impl.clone();
             let service = service_fn(move |req: Request<Body>| {
                 let fs_impl = fs_impl.clone();
+                let opts = opts.clone();
                 async move {
-                    let v = service_request(fs_impl, remote_addr, req).await;
+                    let v = service_request(fs_impl, remote_addr, opts, req).await;
                     Ok::<_, Infallible>(v)
                 }
             });
@@ -148,12 +163,13 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 async fn service_request<P>(
     fsi: FilesystemImpl<P>,
     remote_addr: std::net::SocketAddr,
+    opts: Opts,
     req: Request<Body>,
 ) -> Response<Body>
 where
     P: PieceStorageEngineDumb + Unpin + Clone + Send + Sync + 'static,
 {
-    match service_request_helper(fsi, remote_addr, req).await {
+    match service_request_helper(fsi, remote_addr, opts, req).await {
         Ok(resp) => resp,
         Err(err) => {
             if err.downcast_ref::<NoEntityExists>().is_some() {
@@ -204,6 +220,7 @@ fn percent_decode_str(x: &str) -> OsString {
 async fn service_request_helper<P>(
     fsi: FilesystemImpl<P>,
     _remote_addr: std::net::SocketAddr,
+    opts: Opts,
     req: Request<Body>,
 ) -> Result<Response<Body>, failure::Error>
 where
@@ -239,7 +256,11 @@ where
                 let uri = format!("{}/", req.uri().path());
                 return Ok(response_http_found(&uri));
             }
-            return Ok(response_ok_rendering_directory(&dir));
+            if opts.enable_directory_listings && fe.inode != 1 {
+                return Ok(response_ok_rendering_directory(dir));
+            } else {
+                return Ok(response_http_not_found());
+            }
         }
         FileEntryData::File(ref file) => {
             content_key = file.content_key;
