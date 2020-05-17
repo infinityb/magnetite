@@ -3,8 +3,10 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use futures::future::Future;
 use salsa20::stream_cipher::generic_array::GenericArray;
 use salsa20::stream_cipher::NewStreamCipher;
 use salsa20::XSalsa20;
@@ -13,12 +15,13 @@ use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use crate::model::{FileError, InternalError, TorrentMetaWrapped};
+use crate::model::{FileError, InternalError, MagnetiteError, TorrentMetaWrapped};
 use crate::storage::state_wrapper::ContentInfoManager;
 use crate::storage::{
-    disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, multi_file, piece_file,
-    remote_magnetite::RemoteMagnetite, sha_verify::ShaVerifyMode, state_wrapper,
-    PieceFileStorageEngine, PieceStorageEngine, PieceStorageEngineDumb, ShaVerify, StateWrapper,
+    disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, multi_file,
+    multi_file::MultiFileStorageEngine, piece_file, remote_magnetite::RemoteMagnetite,
+    sha_verify::ShaVerifyMode, state_wrapper, AddTorrentRequest, PieceFileStorageEngine,
+    PieceStorageEngine, PieceStorageEngineDumb, ShaVerify, StateWrapper,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -190,8 +193,8 @@ pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentId) -> Option<X
 fn multi_file(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
-    let mut mf_builder = multi_file::MultiFileStorageEngine::builder();
+) -> Result<MultiFileStorageEngine, failure::Error> {
+    let mut mf_builder = MultiFileStorageEngine::builder();
 
     for s in &config.torrents {
         let metainfo = path_to_torrent
@@ -217,15 +220,13 @@ fn multi_file(
         );
     }
 
-    let boxed: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> =
-        Box::new(mf_builder.build());
-    Ok(boxed.into())
+    Ok(mf_builder.build())
 }
 
 fn piece_file(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<PieceFileStorageEngine, failure::Error> {
     event!(Level::INFO, "configuring PieceFile backend");
     let mut pf_builder = PieceFileStorageEngine::builder();
 
@@ -255,20 +256,91 @@ fn piece_file(
         );
     }
 
-    let boxed: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> =
-        Box::new(pf_builder.build());
-    Ok(boxed.into())
+    Ok(pf_builder.build())
 }
 
 fn remote_magnetite(
     rm: &StorageEngineElementRemoteMagnetite,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<RemoteMagnetite, failure::Error> {
     event!(
         Level::INFO,
         "configuring RemoteMagnetite backend - {:?}",
         rm
     );
-    Ok(Arc::new(RemoteMagnetite::connected(&rm.upstream_server)))
+    Ok(RemoteMagnetite::connected(&rm.upstream_server))
+}
+
+pub fn ps_to_boxed_dynamic<P>(p: P) -> Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>
+where
+    P: PieceStorageEngineDumb + Send + Sync + 'static,
+{
+    let boxed: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> = Box::new(p);
+    boxed.into()
+}
+
+pub fn tm_to_boxed_dynamic<P>(p: P) -> Arc<dyn TorrentManager + Send + Sync + 'static>
+where
+    P: TorrentManager + Send + Sync + 'static,
+{
+    let boxed: Box<dyn TorrentManager + Send + Sync + 'static> = Box::new(p);
+    boxed.into()
+}
+
+pub struct StorageEngineServices {
+    piece_fetcher: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>,
+    torrent_managers: Vec<Arc<dyn TorrentManager + Send + Sync + 'static>>,
+}
+
+struct MultiFileTorrentManager {
+    inst: MultiFileStorageEngine,
+}
+
+struct PieceFileTorrentManager {
+    inst: PieceFileStorageEngine,
+}
+
+pub trait TorrentManager {
+    fn add_torrent(
+        &self,
+        req: AddTorrentRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MagnetiteError>>>>;
+
+    fn remove_torrent(
+        &self,
+        info_hash: TorrentId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MagnetiteError>>>>;
+}
+
+impl TorrentManager for MultiFileTorrentManager {
+    fn add_torrent(
+        &self,
+        _req: AddTorrentRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MagnetiteError>>>> {
+        unimplemented!();
+    }
+
+    fn remove_torrent(
+        &self,
+        _info_hash: TorrentId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MagnetiteError>>>> {
+        unimplemented!();
+    }
+}
+
+impl TorrentManager for PieceFileTorrentManager {
+    fn add_torrent(
+        &self,
+        _req: AddTorrentRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MagnetiteError>>>> {
+        unimplemented!();
+    }
+
+    fn remove_torrent(
+        &self,
+        _info_hash: TorrentId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MagnetiteError>>>> {
+        unimplemented!();
+    }
 }
 
 fn build_storage_engine_dumb_helper(
@@ -280,6 +352,7 @@ fn build_storage_engine_dumb_helper(
         msg: "must define at least one storage engine",
     })?;
 
+    let mut torrent_managers: Vec<Arc<dyn TorrentManager + Send + Sync + 'static>> = Vec::new();
     let mut current_engine: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static> =
         match first_engine {
             StorageEngineElement::DiskCache(..) => {
@@ -291,9 +364,24 @@ fn build_storage_engine_dumb_helper(
                 })
                 .into());
             }
-            StorageEngineElement::MultiFile => multi_file(config, path_to_torrent)?,
-            StorageEngineElement::PieceFile => piece_file(config, path_to_torrent)?,
-            StorageEngineElement::RemoteMagnetite(ref rm) => remote_magnetite(rm)?,
+            StorageEngineElement::MultiFile => {
+                let ps = multi_file(config, path_to_torrent)?;
+                torrent_managers.push(tm_to_boxed_dynamic(MultiFileTorrentManager {
+                    inst: ps.clone(),
+                }));
+                ps_to_boxed_dynamic(ps)
+            }
+            StorageEngineElement::PieceFile => {
+                let ps = piece_file(config, path_to_torrent)?;
+                torrent_managers.push(tm_to_boxed_dynamic(PieceFileTorrentManager {
+                    inst: ps.clone(),
+                }));
+                ps_to_boxed_dynamic(ps)
+            }
+            StorageEngineElement::RemoteMagnetite(ref rm) => {
+                let ps = remote_magnetite(rm)?;
+                ps_to_boxed_dynamic(ps)
+            }
             StorageEngineElement::ShaValidate(..) => {
                 return Err(InvalidRootStorage(InvalidStorage {
                     name: "sha-validate",
