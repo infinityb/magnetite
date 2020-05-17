@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ffi::OsString;
-use std::fmt::{self, Write};
+use std::fmt::{self, Write as FmtWrite};
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read, Write as IoWrite};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -246,7 +246,6 @@ where
     );
 
     let fe = fs.vfs.traverse_path(1, path.clone()).map(Clone::clone)?;
-    drop(fs);
 
     let content_key;
     let torrent_global_offset_start;
@@ -257,7 +256,7 @@ where
                 return Ok(response_http_found(&uri));
             }
             if opts.enable_directory_listings && fe.inode != 1 {
-                return Ok(response_ok_rendering_directory(dir));
+                return Ok(response_ok_rendering_directory(&fs.vfs, dir));
             } else {
                 return Ok(response_http_not_found());
             }
@@ -268,7 +267,6 @@ where
         }
     };
 
-    let fs = fsi.mutable.lock().await;
     let content_info = fs
         .content_info
         .get_content_info(&content_key)
@@ -635,16 +633,31 @@ fn response_http_found(new_path: &str) -> Response<Body> {
     builder.body(content.into()).unwrap()
 }
 
-fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
+fn cursor_to_string<'a>(cur: &'a io::Cursor<&'_ mut [u8]>) -> &'a str {
+    let pos = cur.position() as usize;
+    let buf = cur.get_ref();
+    std::str::from_utf8(&buf[..pos]).unwrap()
+}
+
+fn response_ok_rendering_directory(vfs: &Vfs, dir: &Directory) -> Response<Body> {
     let mut data = BytesMut::new();
 
     for d in &dir.child_inodes {
+        let entry = vfs.inodes.get(&d.inode).unwrap();
+
         if let Some(ds) = d.file_name.to_str() {
             let file_type_str;
             let mut dir_trailer = "";
+            let mut size_str = "";
+
+            let mut size_buf = <[u8; 16] as Default>::default();
+            let mut size_cursor = io::Cursor::new(&mut size_buf[..]);
+
             match d.ft {
                 FileType::RegularFile => {
                     file_type_str = "REG";
+                    write!(&mut size_cursor, " ({})", ByteSize(entry.size)).unwrap();
+                    size_str = cursor_to_string(&size_cursor);
                 }
                 FileType::Directory => {
                     file_type_str = "DIR";
@@ -653,8 +666,8 @@ fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
             }
             write!(
                 &mut data,
-                "[{}] <a href=\"{}{}\">{}{}</a><br>",
-                file_type_str, ds, dir_trailer, ds, dir_trailer,
+                "[{}] <a href=\"{}{}\">{}{}</a>{}<br>",
+                file_type_str, ds, dir_trailer, ds, dir_trailer, size_str,
             )
             .unwrap();
         }
@@ -668,6 +681,39 @@ fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
         );
 
     builder.body(data[..].to_vec().into()).unwrap()
+}
+
+// --
+
+struct ByteSize(u64);
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        const UNIT_NAMES: &[&str] = &["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei"];
+        let mut unit_acc = self.0;
+        let mut unit_num = 0;
+        while 1024 <= unit_acc && unit_num < UNIT_NAMES.len() {
+            unit_acc /= 1024;
+            unit_num += 1;
+        }
+
+        let value = match unit_num {
+            0 => self.0 as f64,
+            1 => self.0 as f64 / 1024.0,
+            _ => {
+                // use integer division first, to ensure that the value
+                // fits into floats
+                let unit_denom_int = 1 << (10 * (unit_num - 1));
+                (self.0 / unit_denom_int) as f64 / 1024.0
+            }
+        };
+
+        if unit_num == 0 {
+            write!(f, "{}B", value)
+        } else {
+            write!(f, "{:.1}{}B", value, UNIT_NAMES[unit_num])
+        }
+    }
 }
 
 // --
