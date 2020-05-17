@@ -14,7 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task;
 use tracing::{event, Level};
 
-use crate::model::{MagnetiteError, ProtocolViolation, TorrentID};
+use magnetite_common::TorrentId;
+
+use crate::model::{MagnetiteError, ProtocolViolation};
 use crate::storage::{
     utils as storage_utils, GetPieceRequest, PieceStorageEngine, PieceStorageEngineDumb,
 };
@@ -40,8 +42,8 @@ const CHUNK_SIZE: u32 = 32 * 1024; // 26ms @ 10Mbps
 #[test]
 fn xx() {
     let gp = GetPieceRequest {
-        content_key: TorrentID::zero(),
-        piece_sha: TorrentID::zero(),
+        content_key: TorrentId::zero(),
+        piece_sha: TorrentId::zero(),
         piece_length: 0x0100_0000,
         total_length: 287_396_254_600,
         piece_index: 17130,
@@ -55,7 +57,7 @@ fn xx() {
 #[derive(Debug)]
 struct PiecePendingRequestFactory {
     piece_slab_index: usize,
-    content_key: TorrentID,
+    content_key: TorrentId,
     piece_index: u32,
     piece_length: u32,
     piece_requested_length: u32,
@@ -150,7 +152,7 @@ enum PendingRequest {
 #[derive(Debug)]
 struct PendingChunkRequest {
     piece_slab_index: usize,
-    content_key: TorrentID,
+    content_key: TorrentId,
     piece_index: u32,
     piece_offset: u32,
     fetch_length: u32,
@@ -313,8 +315,9 @@ async fn run_connected(
     //
     let mut split_request_queue: VecDeque<PendingRequest> = VecDeque::new();
     let mut request_queue_open = true;
+    let mut connection_open = true;
 
-    loop {
+    while connection_open {
         if let Some(average) = latency.average() {
             if average < LATENCY_TARGET_MIN_MILLISECONDS {
                 let prev_window_size = current_window_size;
@@ -399,6 +402,7 @@ async fn run_connected(
             }
 
             if is_eof {
+                connection_open = false;
                 break;
             }
         }
@@ -406,11 +410,6 @@ async fn run_connected(
         if !request_queue_open && inflight.is_empty() && split_request_queue.is_empty() {
             break;
         }
-
-        // event!(Level::ERROR, "request_queue_open={:?} inflight.len()={:?} split_request_queue.len()={:?}",
-        //     request_queue_open,
-        //     inflight.len(),
-        //     split_request_queue.len());
 
         if request_queue_open || !inflight.is_empty() {
             ::tokio::select! {
@@ -428,43 +427,15 @@ async fn run_connected(
                     }
                 },
                 read_res = socket.read_buf(&mut rbuf), if !inflight.is_empty() => {
-                    read_res?;
+                    if read_res? == 0 {
+                        connection_open = false;
+                    }
                     while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
                         resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
                     }
                 }
             }
         }
-
-        // match (!inflight.is_empty(), request_queue_open) {
-        //     (false, false) => {
-        //         // nothing to read, nothing to queue, and can't get more work.  We've exhausted
-        //         // all of the work we'll ever get.  Iteration stops.
-        //         if split_request_queue.len() == 0 {
-        //             return Ok(());
-        //         }
-        //     }
-        //     (false, true) => {
-        //         // nothing to read (we don't have any requests out), can get more work.
-        //         if let Some(v) = incoming_request_queue.recv().await {
-        //             let MagnetiteRequest::Piece { gp, responder } = v;
-        //             let ps = PieceState::new(gp.piece_length, responder);
-        //             let pf = PiecePendingRequestFactory::new(piece_state.insert(ps), &gp);
-        //             split_request_queue.extend(pf);
-        //         } else {
-        //             request_queue_open = false;
-        //         }
-        //     }
-        //     (true, false) => {
-        //         // something to read, can't get new work.
-        //         socket.read_buf(&mut rbuf).await?;
-        //         while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
-        //             resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
-        //         }
-        //     }
-        //    (true, true) => {
-        //    }
-        // }
     }
 
     Ok(request_queue_open)
@@ -531,7 +502,7 @@ where
             return Ok(());
         }
 
-        let mut fast_cache: HashMap<(TorrentID, u32), Bytes> = Default::default();
+        let mut fast_cache: HashMap<(TorrentId, u32), Bytes> = Default::default();
 
         while let Some(req) = read_request_from_buffer(&mut rbuf)? {
             let req: MagnetiteWireRequest = req;

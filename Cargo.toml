@@ -3,4 +3,5 @@ members = [
 	"bencode",
 	"iresult",
 	"magnetite",
+	"magnetite-common",
 ]

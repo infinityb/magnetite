@@ -1,5 +1,6 @@
+use magnetite_common::TorrentId;
+
 use super::MagnetiteRequestKind;
-use crate::model::TorrentID;
 
 pub use self::request::{read_request_from_buffer, write_request_to_buffer};
 pub use self::response::{read_response_from_buffer, write_response_to_buffer};
@@ -11,11 +12,13 @@ mod request {
     use bytes::BytesMut;
     use serde::{Deserialize, Serialize};
 
+    use magnetite_common::TorrentId;
+
     use super::{
         MagnetiteWirePieceRequest, MagnetiteWireRequest, MagnetiteWireRequestPayload,
         MAX_RESPONSE_SIZE,
     };
-    use crate::model::{MagnetiteError, ProtocolViolation, TorrentID};
+    use crate::model::{MagnetiteError, ProtocolViolation};
 
     #[derive(Serialize, Deserialize)]
     struct MagnetiteLowRequest {
@@ -31,7 +34,7 @@ mod request {
     #[derive(Serialize, Deserialize)]
     struct MagnetiteLowPieceRequest {
         #[serde(with = "super::torrent_id")]
-        content_key: TorrentID,
+        content_key: TorrentId,
         piece_index: u32,
         piece_offset: u32,
         fetch_length: u32,
@@ -132,7 +135,7 @@ mod request {
         const MW_TEST0: MagnetiteWireRequest = MagnetiteWireRequest {
             txid: 0x00AA_AAA9,
             payload: MagnetiteWireRequestPayload::Piece(MagnetiteWirePieceRequest {
-                content_key: TorrentID([
+                content_key: TorrentId([
                     0x1A, 0x5C, 0x64, 0x8C, 0xB0, 0x0B, 0xF3, 0xE2, 0xB9, 0x27, 0x58, 0x08, 0x06,
                     0x29, 0xC9, 0xC7, 0xA9, 0x2C, 0xD3, 0x7D,
                 ]),
@@ -335,7 +338,7 @@ pub enum MagnetiteWireRequestPayload {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MagnetiteWirePieceRequest {
-    pub content_key: TorrentID,
+    pub content_key: TorrentId,
     pub piece_index: u32,
     pub piece_offset: u32,
     pub fetch_length: u32,
@@ -378,9 +381,9 @@ mod torrent_id {
 
     use serde::{Deserializer, Serializer};
 
-    use crate::model::TorrentID;
+    use magnetite_common::TorrentId;
 
-    pub fn serialize<S>(id: &TorrentID, ser: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(id: &TorrentId, ser: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -390,12 +393,12 @@ mod torrent_id {
     struct TorrentIdRawBytesVisitor;
 
     impl<'de> serde::de::Visitor<'de> for TorrentIdRawBytesVisitor {
-        type Value = TorrentID;
+        type Value = TorrentId;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             write!(
                 formatter,
-                "a bytearray containing exactly TorrentID::LENGTH bytes"
+                "a bytearray containing exactly TorrentId::LENGTH bytes"
             )
         }
 
@@ -403,20 +406,20 @@ mod torrent_id {
         where
             E: serde::de::Error,
         {
-            if v.len() != TorrentID::LENGTH {
+            if v.len() != TorrentId::LENGTH {
                 return Err(E::invalid_length(
                     v.len(),
-                    &"a bytearray containing exactly TorrentID::LENGTH bytes",
+                    &"a bytearray containing exactly TorrentId::LENGTH bytes",
                 ));
             }
 
-            let mut out = TorrentID::zero();
+            let mut out = TorrentId::zero();
             out.as_mut_bytes().copy_from_slice(v);
             Ok(out)
         }
     }
 
-    pub fn deserialize<'de, D>(de: D) -> Result<TorrentID, D::Error>
+    pub fn deserialize<'de, D>(de: D) -> Result<TorrentId, D::Error>
     where
         D: Deserializer<'de>,
     {

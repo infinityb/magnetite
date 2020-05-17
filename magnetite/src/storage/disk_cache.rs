@@ -20,7 +20,9 @@ use crate::utils::OwnedFd;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{fallocate, FallocateFlags};
 
-use crate::model::{MagnetiteError, TorrentID};
+use magnetite_common::TorrentId;
+
+use crate::model::MagnetiteError;
 use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
 
 #[derive(Clone, Debug)]
@@ -37,7 +39,7 @@ struct PieceCacheInfo {
     served_bytes: u64,
     fetched_upstream_bytes: u64,
     next_cache_report_print: Instant,
-    pieces: BTreeMap<(TorrentID, u32), PieceCacheEntry>,
+    pieces: BTreeMap<(TorrentId, u32), PieceCacheEntry>,
 }
 
 #[derive(Clone)]
@@ -141,7 +143,7 @@ fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Ve
     struct HeapEntry {
         last_touched: SystemTime,
         piece_length: u32,
-        btree_key: (TorrentID, u32),
+        btree_key: (TorrentId, u32),
     }
 
     impl Eq for HeapEntry {}

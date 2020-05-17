@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ffi::OsString;
-use std::fmt::{self, Write};
+use std::fmt::{self, Write as FmtWrite};
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read, Write as IoWrite};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,8 +21,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use magnetite_common::TorrentId;
+
 use crate::model::config::build_storage_engine_states;
-use crate::model::{InternalError, TorrentID};
+use crate::model::InternalError;
 use crate::storage::PieceStorageEngineDumb;
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType, FilesystemImpl, FilesystemImplMutable,
@@ -53,6 +55,16 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("enable-directory-listings")
+                .long("enable-directory-listings")
+                .help("enables directory listings"),
+        )
+}
+
+#[derive(Clone)]
+struct Opts {
+    enable_directory_listings: bool,
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
@@ -65,6 +77,10 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
     let bind_address = matches.value_of("bind-address").unwrap().to_string();
+
+    let opts = Opts {
+        enable_directory_listings: matches.is_present("enable-directory-listings"),
+    };
 
     let mut rt = Runtime::new()?;
 
@@ -114,13 +130,14 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let make_svc = make_service_fn(move |socket: &AddrStream| {
         let fs_impl = fs_impl.clone();
         let remote_addr = socket.remote_addr();
+        let opts = opts.clone();
 
         async move {
-            let fs_impl = fs_impl.clone();
             let service = service_fn(move |req: Request<Body>| {
                 let fs_impl = fs_impl.clone();
+                let opts = opts.clone();
                 async move {
-                    let v = service_request(fs_impl, remote_addr, req).await;
+                    let v = service_request(fs_impl, remote_addr, opts, req).await;
                     Ok::<_, Infallible>(v)
                 }
             });
@@ -146,12 +163,13 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 async fn service_request<P>(
     fsi: FilesystemImpl<P>,
     remote_addr: std::net::SocketAddr,
+    opts: Opts,
     req: Request<Body>,
 ) -> Response<Body>
 where
     P: PieceStorageEngineDumb + Unpin + Clone + Send + Sync + 'static,
 {
-    match service_request_helper(fsi, remote_addr, req).await {
+    match service_request_helper(fsi, remote_addr, opts, req).await {
         Ok(resp) => resp,
         Err(err) => {
             if err.downcast_ref::<NoEntityExists>().is_some() {
@@ -202,6 +220,7 @@ fn percent_decode_str(x: &str) -> OsString {
 async fn service_request_helper<P>(
     fsi: FilesystemImpl<P>,
     _remote_addr: std::net::SocketAddr,
+    opts: Opts,
     req: Request<Body>,
 ) -> Result<Response<Body>, failure::Error>
 where
@@ -227,7 +246,6 @@ where
     );
 
     let fe = fs.vfs.traverse_path(1, path.clone()).map(Clone::clone)?;
-    drop(fs);
 
     let content_key;
     let torrent_global_offset_start;
@@ -237,7 +255,11 @@ where
                 let uri = format!("{}/", req.uri().path());
                 return Ok(response_http_found(&uri));
             }
-            return Ok(response_ok_rendering_directory(&dir));
+            if opts.enable_directory_listings && fe.inode != 1 {
+                return Ok(response_ok_rendering_directory(&fs.vfs, dir));
+            } else {
+                return Ok(response_http_not_found());
+            }
         }
         FileEntryData::File(ref file) => {
             content_key = file.content_key;
@@ -245,7 +267,6 @@ where
         }
     };
 
-    let fs = fsi.mutable.lock().await;
     let content_info = fs
         .content_info
         .get_content_info(&content_key)
@@ -403,7 +424,7 @@ where
                 if to_send == 0 {
                     break;
                 }
-                let piece_sha: TorrentID = match content_info.piece_shas.get(p as usize) {
+                let piece_sha: TorrentId = match content_info.piece_shas.get(p as usize) {
                     Some(v) => *v,
                     None => {
                         event!(
@@ -612,16 +633,31 @@ fn response_http_found(new_path: &str) -> Response<Body> {
     builder.body(content.into()).unwrap()
 }
 
-fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
+fn cursor_to_string<'a>(cur: &'a io::Cursor<&'_ mut [u8]>) -> &'a str {
+    let pos = cur.position() as usize;
+    let buf = cur.get_ref();
+    std::str::from_utf8(&buf[..pos]).unwrap()
+}
+
+fn response_ok_rendering_directory(vfs: &Vfs, dir: &Directory) -> Response<Body> {
     let mut data = BytesMut::new();
 
     for d in &dir.child_inodes {
+        let entry = vfs.inodes.get(&d.inode).unwrap();
+
         if let Some(ds) = d.file_name.to_str() {
             let file_type_str;
             let mut dir_trailer = "";
+            let mut size_str = "";
+
+            let mut size_buf = <[u8; 16] as Default>::default();
+            let mut size_cursor = io::Cursor::new(&mut size_buf[..]);
+
             match d.ft {
                 FileType::RegularFile => {
                     file_type_str = "REG";
+                    write!(&mut size_cursor, " ({})", ByteSize(entry.size)).unwrap();
+                    size_str = cursor_to_string(&size_cursor);
                 }
                 FileType::Directory => {
                     file_type_str = "DIR";
@@ -630,8 +666,8 @@ fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
             }
             write!(
                 &mut data,
-                "[{}] <a href=\"{}{}\">{}{}</a><br>",
-                file_type_str, ds, dir_trailer, ds, dir_trailer,
+                "[{}] <a href=\"{}{}\">{}{}</a>{}<br>",
+                file_type_str, ds, dir_trailer, ds, dir_trailer, size_str,
             )
             .unwrap();
         }
@@ -645,6 +681,39 @@ fn response_ok_rendering_directory(dir: &Directory) -> Response<Body> {
         );
 
     builder.body(data[..].to_vec().into()).unwrap()
+}
+
+// --
+
+struct ByteSize(u64);
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        const UNIT_NAMES: &[&str] = &["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei"];
+        let mut unit_acc = self.0;
+        let mut unit_num = 0;
+        while 1024 <= unit_acc && unit_num < UNIT_NAMES.len() {
+            unit_acc /= 1024;
+            unit_num += 1;
+        }
+
+        let value = match unit_num {
+            0 => self.0 as f64,
+            1 => self.0 as f64 / 1024.0,
+            _ => {
+                // use integer division first, to ensure that the value
+                // fits into floats
+                let unit_denom_int = 1 << (10 * (unit_num - 1));
+                (self.0 / unit_denom_int) as f64 / 1024.0
+            }
+        };
+
+        if unit_num == 0 {
+            write!(f, "{}B", value)
+        } else {
+            write!(f, "{:.1}{}B", value, UNIT_NAMES[unit_num])
+        }
+    }
 }
 
 // --

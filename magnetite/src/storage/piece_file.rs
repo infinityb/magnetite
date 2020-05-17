@@ -10,9 +10,11 @@ use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
 use tokio::sync::Mutex;
 
+use magnetite_common::TorrentId;
+
 use super::utils::piece_file_pread_exact;
 use super::{GetPieceRequest, PieceStorageEngineDumb};
-use crate::model::{BitField, MagnetiteError, ProtocolViolation, TorrentID};
+use crate::model::{BitField, MagnetiteError, ProtocolViolation};
 
 pub struct InProgress {
     // for interior pieces:
@@ -31,11 +33,11 @@ struct TorrentState {
 
 #[derive(Clone)]
 pub struct PieceFileStorageEngine {
-    torrents: Arc<Mutex<BTreeMap<TorrentID, TorrentState>>>,
+    torrents: Arc<Mutex<BTreeMap<TorrentId, TorrentState>>>,
 }
 
 pub struct Builder {
-    torrents: BTreeMap<TorrentID, TorrentState>,
+    torrents: BTreeMap<TorrentId, TorrentState>,
 }
 
 pub struct Registration {
@@ -45,7 +47,7 @@ pub struct Registration {
 }
 
 impl Builder {
-    pub fn register_info_hash(&mut self, content_key: &TorrentID, reg: Registration) {
+    pub fn register_info_hash(&mut self, content_key: &TorrentId, reg: Registration) {
         self.torrents.insert(
             *content_key,
             TorrentState {
@@ -74,7 +76,7 @@ impl PieceFileStorageEngine {
 // impl PieceStorageEngineMut for PieceFileStorageEngine {
 //     fn write_chunk(
 //         &self,
-//         content_key: &TorrentID,
+//         content_key: &TorrentId,
 //         piece_id: u32,
 //         chunk_offset: u32,
 //         finalize_piece: bool,
@@ -155,7 +157,7 @@ impl PieceFileStorageEngine {
 //             if prog.chunks.is_filled() {
 //                 drop(prog);
 
-//                 let piece_sha: &TorrentID = piece_shas
+//                 let piece_sha: &TorrentId = piece_shas
 //                     .get(piece_id as usize)
 //                     .ok_or_else(|| ProtocolViolation)?;
 

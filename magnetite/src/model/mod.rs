@@ -8,6 +8,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
+use magnetite_common::TorrentId;
+
 pub mod config;
 pub mod proto;
 
@@ -140,7 +142,7 @@ pub struct BadHandshake {
 #[derive(Debug, Clone)]
 pub enum BadHandshakeReason {
     JunkData,
-    UnknownInfoHash(TorrentID),
+    UnknownInfoHash(TorrentId),
 }
 
 impl BadHandshake {
@@ -150,7 +152,7 @@ impl BadHandshake {
         }
     }
 
-    pub fn unknown_info_hash(ih: &TorrentID) -> BadHandshake {
+    pub fn unknown_info_hash(ih: &TorrentId) -> BadHandshake {
         BadHandshake {
             reason: BadHandshakeReason::UnknownInfoHash(*ih),
         }
@@ -198,78 +200,8 @@ impl std::error::Error for FileError {}
 
 // --
 
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TorrentID(pub [u8; TORRENT_ID_LENGTH]);
-
-impl TorrentID {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0[..]
-    }
-
-    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
-        &mut self.0[..]
-    }
-
-    pub fn hex(&self) -> TorrentIDHexFormat {
-        TorrentIDHexFormat { torrent_id: self }
-    }
-}
-
-pub struct TorrentIDHexFormat<'a> {
-    torrent_id: &'a TorrentID,
-}
-
-impl fmt::Display for TorrentIDHexFormat<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for b in self.torrent_id.as_bytes() {
-            write!(f, "{:02x}", b)?;
-        }
-        Ok(())
-    }
-}
-
-impl BitAnd for TorrentID {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        let mut out = TorrentID::zero();
-        let lhs_bytes = self.as_bytes().iter();
-        let rhs_bytes = rhs.as_bytes().iter();
-
-        for (o, (a, b)) in out.as_mut_bytes().iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
-            *o = *a & *b;
-        }
-
-        out
-    }
-}
-
-impl BitXor for TorrentID {
-    type Output = Self;
-
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        let mut out = TorrentID::zero();
-        let lhs_bytes = self.as_bytes().iter();
-        let rhs_bytes = rhs.as_bytes().iter();
-
-        for (o, (a, b)) in out.as_mut_bytes().iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
-            *o = *a ^ *b;
-        }
-
-        out
-    }
-}
-
-impl fmt::Debug for TorrentID {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("TorrentID")
-            .field(&bencode::HexStr(self.as_bytes()))
-            .finish()
-    }
-}
-
 /// panics if chunks is too large.
-pub fn copy_from_byte_vec_nofill<'a>(mut into: &'a mut [u8], chunks: &[&[u8]]) -> &'a mut [u8] {
+fn copy_from_byte_vec_nofill<'a>(mut into: &'a mut [u8], chunks: &[&[u8]]) -> &'a mut [u8] {
     for ch in chunks {
         let (cur, rest) = into.split_at_mut(ch.len());
         cur.copy_from_slice(ch);
@@ -278,75 +210,25 @@ pub fn copy_from_byte_vec_nofill<'a>(mut into: &'a mut [u8], chunks: &[&[u8]]) -
     into
 }
 
-impl TorrentID {
-    pub const LENGTH: usize = TORRENT_ID_LENGTH;
+pub fn generate_peer_id_seeded(random: &str) -> TorrentId {
+    let mut hasher = Sha1::new();
+    hasher.input(random.as_bytes());
+    let hash_result = hasher.result();
 
-    pub fn zero() -> TorrentID {
-        TorrentID([0; TORRENT_ID_LENGTH])
-    }
-
-    pub fn is_zero(&self) -> bool {
-        for by in self.as_bytes() {
-            if *by != 0 {
-                return false;
-            }
-        }
-        true
-    }
-
-    pub fn from_slice(r: &[u8]) -> Result<TorrentID, failure::Error> {
-        if r.len() != TORRENT_ID_LENGTH {
-            return Err(failure::format_err!(
-                "slice length is {}, must be {}",
-                r.len(),
-                TORRENT_ID_LENGTH
-            ));
-        }
-        let mut out = Self::zero();
-        out.as_mut_bytes().copy_from_slice(r);
-        Ok(out)
-    }
-
-    pub fn generate_peer_id_seeded(random: &str) -> TorrentID {
-        let mut hasher = Sha1::new();
-        hasher.input(random.as_bytes());
-        let hash_result = hasher.result();
-
-        let mut data = [0; TORRENT_ID_LENGTH];
-        data.copy_from_slice(&hash_result[..]);
-        copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
-        TorrentID(data)
-    }
-
-    pub fn generate_peer_id_rng(r: &mut dyn RngCore) -> TorrentID {
-        let mut data = [0; TORRENT_ID_LENGTH];
-        let rest =
-            copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
-        r.fill_bytes(rest);
-        TorrentID(data)
-    }
-
-    pub fn count_ones(&self) -> u32 {
-        let mut acc = 0;
-        for b in self.as_bytes() {
-            acc += b.count_ones();
-        }
-        acc
-    }
-
-    pub fn leading_zeros(&self) -> u32 {
-        let mut acc = 0;
-        for b in self.as_bytes() {
-            let lz = b.leading_zeros();
-            acc += lz;
-
-            if lz != 8 {
-                break;
-            }
-        }
-        acc
-    }
+    let mut data = [0; TORRENT_ID_LENGTH];
+    data.copy_from_slice(&hash_result[..]);
+    copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
+    TorrentId::from_slice(&data[..]).unwrap()
 }
+
+pub fn generate_peer_id_rng(r: &mut dyn RngCore) -> TorrentId {
+    let mut data = [0; TORRENT_ID_LENGTH];
+    let rest = copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);
+    r.fill_bytes(rest);
+    TorrentId::from_slice(&data[..]).unwrap()
+}
+
+// --
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentMeta {
@@ -452,8 +334,8 @@ mod bt_pathbuf {
 pub struct TorrentMetaWrapped {
     pub meta: TorrentMeta,
     pub total_length: u64,
-    pub info_hash: TorrentID,
-    pub piece_shas: Vec<TorrentID>,
+    pub info_hash: TorrentId,
+    pub piece_shas: Vec<TorrentId>,
 }
 
 impl TorrentMetaWrapped {
@@ -467,7 +349,7 @@ impl TorrentMetaWrapped {
             let info = bencode::to_bytes(d.get(&b"info"[..]).unwrap())?;
             hasher.input(&info[..]);
             let hash_result = hasher.result();
-            info_hash = TorrentID::from_slice(&hash_result[..])?;
+            info_hash = TorrentId::from_slice(&hash_result[..])?;
         } else {
             return Err(failure::format_err!("invalid torrent: missing info"));
         }
@@ -479,7 +361,7 @@ impl TorrentMetaWrapped {
 
         let mut piece_shas = Vec::new();
         for c in meta.info.pieces.chunks(20) {
-            let mut tid = TorrentID::zero();
+            let mut tid = TorrentId::zero();
             tid.as_mut_bytes().copy_from_slice(c);
             piece_shas.push(tid);
         }

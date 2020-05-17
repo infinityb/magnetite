@@ -5,6 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use magnetite_common::TorrentId;
+
 use crate::model::TorrentMetaWrapped;
 use crate::storage::PieceStorageEngineDumb;
 
@@ -14,7 +16,6 @@ pub use self::errors::{
     FilesystemIntegrityError, InvalidPath, InvalidRootInode, IsADirectory, NoEntityExists,
     NotADirectory,
 };
-use crate::model::TorrentID;
 use crate::storage::state_wrapper;
 
 #[derive(Clone, Debug)]
@@ -39,7 +40,7 @@ pub struct DirectoryChild {
 #[derive(Debug, Clone)]
 pub struct FileData {
     // length is in FileEntry#size
-    pub content_key: TorrentID,
+    pub content_key: TorrentId,
     pub torrent_global_offset: u64,
 }
 
@@ -84,7 +85,7 @@ impl Vfs {
         self: &mut Vfs,
         parent: u64,
         name: T,
-        _owner: TorrentID,
+        _owner: TorrentId,
     ) -> Result<u64, failure::Error>
     where
         T: AsRef<OsStr>,
@@ -202,7 +203,7 @@ pub struct FilesystemImplMutable<P> {
     // counter drops to 0, that file shall be deallocated.
     pub storage_backend: P,
     pub content_info: state_wrapper::ContentInfoManager,
-    // info_hash_damage: BTreeSet<(TorrentID, u64)>,
+    // info_hash_damage: BTreeSet<(TorrentId, u64)>,
     pub vfs: Vfs,
 }
 

@@ -12,8 +12,10 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use magnetite_common::TorrentId;
+
 use super::{GetPieceRequest, PieceStorageEngineDumb};
-use crate::model::{InternalError, MagnetiteError, ProtocolViolation, TorrentID};
+use crate::model::{InternalError, MagnetiteError, ProtocolViolation};
 
 struct TorrentState {
     base_dir: PathBuf,
@@ -23,7 +25,7 @@ struct TorrentState {
 #[derive(Clone)]
 pub struct MultiFileStorageEngine {
     open_files_lru: Arc<Mutex<lru::LruCache<PathKey, Arc<Mutex<TokioFile>>>>>,
-    torrents: Arc<Mutex<BTreeMap<TorrentID, Arc<TorrentState>>>>,
+    torrents: Arc<Mutex<BTreeMap<TorrentId, Arc<TorrentState>>>>,
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -32,7 +34,7 @@ struct PathKey {
 }
 
 pub struct Builder {
-    torrents: BTreeMap<TorrentID, Arc<TorrentState>>,
+    torrents: BTreeMap<TorrentId, Arc<TorrentState>>,
 }
 
 pub struct Registration {
@@ -46,7 +48,7 @@ pub struct FileInfo {
 }
 
 impl Builder {
-    pub fn register_info_hash(&mut self, content_key: &TorrentID, reg: Registration) {
+    pub fn register_info_hash(&mut self, content_key: &TorrentId, reg: Registration) {
         let mut piece_file_paths = BTreeMap::new();
         let mut acc = 0;
         for file in reg.files {

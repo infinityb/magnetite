@@ -3,15 +3,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use magnetite_common::TorrentId;
+
 use crate::model::proto::Handshake;
-use crate::model::{BitField, TorrentID, TorrentMetaWrapped};
+use crate::model::{BitField, TorrentMetaWrapped};
 
 pub struct TrackerGroup {
     //
 }
 
 pub struct Torrent {
-    pub id: TorrentID,
+    pub id: TorrentId,
     pub name: String,
     pub meta: Arc<TorrentMetaWrapped>,
     pub have_bitfield: BitField,
@@ -21,7 +23,7 @@ pub struct Torrent {
 #[derive(Default)]
 pub struct GlobalState {
     pub session_id_seq: u64,
-    pub torrents: HashMap<TorrentID, Torrent>,
+    pub torrents: HashMap<TorrentId, Torrent>,
     pub sessions: HashMap<u64, Session>,
     pub global_stats: Stats,
 }
@@ -42,7 +44,7 @@ pub struct Session {
     pub id: u64,
     pub addr: SocketAddr,
     pub handshake: Handshake,
-    pub target: TorrentID,
+    pub target: TorrentId,
     // Arc<TorrentMetaWrapped>,
     pub state: PeerState,
     // storage_engine: PieceFileStorageEngine,

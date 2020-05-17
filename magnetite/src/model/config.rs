@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use tracing::{event, Level};
 
-use crate::model::{FileError, InternalError, TorrentID, TorrentMetaWrapped};
+use magnetite_common::TorrentId;
+
+use crate::model::{FileError, InternalError, TorrentMetaWrapped};
 use crate::storage::state_wrapper::ContentInfoManager;
 use crate::storage::{
     disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, multi_file, piece_file,
@@ -174,7 +176,7 @@ fn build_torrent_map(
     Ok(path_to_torrent)
 }
 
-pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentID) -> Option<XSalsa20> {
+pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentId) -> Option<XSalsa20> {
     if !crypto_secret.is_empty() {
         let mut nonce_data = [0; 24];
         nonce_data[4..].copy_from_slice(info_hash.as_bytes());
@@ -341,7 +343,7 @@ fn build_storage_engine_dumb_helper(
 
                 let mut cache = DiskCacheWrapper::build_with_capacity_bytes(dc.cache_size);
 
-                let zero_iv = TorrentID::zero();
+                let zero_iv = TorrentId::zero();
                 if let Some(salsa) = get_torrent_salsa(&dc.secret, &zero_iv) {
                     cache.set_crypto(salsa);
                 }

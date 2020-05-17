@@ -11,8 +11,10 @@ use metrics::{counter, gauge};
 use tokio::sync::{watch, Mutex};
 use tracing::{event, Level};
 
+use magnetite_common::TorrentId;
+
 use super::piggyback::Inflight;
-use crate::model::{MagnetiteError, TorrentID};
+use crate::model::MagnetiteError;
 use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
 
 #[derive(Clone)]
@@ -33,7 +35,7 @@ struct MemoryPieceCacheInfo {
     fetched_bytes: u64,
     fetched_upstream_bytes: u64,
     next_cache_report_print: Instant,
-    pieces: LruCache<(TorrentID, u32), PieceCacheEntry>,
+    pieces: LruCache<(TorrentId, u32), PieceCacheEntry>,
 }
 
 #[derive(Clone)]
@@ -209,8 +211,8 @@ mod tests {
 
     #[test]
     fn eviction_test() {
-        use crate::model::TorrentID;
         use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
+        use magnetite_common::TorrentId;
         use tokio::runtime::Runtime;
 
         // use tracing_subscriber::filter::LevelFilter;
@@ -230,8 +232,8 @@ mod tests {
 
         for i in 0..17 {
             let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
-                content_key: TorrentID::zero(),
-                piece_sha: TorrentID::zero(),
+                content_key: TorrentId::zero(),
+                piece_sha: TorrentId::zero(),
                 piece_length: 16 * 1024,
                 total_length: 0,
                 piece_index: i,
@@ -242,8 +244,8 @@ mod tests {
 
         // try index 0 again, should hit mock
         let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
-            content_key: TorrentID::zero(),
-            piece_sha: TorrentID::zero(),
+            content_key: TorrentId::zero(),
+            piece_sha: TorrentId::zero(),
             piece_length: 16 * 1024,
             total_length: 0,
             piece_index: 0,
@@ -256,8 +258,8 @@ mod tests {
 
     #[test]
     fn positive_cache_test() {
-        use crate::model::TorrentID;
         use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
+        use magnetite_common::TorrentId;
         use tokio::runtime::Runtime;
 
         // use tracing_subscriber::filter::LevelFilter;
@@ -279,8 +281,8 @@ mod tests {
         // but this is okay for now.
         for i in 0..15 {
             let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
-                content_key: TorrentID::zero(),
-                piece_sha: TorrentID::zero(),
+                content_key: TorrentId::zero(),
+                piece_sha: TorrentId::zero(),
                 piece_length: 16 * 1024,
                 total_length: 0,
                 piece_index: i,
@@ -290,8 +292,8 @@ mod tests {
         }
         for i in 0..15 {
             let res = rt.block_on(storage_engine.get_piece_dumb(&GetPieceRequest {
-                content_key: TorrentID::zero(),
-                piece_sha: TorrentID::zero(),
+                content_key: TorrentId::zero(),
+                piece_sha: TorrentId::zero(),
                 piece_length: 16 * 1024,
                 total_length: 0,
                 piece_index: i,

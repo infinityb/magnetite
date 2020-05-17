@@ -20,13 +20,15 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use magnetite_common::TorrentId;
+
 use crate::bittorrent::peer_state::{
     merge_global_payload_stats, GlobalState, PeerState, Session, Stats,
 };
 use crate::model::config::{build_storage_engine, Config, Frontend, FrontendSeed};
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
-use crate::model::{BadHandshake, BitField, ProtocolViolation, TorrentID, Truncated};
+use crate::model::{generate_peer_id_seeded, BadHandshake, BitField, ProtocolViolation, Truncated};
 use crate::storage::PieceStorageEngine;
 use crate::utils::BytesCow;
 use crate::CARGO_PKG_VERSION;
@@ -63,7 +65,7 @@ fn pop_messages_into(
 }
 
 async fn collect_pieces(
-    content_key: &TorrentID,
+    content_key: &TorrentId,
     requests: &[PieceSlice],
     pse: &(dyn PieceStorageEngine + Sync + Sync + 'static),
 ) -> Result<Vec<Message<'static>>, MagnetiteError> {
@@ -91,7 +93,7 @@ async fn collect_pieces(
 }
 
 async fn send_pieces(
-    content_key: &TorrentID,
+    content_key: &TorrentId,
     persist_buf: &mut [u8],
     addr: SocketAddr,
     w: &mut ::tokio::net::tcp::WriteHalf<'_>,
@@ -115,28 +117,28 @@ async fn send_pieces(
 }
 
 // struct ConnectHandlerState {
-//     self_peer_id: TorrentID,
-//     acceptable_peers: Arc<Mutex<BTreeSet<TorrentID>>>,
+//     self_peer_id: TorrentId,
+//     acceptable_peers: Arc<Mutex<BTreeSet<TorrentId>>>,
 
 // }
 
 struct TorrentDownloadStateManager {
-    torrents: HashMap<TorrentID, TorrentDownloadState>,
+    torrents: HashMap<TorrentId, TorrentDownloadState>,
 }
 
 struct TorrentDownloadState {
     // disallow peers that have not been provided to us by the tracker at some point,
     // perhaps useful in the case of private trackers?
     allow_unknown_peers: bool,
-    known_peer_ids: HashMap<IpAddr, Option<TorrentID>>,
+    known_peer_ids: HashMap<IpAddr, Option<TorrentId>>,
 }
 
 impl TorrentDownloadStateManager {
     fn accept_peer(
         &self,
         socket_addr: &IpAddr,
-        peer_id: &TorrentID,
-        info_hash: &TorrentID,
+        peer_id: &TorrentId,
+        info_hash: &TorrentId,
     ) -> bool {
         if let Some(ds) = self.torrents.get(info_hash) {
             match ds.known_peer_ids.get(socket_addr) {
@@ -154,8 +156,8 @@ async fn start_connection(
     ts: &TorrentDownloadStateManager,
     socket: &mut TcpStream,
     rbuf: &mut BytesMut,
-    self_pid: &TorrentID,
-    outgoing: Option<&TorrentID>,
+    self_pid: &TorrentId,
+    outgoing: Option<&TorrentId>,
 ) -> Result<Handshake, MagnetiteError> {
     let remote_handshake;
     let mut hs_buf = [0; HANDSHAKE_SIZE];
@@ -309,11 +311,11 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     cfg_fi.read_to_end(&mut cfg_by).unwrap();
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
-    let peer_id = TorrentID::generate_peer_id_seeded(&config.client_secret);
+    let peer_id = generate_peer_id_seeded(&config.client_secret);
     let mut rt = Runtime::new()?;
     let storage_engine = build_storage_engine(&mut rt, &config).unwrap();
 
-    let torrent_stats: Arc<Mutex<HashMap<TorrentID, Arc<Mutex<Stats>>>>> = Default::default();
+    let torrent_stats: Arc<Mutex<HashMap<TorrentId, Arc<Mutex<Stats>>>>> = Default::default();
     let gs: Arc<Mutex<GlobalState>> = Default::default();
 
     let mut futures = Vec::new();
@@ -372,9 +374,9 @@ async fn start_server<S>(
     mut socket: TcpStream,
     storage_engine: S,
     addr: SocketAddr,
-    torrent_stats: Arc<Mutex<HashMap<TorrentID, Arc<Mutex<Stats>>>>>,
+    torrent_stats: Arc<Mutex<HashMap<TorrentId, Arc<Mutex<Stats>>>>>,
     gs: Arc<Mutex<GlobalState>>,
-    peer_id: TorrentID,
+    peer_id: TorrentId,
 ) -> Result<(), MagnetiteError>
 where
     S: PieceStorageEngine + Sync + Send + 'static,

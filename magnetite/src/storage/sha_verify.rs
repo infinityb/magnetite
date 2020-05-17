@@ -8,8 +8,10 @@ use sha1::{Digest, Sha1};
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
+use magnetite_common::TorrentId;
+
 use super::{GetPieceRequest, PieceStorageEngineDumb};
-use crate::model::{BitField, MagnetiteError, StorageEngineCorruption, TorrentID};
+use crate::model::{BitField, MagnetiteError, StorageEngineCorruption};
 
 #[derive(Debug)]
 pub enum ShaVerifyState {
@@ -29,7 +31,7 @@ pub enum ShaVerifyMode {
 pub struct ShaVerify<S: PieceStorageEngineDumb> {
     upstream: S,
     mode: ShaVerifyMode,
-    state: Arc<Mutex<BTreeMap<TorrentID, BitField>>>,
+    state: Arc<Mutex<BTreeMap<TorrentId, BitField>>>,
 }
 
 impl<S> ShaVerify<S>
@@ -50,7 +52,7 @@ fn check_sha(req: &GetPieceRequest, data: &[u8]) -> Result<(), MagnetiteError> {
     hasher.input(data);
     let sha = hasher.result();
 
-    if sha[..] != req.piece_sha.0[..] {
+    if &sha[..] != req.piece_sha.as_bytes() {
         return Err(StorageEngineCorruption.into());
     }
 

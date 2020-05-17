@@ -2,8 +2,9 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::BytesMut;
 
 use iresult::IResult;
+use magnetite_common::TorrentId;
 
-use super::{BadHandshake, TorrentID};
+use super::BadHandshake;
 use crate::model::MagnetiteError;
 use crate::utils::BytesCow;
 
@@ -18,7 +19,7 @@ const RESERVED_SIZE: usize = 8;
 // the pstrlen and pstr bytes.
 const HANDSHAKE_PREFIX: &[u8] = b"\x13BitTorrent protocol";
 pub const HANDSHAKE_SIZE: usize =
-    HANDSHAKE_PREFIX.len() + RESERVED_SIZE + TorrentID::LENGTH + TorrentID::LENGTH;
+    HANDSHAKE_PREFIX.len() + RESERVED_SIZE + TorrentId::LENGTH + TorrentId::LENGTH;
 
 #[inline]
 fn too_short() -> MagnetiteError {
@@ -272,23 +273,23 @@ pub fn serialize<'a>(scratch: &'a mut [u8], msg: &Message) -> Result<&'a [u8], M
 #[derive(Debug)]
 pub struct Handshake {
     pub reserved: [u8; RESERVED_SIZE],
-    pub info_hash: TorrentID,
-    pub peer_id: TorrentID,
+    pub info_hash: TorrentId,
+    pub peer_id: TorrentId,
 }
 
 impl Handshake {
     fn zero() -> Handshake {
         Handshake {
             reserved: [0; RESERVED_SIZE],
-            info_hash: TorrentID::zero(),
-            peer_id: TorrentID::zero(),
+            info_hash: TorrentId::zero(),
+            peer_id: TorrentId::zero(),
         }
     }
 
     pub fn serialize_bytes<'a>(
         scratch: &'a mut [u8],
-        info_hash: &TorrentID,
-        peer_id: &TorrentID,
+        info_hash: &TorrentId,
+        peer_id: &TorrentId,
         _options: &[()],
     ) -> Option<&'a [u8]> {
         let mut _reserve_bytes = 0;
@@ -347,8 +348,8 @@ impl Handshake {
         }
 
         let (reserve_buf, rest) = rest.split_at(RESERVED_SIZE);
-        let (info_hash_buf, rest) = rest.split_at(TorrentID::LENGTH);
-        let (peer_id_buf, _) = rest.split_at(TorrentID::LENGTH);
+        let (info_hash_buf, rest) = rest.split_at(TorrentId::LENGTH);
+        let (peer_id_buf, _) = rest.split_at(TorrentId::LENGTH);
 
         let mut hs = Handshake::zero();
         for (o, i) in hs.reserved.iter_mut().zip(reserve_buf) {

@@ -261,7 +261,9 @@ pub enum ErrorData {
     Custom(String),
     Truncated,
     AntiTruncated,
+    MissingField { field_name: &'static str },
     ExpectedString { got: String },
+    ExpectedBytes { got: String },
 }
 
 impl serde::ser::Error for Error {
@@ -303,8 +305,13 @@ impl Error {
         }
     }
 
-    fn expected_bytes() -> Error {
-        panic!("{}:{}", file!(), line!());
+    fn expected_bytes(tz: &Tokenizer, node: &Node) -> Error {
+        Error {
+            offset: tz.total_offset,
+            data: ErrorData::ExpectedBytes {
+                got: format!("{:?}", node),
+            },
+        }
     }
 
     fn truncated(tz: &Tokenizer) -> Error {
@@ -362,6 +369,15 @@ impl StdError for Error {
 }
 
 impl de::Error for Error {
+    fn missing_field(field_name: &'static str) -> Self {
+        Error {
+            offset: u64::max_value(),
+            data: ErrorData::MissingField {
+                field_name: field_name,
+            },
+        }
+    }
+
     fn custom<T>(msg: T) -> Self
     where
         T: Display,
@@ -457,17 +473,11 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             }
             Node::Bytes(Cow::Borrowed(bb)) => {
                 let _ = self.tokenizer.next(false);
-                match str::from_utf8(bb) {
-                    Ok(ss) => visitor.visit_borrowed_str(ss),
-                    Err(..) => visitor.visit_borrowed_bytes(bb),
-                }
+                visitor.visit_borrowed_bytes(bb)
             }
             Node::Bytes(Cow::Owned(bb)) => {
                 let _ = self.tokenizer.next(false);
-                match String::from_utf8(bb) {
-                    Ok(ss) => visitor.visit_string(ss),
-                    Err(err) => visitor.visit_byte_buf(err.into_bytes()),
-                }
+                visitor.visit_byte_buf(bb)
             }
         }
     }
@@ -617,6 +627,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 T: de::DeserializeSeed<'de>,
             {
                 let res = self.de.tokenizer.next(true);
+                println!("SeqVisitor//next_element_seed={:?}", res);
                 match into_result(res, &self.de.tokenizer)? {
                     Node::ContainerEnd => Ok(None),
                     _ => seed.deserialize(&mut *self.de).map(Some),
@@ -773,10 +784,11 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         let res = self.tokenizer.next(false);
-        if let Node::Bytes(ref by) = into_result(res, &self.tokenizer)? {
+        let node = into_result(res, &self.tokenizer)?;
+        if let Node::Bytes(ref by) = node {
             visitor.visit_bytes(&by[..])
         } else {
-            Err(Error::expected_bytes())
+            Err(Error::expected_bytes(&self.tokenizer, &node))
         }
     }
 

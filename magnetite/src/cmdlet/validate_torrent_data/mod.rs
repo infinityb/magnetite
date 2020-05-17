@@ -7,7 +7,9 @@ use sha1::{Digest, Sha1};
 use tokio::runtime::Runtime;
 use tracing::{event, Level};
 
-use crate::model::{StorageEngineCorruption, TorrentID, TorrentMetaWrapped};
+use magnetite_common::TorrentId;
+
+use crate::model::{StorageEngineCorruption, TorrentMetaWrapped};
 use crate::storage::{multi_file, GetPieceRequest, PieceStorageEngineDumb};
 use crate::CARGO_PKG_VERSION;
 
@@ -81,7 +83,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let mut hasher = Sha1::new();
         hasher.input(&piece[..]);
         let sha = hasher.result();
-        let mut sha_outcome = TorrentID::zero();
+        let mut sha_outcome = TorrentId::zero();
         sha_outcome.as_mut_bytes().copy_from_slice(&sha[..]);
 
         let piece_is_valid = ps == &sha_outcome;
