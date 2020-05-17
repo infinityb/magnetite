@@ -7,8 +7,8 @@ use sha1::{Digest, Sha1};
 
 use magnetite_common::TorrentId;
 
-use crate::CARGO_PKG_VERSION;
 use crate::model::TorrentMeta;
+use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
 

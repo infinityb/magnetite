@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn eviction_test() {
         use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
-        use tokio::runtime::Runtime;
         use magnetite_common::TorrentId;
+        use tokio::runtime::Runtime;
 
         // use tracing_subscriber::filter::LevelFilter;
         // use tracing_subscriber::FmtSubscriber;
@@ -259,8 +259,8 @@ mod tests {
     #[test]
     fn positive_cache_test() {
         use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
-        use tokio::runtime::Runtime;
         use magnetite_common::TorrentId;
+        use tokio::runtime::Runtime;
 
         // use tracing_subscriber::filter::LevelFilter;
         // use tracing_subscriber::FmtSubscriber;

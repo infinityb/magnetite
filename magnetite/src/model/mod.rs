@@ -221,7 +221,6 @@ pub fn generate_peer_id_seeded(random: &str) -> TorrentId {
     TorrentId::from_slice(&data[..]).unwrap()
 }
 
-
 pub fn generate_peer_id_rng(r: &mut dyn RngCore) -> TorrentId {
     let mut data = [0; TORRENT_ID_LENGTH];
     let rest = copy_from_byte_vec_nofill(&mut data, &[b"YM-", CARGO_PKG_VERSION.as_bytes(), b"-"]);

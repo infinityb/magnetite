@@ -296,7 +296,6 @@ fn resolve_response(
     Ok(())
 }
 
-
 async fn run_connected(
     mut socket: TcpStream,
     incoming_request_queue: &mut mpsc::Receiver<MagnetiteRequest>,
