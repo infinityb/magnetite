@@ -1,3 +1,5 @@
+use std::str;
+
 use serde::ser::{self, Serialize};
 
 use crate::{Error, ErrorData, Result};
@@ -41,6 +43,11 @@ impl<'a> ser::Serializer for &'a mut StringSerializer {
     fn serialize_str(self, v: &str) -> Result<()> {
         self.key = Some(v.to_string());
         Ok(())
+    }
+
+    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        let s = str::from_utf8(v).map_err(|_e| unexpected_type("bytes"))?;
+        self.serialize_str(s)
     }
 
     fn is_human_readable(&self) -> bool {
@@ -93,10 +100,6 @@ impl<'a> ser::Serializer for &'a mut StringSerializer {
 
     fn serialize_char(self, _v: char) -> Result<()> {
         Err(unexpected_type("char"))
-    }
-
-    fn serialize_bytes(self, _v: &[u8]) -> Result<()> {
-        Err(unexpected_type("bytes"))
     }
 
     fn serialize_none(self) -> Result<()> {
