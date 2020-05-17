@@ -1,6 +1,7 @@
 use std::fmt;
 
 mod bytes_cow;
+pub mod close_waiter;
 #[cfg(target_os = "linux")]
 mod owned_fd;
 
