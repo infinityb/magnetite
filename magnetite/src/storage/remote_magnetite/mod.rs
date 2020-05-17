@@ -296,6 +296,7 @@ fn resolve_response(
     Ok(())
 }
 
+
 async fn run_connected(
     mut socket: TcpStream,
     incoming_request_queue: &mut mpsc::Receiver<MagnetiteRequest>,
@@ -315,8 +316,9 @@ async fn run_connected(
     //
     let mut split_request_queue: VecDeque<PendingRequest> = VecDeque::new();
     let mut request_queue_open = true;
+    let mut connection_open = true;
 
-    loop {
+    while connection_open {
         if let Some(average) = latency.average() {
             if average < LATENCY_TARGET_MIN_MILLISECONDS {
                 let prev_window_size = current_window_size;
@@ -401,6 +403,7 @@ async fn run_connected(
             }
 
             if is_eof {
+                connection_open = false;
                 break;
             }
         }
@@ -408,11 +411,6 @@ async fn run_connected(
         if !request_queue_open && inflight.is_empty() && split_request_queue.is_empty() {
             break;
         }
-
-        // event!(Level::ERROR, "request_queue_open={:?} inflight.len()={:?} split_request_queue.len()={:?}",
-        //     request_queue_open,
-        //     inflight.len(),
-        //     split_request_queue.len());
 
         if request_queue_open || !inflight.is_empty() {
             ::tokio::select! {
@@ -430,43 +428,15 @@ async fn run_connected(
                     }
                 },
                 read_res = socket.read_buf(&mut rbuf), if !inflight.is_empty() => {
-                    read_res?;
+                    if read_res? == 0 {
+                        connection_open = false;
+                    }
                     while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
                         resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
                     }
                 }
             }
         }
-
-        // match (!inflight.is_empty(), request_queue_open) {
-        //     (false, false) => {
-        //         // nothing to read, nothing to queue, and can't get more work.  We've exhausted
-        //         // all of the work we'll ever get.  Iteration stops.
-        //         if split_request_queue.len() == 0 {
-        //             return Ok(());
-        //         }
-        //     }
-        //     (false, true) => {
-        //         // nothing to read (we don't have any requests out), can get more work.
-        //         if let Some(v) = incoming_request_queue.recv().await {
-        //             let MagnetiteRequest::Piece { gp, responder } = v;
-        //             let ps = PieceState::new(gp.piece_length, responder);
-        //             let pf = PiecePendingRequestFactory::new(piece_state.insert(ps), &gp);
-        //             split_request_queue.extend(pf);
-        //         } else {
-        //             request_queue_open = false;
-        //         }
-        //     }
-        //     (true, false) => {
-        //         // something to read, can't get new work.
-        //         socket.read_buf(&mut rbuf).await?;
-        //         while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
-        //             resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
-        //         }
-        //     }
-        //    (true, true) => {
-        //    }
-        // }
     }
 
     Ok(request_queue_open)
