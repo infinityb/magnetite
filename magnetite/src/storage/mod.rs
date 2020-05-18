@@ -1,8 +1,9 @@
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use magnetite_common::TorrentId;
 
@@ -12,6 +13,7 @@ pub mod multi_file;
 pub mod piece_file;
 pub mod piggyback;
 pub mod remote_magnetite;
+pub mod root_storage_service;
 pub mod sha_verify;
 pub mod state_wrapper;
 
@@ -25,7 +27,7 @@ pub use self::piece_file::PieceFileStorageEngine;
 pub use self::sha_verify::{ShaVerify, ShaVerifyMode};
 pub use self::state_wrapper::StateWrapper;
 
-use crate::model::MagnetiteError;
+use crate::model::{MagnetiteError, TorrentMeta};
 use crate::storage::state_wrapper::{ContentInfo, ContentInfoManager};
 
 #[derive(Copy, Clone, Debug)]
@@ -35,6 +37,12 @@ pub struct GetPieceRequest {
     pub piece_length: u32,
     pub total_length: u64,
     pub piece_index: u32,
+}
+
+#[derive(Debug)]
+pub struct GetPieceRequestResolver {
+    pub request: GetPieceRequest,
+    pub resolver: oneshot::Sender<Result<Bytes, MagnetiteError>>,
 }
 
 pub trait PieceStorageEngine {
@@ -245,4 +253,30 @@ where
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         PieceStorageEngineDumb::get_piece_dumb(&**self, req)
     }
+}
+
+// --
+
+pub struct AddTorrentRequest {
+    info_hash: TorrentId,
+    torrent_data: TorrentMeta,
+    source: TorrentDataSource,
+}
+
+pub enum TorrentDataSource {
+    PieceFile(TorrentDataSourcePieceFile),
+    MultiFile(TorrentDataSourceMultiFile),
+    Remote(TorrentDataSourceRemote),
+}
+
+pub struct TorrentDataSourcePieceFile {
+    file_path: PathBuf,
+}
+
+pub struct TorrentDataSourceMultiFile {
+    base_path: PathBuf,
+}
+
+pub struct TorrentDataSourceRemote {
+    // holder: Arc<Holder>,
 }

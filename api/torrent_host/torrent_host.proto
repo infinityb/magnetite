@@ -3,17 +3,41 @@ syntax = "proto3";
 package magnetite.api.torrent_host;
 
 message AddTorrentRequest {
-	bytes info_data = 1;
-	bytes crypto_key = 2;
-	bytes source_tome = 3;
+    bytes info_data = 1;
+    bytes crypto_key = 2;
+    TorrentSource source = 3;
+}
+
+message TorrentSource {
+    oneof selector {
+        TorrentSourceMultiFile multifile = 1;
+
+        TorrentSourceTome tome = 128;
+
+        TorrentSourceRemoteMagnetite remote = 129;
+  }
+}
+
+message TorrentSourceMultiFile {
+    string base_path = 1;
+}
+
+message TorrentSourceTome {
+    string file_path = 1;
+}
+
+// can't specify multiple upstreams now - just registers the torrent, so no
+// fields are included.
+message TorrentSourceRemoteMagnetite {
+
 }
 
 message AddTorrentResponse {
-	bytes info_hash = 1;
+    bytes info_hash = 1;
 }
 
 message RemoveTorrentRequest {
-	bytes info_hash = 1;
+    bytes info_hash = 1;
 }
 
 message RemoveTorrentResponse {
@@ -23,19 +47,19 @@ message ListTorrentsRequest {
 }
 
 message ListTorrentsResponse {
-	repeated TorrentEntry entries = 1;
+    repeated TorrentEntry entries = 1;
 }
 
 message TorrentEntry {
-	bytes info_hash = 1;
-	string name = 2;
-	uint64 size_bytes = 3;
+    bytes info_hash = 1;
+    string name = 2;
+    uint64 size_bytes = 3;
 }
 
 service TorrentHost {
-	rpc AddTorrent(AddTorrentRequest) returns (AddTorrentResponse) {}
+    rpc AddTorrent(AddTorrentRequest) returns (AddTorrentResponse) {}
 
-	rpc RemoveTorrent(RemoveTorrentRequest) returns (RemoveTorrentResponse) {}
+    rpc RemoveTorrent(RemoveTorrentRequest) returns (RemoveTorrentResponse) {}
 
-	rpc ListTorrents(ListTorrentsRequest) returns (ListTorrentsResponse) {}
+    rpc ListTorrents(ListTorrentsRequest) returns (ListTorrentsResponse) {}
 }
