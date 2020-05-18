@@ -1,18 +1,25 @@
-use std::collections::BTreeMap;
-use std::mem;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::net::SocketAddr;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
-use smallvec::SmallVec:
-use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use magnetite_common::TorrentId;
+
+mod wire;
 
 // Please make this a power of two, since Vec::with_capacity aligns to
 // powers of two anyway.  We're paying the cost of the memory anyway.
 const BUCKET_SIZE: usize = 32;
-const MAX_UNRESPONDED_QUERIES: u32 = 5;
+
+const MAX_UNRESPONDED_QUERIES: i32 = 5;
+
 const QUESTIONABLE_THRESH: Duration = Duration::from_secs(15 * 60);
+
+// This prevents bucket prefix length overflows, which would lead to an attempt
+// at out-of-bounds array access, panicking.  80 was picked arbitrarily.
+const MAX_BUCKET_PREFIX_LENGTH: u32 = 80;
 
 #[derive(Copy, Clone)]
 enum AddressFamily {
@@ -23,6 +30,9 @@ enum AddressFamily {
 struct Node {
     peer_id: TorrentId,
     peer_addr: SocketAddr,
+
+    // time of last correct reply received
+    last_message_time: Instant,
     // time of last correct reply received
     last_correct_reply_time: Instant,
     // time of last request
@@ -38,33 +48,61 @@ enum NodeQuality {
     Bad,
 }
 
+impl NodeQuality {
+    pub fn is_good(&self) -> bool {
+        match *self {
+            NodeQuality::Good => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_questionable(&self) -> bool {
+        match *self {
+            NodeQuality::Questionable => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_bad(&self) -> bool {
+        match *self {
+            NodeQuality::Bad => true,
+            _ => false,
+        }
+    }
+}
+
+struct NodeEnvironment {
+    now: Instant,
+}
+
 impl Node {
-    fn new(base_instant: Instant, peer_id: TorrentId, peer_addr: SocketAddr) -> Node {
+    fn new(peer_id: TorrentId, peer_addr: SocketAddr, env: &NodeEnvironment) -> Node {
         Node {
             peer_id,
             peer_addr,
-            last_correct_reply_time: base_instant,
-            last_ping_sent_time: base_instant,
+            last_message_time: env.now,
+            last_correct_reply_time: env.now,
+            last_request_sent_time: env.now,
             pinged: 0,
         }
     }
 
-    fn with_confirm(mut self, confirm: ConfirmLevel) -> Node {
-        self.confirm(confirm);
+    fn with_confirm(mut self, confirm: ConfirmLevel, env: &NodeEnvironment) -> Node {
+        self.confirm(confirm, env);
         self
     }
 
-    fn confirm(&mut self, when: Instant, confirm: ConfirmLevel) {
+    fn confirm(&mut self, confirm: ConfirmLevel, env: &NodeEnvironment) {
         if !confirm.is_empty() {
-            self.last_correct_reply_time = when;
+            self.last_message_time = env.now;
         }
         if confirm.is_responding() {
-            self.last_correct_reply_time = when;
+            self.last_correct_reply_time = env.now;
         }
     }
 
-    fn quality(&self, when: Instant) -> NodeQuality {
-        if (when - self.last_correct_reply_time) < QUESTIONABLE_THRESH {
+    fn quality(&self, env: &NodeEnvironment) -> NodeQuality {
+        if (env.now - self.last_correct_reply_time) < QUESTIONABLE_THRESH {
             return NodeQuality::Good;
         }
         if MAX_UNRESPONDED_QUERIES <= self.pinged {
@@ -73,8 +111,8 @@ impl Node {
         NodeQuality::Questionable
     }
 
-    fn bump_activity(&mut self, when: Instant) -> {
-        self.last_correct_reply_time = when;
+    fn bump_activity(&mut self, env: &NodeEnvironment) {
+        self.last_correct_reply_time = env.now;
     }
 
     fn bump_failure_count(&mut self) {
@@ -87,25 +125,148 @@ struct BucketManager {
     buckets: BTreeMap<TorrentId, Bucket>,
 }
 
+impl BucketManager {
+    /// may panic if limit is 0.
+    fn find_close_nodes(
+        &self,
+        target: &TorrentId,
+        limit: usize,
+        env: &NodeEnvironment,
+    ) -> Vec<&Node> {
+        // chooseing an inefficient but obviously correct implemenation for now.
 
+        struct HeapEntry<'a> {
+            dist_key: TorrentId,
+            node: &'a Node,
+        }
+
+        impl<'a> Eq for HeapEntry<'a> {}
+
+        impl<'a> Ord for HeapEntry<'a> {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.dist_key.cmp(&other.dist_key)
+            }
+        }
+
+        impl<'a> PartialOrd for HeapEntry<'a> {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl<'a> PartialEq for HeapEntry<'a> {
+            fn eq(&self, other: &Self) -> bool {
+                self.dist_key == other.dist_key
+            }
+        }
+
+        let mut heap = BinaryHeap::with_capacity(limit);
+
+        for b in self.buckets.values() {
+            for n in &b.nodes {
+                if !n.quality(env).is_good() {
+                    continue;
+                }
+
+                let entry = HeapEntry {
+                    dist_key: n.peer_id ^ *target,
+                    node: n,
+                };
+                if limit <= heap.len() {
+                    heap.push(entry);
+                } else {
+                    // current entry is better than the worst node, in our heap
+                    // replace the worst node with this new better node.
+                    if entry.dist_key < heap.peek().unwrap().dist_key {
+                        heap.pop().unwrap();
+                        heap.push(entry);
+                    }
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(heap.len());
+        for entry in heap.drain() {
+            out.push(entry.node);
+        }
+        out
+    }
+
+    fn find_bucket_mut_for_id<'man>(&'man mut self, id: &TorrentId) -> &'man mut Bucket {
+        let mut bucket_counter = 0;
+        let mut target_bucket = None;
+        for b in self.buckets.values_mut() {
+            if b.contains(id) {
+                bucket_counter += 1;
+                target_bucket = Some(b)
+            }
+        }
+
+        assert_eq!(bucket_counter, 1);
+        target_bucket.unwrap()
+    }
+
+    fn add_node(&mut self, node: Node, confirm: ConfirmLevel, env: &NodeEnvironment) {
+        let self_peer_id = self.self_peer_id;
+        let mut b = self.find_bucket_mut_for_id(&node.peer_id);
+
+        while b.contains(&self_peer_id)
+            && b.is_full()
+            && b.prefix.prefix_len < MAX_BUCKET_PREFIX_LENGTH
+        {
+            // home bucket full - let's split.
+            let new_bucket = b.split();
+            drop(b);
+            self.buckets.insert(new_bucket.prefix.base, new_bucket);
+            b = self.find_bucket_mut_for_id(&node.peer_id);
+        }
+
+        b.add_node(node, confirm, env)
+    }
+}
 
 struct Bucket {
     af: AddressFamily,
-    base: TorrentId,
-    prefix_len: u32,
+    prefix: TorrentIdPrefix,
 
     nodes: SmallVec<[Node; BUCKET_SIZE]>,
     last_touched_time: SystemTime,
     cached: (),
 }
 
+#[derive(Copy, Clone)]
+struct TorrentIdPrefix {
+    base: TorrentId,
+    prefix_len: u32,
+}
+
+impl TorrentIdPrefix {
+    fn contains(&self, id: &TorrentId) -> bool {
+        self.prefix_len <= (self.base ^ *id).leading_zeros()
+    }
+
+    fn split(&mut self) -> TorrentIdPrefix {
+        let (bytes, bits) = (self.prefix_len / 8, self.prefix_len % 8);
+        self.prefix_len += 1;
+
+        let mut new_base = self.base;
+        let slice = new_base.as_mut_bytes();
+        slice[bytes as usize] |= 0x80 >> bits;
+        TorrentIdPrefix {
+            base: new_base,
+            prefix_len: self.prefix_len,
+        }
+    }
+}
+
 impl Bucket {
     fn new(af: AddressFamily) -> Bucket {
         Bucket {
             af: af,
-            base: TorrentId::zero(),
-            prefix_len: 0,
-
+            prefix: TorrentIdPrefix {
+                base: TorrentId::zero(),
+                prefix_len: 0,
+            },
             nodes: Default::default(),
             last_touched_time: std::time::UNIX_EPOCH,
             cached: (),
@@ -113,7 +274,7 @@ impl Bucket {
     }
 
     fn contains(&self, id: &TorrentId) -> bool {
-        self.prefix_len <= (self.base ^ *id).leading_zeros()
+        self.prefix.contains(id)
     }
 
     fn touch(&mut self) {
@@ -125,63 +286,66 @@ impl Bucket {
         BUCKET_SIZE <= self.nodes.len()
     }
 
-    fn new_node(&mut self, id: TorrentId, ss: SocketAddr, confirm: ConfirmLevel) {
-        self.add_node(Node::new(id, ss), confirm)
+    fn new_node(
+        &mut self,
+        id: TorrentId,
+        ss: SocketAddr,
+        confirm: ConfirmLevel,
+        env: &NodeEnvironment,
+    ) {
+        self.add_node(Node::new(id, ss, env), confirm, env)
     }
 
-    fn add_node(&mut self, node: Node, confirm: ConfirmLevel) {
-        assert!(self.contains(&id));
-        
+    fn add_node(&mut self, node: Node, confirm: ConfirmLevel, env: &NodeEnvironment) {
+        assert!(self.contains(&node.peer_id));
+
         self.touch();
 
         if self.is_full() {
-            // find oldest bad node or drop.
+            let mut bad_node = None;
+            for n in self.nodes.iter_mut() {
+                if n.quality(env).is_bad() {
+                    bad_node = Some(n);
+                    break;
+                }
+            }
+            if let Some(n) = bad_node {
+                *n = node.with_confirm(confirm, env);
+            }
         } else {
-            self.nodes.push(node.with_confirm(confirm));
+            self.nodes.push(node.with_confirm(confirm, env));
         }
-        // let now = SystemTime::now();
-
-        // for n in self.nodes.as_mut_slice().iter_mut() {
-        //     if node.id == n.id {
-        //         if !confirm.is_empty() || n.time.sec < now.sec - 15 * 60 {
-        //             n.ss = node.ss;
-        //             n.confirm(confirm);
-        //         }
-        //     }
-        // }
     }
 
     fn split(&mut self) -> Bucket {
-        let mut new_bucket_nodes = Vec::new();
+        let mut self_new_prefix = self.prefix;
+        let other_prefix = self_new_prefix.split();
 
-        let new_base_id = split_torrent_id_top(&self.base, self.prefix_len);
-        self.prefix_len += 1;
+        let mut self_nodes: SmallVec<[Node; BUCKET_SIZE]> = Default::default();
+        let mut new_bucket_nodes: SmallVec<[Node; BUCKET_SIZE]> = Default::default();
 
-        for node in mem::replace(&mut self.nodes, Vec::with_capacity(BUCKET_SIZE)) {
-            if self.contains(&node.peer_id) {
-                self.nodes.push(node);
+        for node in self.nodes.drain(..) {
+            if self_new_prefix.contains(&node.peer_id) {
+                self_nodes.push(node);
             } else {
+                assert!(other_prefix.contains(&node.peer_id));
                 new_bucket_nodes.push(node);
             }
         }
 
+        self.prefix = self_new_prefix;
+        for node in self_nodes.drain(..) {
+            self.nodes.push(node);
+        }
+
         Bucket {
             af: self.af,
-            base: new_base_id,
-            prefix_len: self.prefix_len,
+            prefix: other_prefix,
             last_touched_time: self.last_touched_time,
             nodes: new_bucket_nodes,
             cached: (),
         }
     }
-}
-
-fn split_torrent_id_top(t: &TorrentId, old_prefix_len: u32) -> TorrentId {
-    let (bytes, bits) = (old_prefix_len / 8, old_prefix_len % 8);
-    let mut out = *t;
-    let slice = out.as_mut_bytes();
-    slice[bytes as usize] |= 0x80 >> bits;
-    out
 }
 
 #[derive(Clone, Copy)]
@@ -221,288 +385,38 @@ impl ConfirmLevel {
 //     //
 // }
 
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-struct DhtMessage {
-    #[serde(rename = "t", with = "serde_bytes")]
-    transaction: Vec<u8>,
-    #[serde(flatten)]
-    data: DhtMessageData,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(tag = "y")]
-enum DhtMessageData {
-    #[serde(rename = "q")]
-    Query(DhtMessageQuery),
-    #[serde(rename = "r")]
-    Response(DhtMessageResponse),
-    #[serde(rename = "e")]
-    Error,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(tag = "q", content = "a")]
-enum DhtMessageQuery {
-    #[serde(rename = "ping")]
-    Ping { id: TorrentId },
-    #[serde(rename = "find_node")]
-    FindNode { id: TorrentId, target: TorrentId },
-    #[serde(rename = "get_peers")]
-    GetPeers(DhtMessageQueryGetPeers),
-    #[serde(rename = "announce_peers")]
-    AnnouncePeers(DhtMessageQueryAnnouncePeers),
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-struct DhtMessageQueryAnnouncePeers {
-    id: TorrentId,
-    info_hash: TorrentId,
-    port: u16,
-    #[serde(with = "serde_bytes")]
-    token: Vec<u8>,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-struct DhtMessageQueryGetPeers {
-    id: TorrentId,
-    info_hash: TorrentId,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-struct DhtMessageResponse {
-    #[serde(rename = "r")]
-    response: DhtMessageResponseData,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum DhtMessageResponseData {
-    GetPeers(DhtMessageResponseGetPeers),
-    FindNode(DhtMessageResponseFindNode),
-    /// includes "ping" and "announce_peer" responses.
-    GeneralId {
-        id: TorrentId,
-    },
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-struct DhtMessageResponseFindNode {
-    id: TorrentId,
-    #[serde(with = "serde_bytes")]
-    nodes: Vec<u8>,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-struct DhtMessageResponseGetPeers {
-    id: TorrentId,
-    #[serde(with = "serde_bytes")]
-    token: Vec<u8>,
-    #[serde(flatten)]
-    data: DhtMessageResponseGetPeersData,
-}
-
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum DhtMessageResponseGetPeersData {
-    Peers {
-        values: Vec<serde_bytes::ByteBuf>,
-    },
-    CloseNodes {
-        #[serde(with = "serde_bytes")]
-        nodes: Vec<u8>,
-    },
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        split_torrent_id_top, DhtMessage, DhtMessageData, DhtMessageQuery,
-        DhtMessageQueryAnnouncePeers, DhtMessageQueryGetPeers, DhtMessageResponse,
-        DhtMessageResponseData, DhtMessageResponseFindNode, DhtMessageResponseGetPeers,
-        DhtMessageResponseGetPeersData, TorrentId,
-    };
-    use serde_bytes::ByteBuf;
-
-    fn dht_message_get_table() -> Vec<(&'static str, &'static [u8], DhtMessage)> {
-        return vec![
-            (
-                "ping_query",
-                b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t1:01:y1:qe",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Query(DhtMessageQuery::Ping {
-                        id: TorrentId([
-                            0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x30, 0x31,
-                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-                        ])
-                    })
-                },
-            ),
-            (
-                "ping_response",
-                b"d1:rd2:id20:mnopqrstuvwxyz123456e1:t1:01:y1:re",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Response(DhtMessageResponse {
-                        response: DhtMessageResponseData::GeneralId {
-                            id: TorrentId([
-                                0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
-                                0x79, 0x7a, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-                            ]),
-                        }
-                    }),
-                }
-            ),
-            (
-                "find_node_query",
-                b"d1:ad2:id20:abcdefghij01234567896:target20:mnopqrstuvwxyz123456e1:q9:find_node1:t1:01:y1:qe",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Query(DhtMessageQuery::FindNode {
-                        id: TorrentId([
-                            0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x30, 0x31,
-                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-                        ]),
-                        target: TorrentId([
-                            0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
-                            0x79, 0x7a, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-                        ]),
-                    })
-                }
-            ),
-            (
-                "find_node_response",
-                b"d1:rd2:id20:0123456789abcdefghij5:nodes9:def456...e1:t1:01:y1:re",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Response(DhtMessageResponse {
-                        response: DhtMessageResponseData::FindNode(DhtMessageResponseFindNode {
-                            id: TorrentId([
-                                0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62,
-                                0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a,
-                            ]),
-                            nodes: b"def456...".to_vec(),
-                        })
-                    }),
-                }
-            ),
-            (
-                "get_peer_query",
-                b"d1:ad2:id20:abcdefghij01234567899:info_hash20:mnopqrstuvwxyz123456e1:q9:get_peers1:t1:01:y1:qe",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Query(DhtMessageQuery::GetPeers(DhtMessageQueryGetPeers {
-                        id: TorrentId([
-                            0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x30, 0x31,
-                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-                        ]),
-                        info_hash: TorrentId([
-                            0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
-                            0x79, 0x7a, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-                        ]),
-                    })),
-                }
-            ),
-            (
-                "get_peer_response_peers",
-                b"d1:rd2:id20:abcdefghij01234567895:token8:aoeusnth6:valuesl15:axje.uidhtnmbrlee1:t1:01:y1:re",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Response(DhtMessageResponse {
-                        response: DhtMessageResponseData::GetPeers(DhtMessageResponseGetPeers {
-                            id: TorrentId([
-                                0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x30, 0x31,
-                                0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-                            ]),
-                            token: b"aoeusnth".to_vec(),
-                            data: DhtMessageResponseGetPeersData::Peers {
-                                values: vec![
-                                    ByteBuf::from(b"axje.uidhtnmbrl".to_vec()),
-                                ],
-                            }
-                        })
-                    })
-                }
-            ),
-            (
-                "get_peer_response_close_nodes",
-                b"d1:rd2:id20:abcdefghij01234567895:nodes9:def456...5:token8:aoeusnthe1:t1:01:y1:re",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Response(DhtMessageResponse {
-                        response: DhtMessageResponseData::GetPeers(DhtMessageResponseGetPeers {
-                            id: TorrentId([
-                                0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x30, 0x31,
-                                0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-                            ]),
-                            token: b"aoeusnth".to_vec(),
-                            data: DhtMessageResponseGetPeersData::CloseNodes {
-                                nodes: b"def456...".to_vec(),
-                            }
-                        })
-                    })
-                }
-            ),
-            (
-                "announce_peer_query",
-                b"d1:ad2:id20:abcdefghij01234567899:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q14:announce_peers1:t1:01:y1:qe",
-                DhtMessage {
-                    transaction: vec![48],
-                    data: DhtMessageData::Query(DhtMessageQuery::AnnouncePeers(DhtMessageQueryAnnouncePeers {
-                        id: TorrentId([
-                            0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x30, 0x31,
-                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-                        ]),
-                        info_hash: TorrentId([
-                            0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
-                            0x79, 0x7a, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-                        ]),
-                        port: 6881,
-                        token: b"aoeusnth".to_vec(),
-                    })),
-                }
-            ),
-            // announce_peer_response would be the same as the ping response, so not tested.
-        ];
-    }
-
-    #[test]
-    fn dht_message_decodes() {
-        for (name, encoded_bytes, expected_decode) in dht_message_get_table().iter() {
-            println!("execution test case: decode {:?}", name);
-            let decoded: DhtMessage = bencode::from_bytes(encoded_bytes).unwrap();
-            assert_eq!(expected_decode, &decoded, "{} failed", name);
-        }
-    }
-
-    #[test]
-    fn dht_message_encodes() {
-        for (name, expected_encode, message) in dht_message_get_table().iter() {
-            println!("execution test case: encode {:?}", name);
-            let encoded = bencode::to_bytes(message).unwrap();
-            assert_eq!(*expected_encode, &encoded[..], "{} failed", name);
-        }
-    }
+    use super::{TorrentId, TorrentIdPrefix};
 
     #[test]
     fn test_id_split() {
-        let zero = TorrentId::zero();
+        let mut prefix = TorrentIdPrefix {
+            base: TorrentId::zero(),
+            prefix_len: 0,
+        };
+
+        let split_one = prefix.split();
         assert_eq!(
-            split_torrent_id_top(&zero, 0),
+            split_one.base,
             TorrentId([
                 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ])
         );
+
+        let mut split_two = prefix.split();
         assert_eq!(
-            split_torrent_id_top(&zero, 1),
+            split_two.base,
             TorrentId([
                 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ])
         );
+
+        let split_three = split_two.split();
         assert_eq!(
-            split_torrent_id_top(&split_torrent_id_top(&zero, 1), 2),
+            split_three.base,
             TorrentId([
                 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
