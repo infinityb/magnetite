@@ -240,7 +240,7 @@ where
     let storage_backend = fs.storage_backend.clone();
 
     event!(
-        Level::DEBUG,
+        Level::INFO,
         "HTTP access {:?}",
         path.clone().collect::<Vec<_>>(),
     );
