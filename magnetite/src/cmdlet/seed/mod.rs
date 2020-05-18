@@ -16,7 +16,6 @@ use futures::stream::{Stream, StreamExt};
 use iresult::IResult;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
@@ -304,7 +303,7 @@ fn apply_work_state(
     }
 }
 
-pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
     let mut cfg_by = Vec::new();
@@ -312,8 +311,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
     let peer_id = generate_peer_id_seeded(&config.client_secret);
-    let mut rt = Runtime::new()?;
-    let storage_engine = build_storage_engine(&mut rt, &config).unwrap();
+    let storage_engine = build_storage_engine(&config).unwrap();
 
     let torrent_stats: Arc<Mutex<HashMap<TorrentId, Arc<Mutex<Stats>>>>> = Default::default();
     let gs: Arc<Mutex<GlobalState>> = Default::default();
@@ -365,7 +363,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         }
     }
 
-    rt.block_on(futures::future::join_all(futures));
+    futures::future::join_all(futures).await;
 
     Ok(())
 }

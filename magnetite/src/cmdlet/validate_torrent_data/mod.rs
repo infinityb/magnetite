@@ -4,7 +4,6 @@ use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
 use sha1::{Digest, Sha1};
-use tokio::runtime::Runtime;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
@@ -37,9 +36,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    let mut rt = Runtime::new()?;
-
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
@@ -79,7 +76,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             total_length: torrent.total_length,
             piece_index: idx as u32,
         };
-        let piece = rt.block_on(storage_engine.get_piece_dumb(&req))?;
+        let piece = storage_engine.get_piece_dumb(&req).await?;
         let mut hasher = Sha1::new();
         hasher.input(&piece[..]);
         let sha = hasher.result();

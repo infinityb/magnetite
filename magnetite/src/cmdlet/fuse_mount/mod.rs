@@ -1,6 +1,5 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -14,7 +13,6 @@ use fuse::{
 };
 use libc::{c_int, EINVAL};
 
-use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
@@ -254,7 +252,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
 }
 
 #[cfg(not(unix))]
-pub fn main() -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     panic!("The `fuse-mount` feature only works on unix systems!");
 }
 
@@ -282,7 +280,7 @@ impl MagnetiteFuseHost for FuseHost {
 
 #[cfg(unix)]
 #[allow(clippy::cognitive_complexity)] // macro bug around event!()
-pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
@@ -296,15 +294,13 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mount_point = matches.value_of_os("mount-point").unwrap();
     let mount_point = Path::new(mount_point).to_owned();
 
-    let mut rt = Runtime::new()?;
-
-    let states = build_storage_engine_states(&mut rt, &config).unwrap();
+    let states = build_storage_engine_states(&config).unwrap();
 
     let mut fs_impl = FilesystemImplMutable {
         storage_backend: states.storage_engine,
         content_info: states.content_info_manager,
         vfs: Vfs {
-            inodes: BTreeMap::new(),
+            inodes: Default::default(),
             inode_seq: 3,
         },
     };
@@ -339,24 +335,21 @@ pub fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         fs_impl.vfs.inodes.len()
     );
 
-    rt.block_on(async {
-        // let _uds = UnixListener::bind(&control_socket)?;
-        tokio::task::spawn_blocking(move || {
-            let options = ["-o", "ro", "-o", "fsname=magnetite"]
-                .iter()
-                .map(|o| o.as_ref())
-                .collect::<Vec<&OsStr>>();
+    tokio::task::spawn_blocking(move || {
+        let options = ["-o", "ro", "-o", "fsname=magnetite"]
+            .iter()
+            .map(|o| o.as_ref())
+            .collect::<Vec<&OsStr>>();
 
-            let fs_impl = FilesystemImpl {
-                mutable: Arc::new(Mutex::new(fs_impl)),
-            };
+        let fs_impl = FilesystemImpl {
+            mutable: Arc::new(Mutex::new(fs_impl)),
+        };
 
-            fuse::mount(fs_impl, &mount_point, &options).unwrap();
-        })
-        .await?;
-
-        Ok(())
+        fuse::mount(fs_impl, &mount_point, &options).unwrap();
     })
+    .await?;
+
+    Ok(())
 }
 
 #[cfg(unix)]

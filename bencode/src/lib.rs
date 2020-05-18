@@ -627,7 +627,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 T: de::DeserializeSeed<'de>,
             {
                 let res = self.de.tokenizer.next(true);
-                println!("SeqVisitor//next_element_seed={:?}", res);
                 match into_result(res, &self.de.tokenizer)? {
                     Node::ContainerEnd => Ok(None),
                     _ => seed.deserialize(&mut *self.de).map(Some),
