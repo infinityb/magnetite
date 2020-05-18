@@ -279,6 +279,13 @@ impl serde::ser::Error for Error {
 }
 
 impl Error {
+    pub fn is_anti_truncated(&self) -> bool {
+        match self.data {
+            ErrorData::AntiTruncated => true,
+            _ => false,
+        }
+    }
+
     fn trailing_characters(tz: &Tokenizer) -> Error {
         Error {
             offset: tz.total_offset,

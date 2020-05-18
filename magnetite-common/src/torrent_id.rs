@@ -3,7 +3,7 @@ use std::ops::{BitAnd, BitXor};
 
 const TORRENT_ID_LENGTH: usize = 20;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TorrentId(pub [u8; TORRENT_ID_LENGTH]);
 
 pub struct TorrentIdHexFormat<'a> {
@@ -99,6 +99,12 @@ impl fmt::Display for TorrentIdHexFormat<'_> {
             write!(f, "{:02x}", b)?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for TorrentId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TorrentId(\"{}\")", self.hex())
     }
 }
 
