@@ -24,7 +24,7 @@ use magnetite_common::TorrentId;
 use crate::bittorrent::peer_state::{
     merge_global_payload_stats, GlobalState, PeerState, Session, Stats,
 };
-use crate::model::config::{build_storage_engine, Config, Frontend, FrontendSeed};
+use crate::model::config::{build_storage_engine, Config, Frontend, FrontendSeed, StorageEngineServicesWithMeta};
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
 use crate::model::{generate_peer_id_seeded, BadHandshake, BitField, ProtocolViolation, Truncated};
@@ -311,7 +311,10 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
     let peer_id = generate_peer_id_seeded(&config.client_secret);
-    let storage_engine = build_storage_engine(&config).unwrap();
+    let StorageEngineServicesWithMeta {
+        piece_fetcher,
+        torrent_managers,
+    } = build_storage_engine(&config).unwrap();
 
     let torrent_stats: Arc<Mutex<HashMap<TorrentId, Arc<Mutex<Stats>>>>> = Default::default();
     let gs: Arc<Mutex<GlobalState>> = Default::default();
@@ -320,7 +323,7 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     for fe in &config.frontends {
         if let Frontend::Seed(ref seed) = fe {
             let seed: FrontendSeed = seed.clone();
-            let storage_engine = storage_engine.clone();
+            let piece_fetcher = piece_fetcher.clone();
             let torrent_stats = torrent_stats.clone();
             let gs = gs.clone();
             futures.push(async move {
@@ -332,7 +335,7 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
                 );
 
                 loop {
-                    let storage_engine = storage_engine.clone();
+                    let piece_fetcher = piece_fetcher.clone();
                     let torrent_stats = torrent_stats.clone();
                     let gs = gs.clone();
 
@@ -352,7 +355,7 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
 
                     tokio::spawn(async move {
                         if let Err(err) =
-                            start_server(socket, storage_engine, addr, torrent_stats, gs, peer_id)
+                            start_server(socket, piece_fetcher, addr, torrent_stats, gs, peer_id)
                                 .await
                         {
                             event!(Level::ERROR, "error: {}", err);

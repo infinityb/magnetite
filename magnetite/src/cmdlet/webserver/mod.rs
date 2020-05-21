@@ -22,7 +22,7 @@ use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use crate::model::config::build_storage_engine_states;
+use crate::model::config::{build_storage_engine_states, BuiltStates, StorageEngineServices};
 use crate::model::InternalError;
 use crate::storage::PieceStorageEngineDumb;
 use crate::vfs::{
@@ -80,12 +80,19 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     let opts = Opts {
         enable_directory_listings: matches.is_present("enable-directory-listings"),
     };
-
-    let states = build_storage_engine_states(&config).unwrap();
+    
+    let BuiltStates {
+        storage_engine: StorageEngineServices {
+            piece_fetcher,
+            torrent_managers,
+        },
+        content_info_manager,
+        path_to_torrent,
+    } = build_storage_engine_states(&config).unwrap();
 
     let mut fs_impl = FilesystemImplMutable {
-        storage_backend: states.storage_engine,
-        content_info: states.content_info_manager,
+        storage_backend: piece_fetcher,
+        content_info: content_info_manager,
         vfs: Vfs {
             inodes: BTreeMap::new(),
             inode_seq: 3,
@@ -103,7 +110,7 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
             }),
         },
     );
-    for t in states.path_to_torrent.values() {
+    for t in path_to_torrent.values() {
         if let Err(err) = fs_impl.add_torrent(t) {
             event!(
                 Level::ERROR,

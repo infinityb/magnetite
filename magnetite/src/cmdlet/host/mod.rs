@@ -5,8 +5,8 @@ use clap::{App, Arg, SubCommand};
 use tokio::net::TcpListener;
 use tracing::{event, Level};
 
-use crate::model::config::build_storage_engine;
-use crate::model::config::{Frontend, FrontendHost};
+use crate::model::config::{build_storage_engine, Frontend, FrontendHost, StorageEngineServicesWithMeta};
+
 
 use crate::storage::remote_magnetite::start_server;
 
@@ -37,13 +37,16 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     cfg_fi.read_to_end(&mut cfg_by).unwrap();
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
-    let storage_engine = build_storage_engine(&config).unwrap();
+    let StorageEngineServicesWithMeta{
+        piece_fetcher,
+        torrent_managers,
+    } = build_storage_engine(&config).unwrap();
 
     let mut futures = Vec::new();
     for fe in &config.frontends {
         if let Frontend::Host(ref host) = fe {
             let host: FrontendHost = host.clone();
-            let storage_engine = storage_engine.clone();
+            let piece_fetcher = piece_fetcher.clone();
             futures.push(async move {
                 let mut listener = TcpListener::bind(&host.bind_address).await.unwrap();
                 event!(
@@ -52,12 +55,12 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
                     host.bind_address
                 );
                 loop {
-                    let storage_engine = storage_engine.clone();
+                    let piece_fetcher = piece_fetcher.clone();
                     let (socket, addr) = listener.accept().await.unwrap();
                     event!(Level::INFO, "got connection from {:?}", addr);
 
                     tokio::spawn(async move {
-                        if let Err(err) = start_server(socket, storage_engine).await {
+                        if let Err(err) = start_server(socket, piece_fetcher).await {
                             event!(Level::ERROR, "error: {}", err);
                         }
                     });

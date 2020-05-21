@@ -286,10 +286,18 @@ where
     boxed.into()
 }
 
+#[derive(Clone)]
 pub struct StorageEngineServices {
-    piece_fetcher: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>,
-    torrent_managers: Vec<Arc<dyn TorrentManager + Send + Sync + 'static>>,
+    pub piece_fetcher: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>,
+    pub torrent_managers: Vec<Arc<dyn TorrentManager + Send + Sync + 'static>>,
 }
+
+#[derive(Clone)]
+pub struct StorageEngineServicesWithMeta {
+    pub piece_fetcher: Arc<dyn PieceStorageEngine + Send + Sync + 'static>,
+    pub torrent_managers: Vec<Arc<dyn TorrentManager + Send + Sync + 'static>>,
+}
+
 
 struct MultiFileTorrentManager {
     inst: MultiFileStorageEngine,
@@ -346,7 +354,7 @@ impl TorrentManager for PieceFileTorrentManager {
 fn build_storage_engine_dumb_helper(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<StorageEngineServices, failure::Error> {
     let mut se_iter = config.storage_engine.iter();
     let first_engine = se_iter.next().ok_or_else(|| InternalError {
         msg: "must define at least one storage engine",
@@ -441,7 +449,10 @@ fn build_storage_engine_dumb_helper(
         }
     }
 
-    Ok(current_engine)
+    Ok(StorageEngineServices {
+        piece_fetcher: current_engine,
+        torrent_managers,
+    })
 }
 
 fn build_storage_engine_helper(
@@ -452,16 +463,19 @@ fn build_storage_engine_helper(
 
 pub fn build_storage_engine_dumb(
     config: &Config,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<StorageEngineServices, failure::Error> {
     let path_to_torrent = build_torrent_map(config)?;
     build_storage_engine_dumb_helper(config, &path_to_torrent)
 }
 
 pub fn build_storage_engine(
     config: &Config,
-) -> Result<Arc<Box<dyn PieceStorageEngine + Send + Sync + 'static>>, failure::Error> {
+) -> Result<StorageEngineServicesWithMeta, failure::Error> {
     let path_to_torrent = build_torrent_map(config)?;
-    let dumb = build_storage_engine_dumb_helper(config, &path_to_torrent)?;
+    let StorageEngineServices {
+        piece_fetcher,
+        torrent_managers,
+    } = build_storage_engine_dumb_helper(config, &path_to_torrent)?;
 
     let mut state_builder = StateWrapper::builder();
 
@@ -483,13 +497,16 @@ pub fn build_storage_engine(
     }
 
     let boxed: Box<dyn PieceStorageEngine + Send + Sync + 'static> =
-        Box::new(state_builder.build(dumb));
+        Box::new(state_builder.build(piece_fetcher));
 
-    Ok(boxed.into())
+    Ok(StorageEngineServicesWithMeta {
+        piece_fetcher: boxed.into(),
+        torrent_managers,
+    })
 }
 
 pub struct BuiltStates {
-    pub storage_engine: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>,
+    pub storage_engine: StorageEngineServices,
     pub content_info_manager: ContentInfoManager,
     pub path_to_torrent: HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
 }
