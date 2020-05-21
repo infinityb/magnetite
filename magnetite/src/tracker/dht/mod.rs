@@ -8,6 +8,8 @@ use smallvec::SmallVec;
 use magnetite_common::TorrentId;
 
 mod wire;
+mod tracker;
+mod search;
 
 // Please make this a power of two, since Vec::with_capacity aligns to
 // powers of two anyway.  We're paying the cost of the memory anyway.
@@ -189,6 +191,7 @@ impl BucketManager {
         for entry in heap.drain() {
             out.push(entry.node);
         }
+
         out
     }
 
@@ -378,12 +381,16 @@ impl ConfirmLevel {
     }
 }
 
-// fn start_service() -> DhtHandle {
-//     let high_p_queue = VecDeque::new();
-//     let low_p_queue = VecDeque::new();
+fn start_service() -> DhtHandle {
+    let mut high_p_queue = VecDeque::new();
+    let mut low_p_queue = VecDeque::new();
+    
+    let mut running_searches: HashMap<TorrentId, RunningSearch> = Default::default();
+    let mut tracker: HashMap<TorrentId, TrackerTorrentState> = Default::default();
 
-//     //
-// }
+    //
+    
+}
 
 #[cfg(test)]
 mod tests {
