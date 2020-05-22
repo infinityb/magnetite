@@ -5,3 +5,12 @@ members = [
 	"magnetite",
 	"magnetite-common",
 ]
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+codegen-units = 1
+debug = true
+lto = "thin"
+overflow-checks = true
