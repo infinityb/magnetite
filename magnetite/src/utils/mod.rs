@@ -1,3 +1,5 @@
+use std::fmt;
+
 mod bytes_cow;
 #[cfg(target_os = "linux")]
 mod owned_fd;

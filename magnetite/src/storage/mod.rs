@@ -1,7 +1,12 @@
+use std::io;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use futures::future::{Future, FutureExt};
+use lru::LruCache;
+use tokio::fs::File as TokioFile;
 use tokio::sync::Mutex;
 
 use magnetite_common::TorrentId;
@@ -244,5 +249,48 @@ where
         req: &GetPieceRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         PieceStorageEngineDumb::get_piece_dumb(&**self, req)
+    }
+}
+
+// --
+
+#[derive(Clone)]
+pub struct OpenFileCache {
+    open_files: Arc<Mutex<lru::LruCache<PathKey, Arc<Mutex<TokioFile>>>>>,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct PathKey {
+    fully_qualified: PathBuf,
+}
+
+impl OpenFileCache {
+    fn new(size: usize) -> OpenFileCache {
+        OpenFileCache {
+            open_files: Arc::new(Mutex::new(LruCache::new(size))),
+        }
+    }
+
+    fn open(
+        &self,
+        path: &Path,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Arc<Mutex<TokioFile>>>> + Send + 'static>> {
+        let self_cloned = self.clone();
+        let key = PathKey {
+            fully_qualified: path.into(),
+        };
+        async move {
+            let mut open_files = self_cloned.open_files.lock().await;
+            if let Some(file) = open_files.get(&key) {
+                return Ok(file.clone());
+            }
+
+            let file = TokioFile::open(&key.fully_qualified).await?;
+            let file_arc = Arc::new(Mutex::new(file));
+            open_files.put(key, file_arc.clone());
+
+            Ok(file_arc)
+        }
+        .boxed()
     }
 }

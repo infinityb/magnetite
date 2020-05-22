@@ -1,20 +1,18 @@
 use std::collections::BTreeMap;
 use std::io::{self, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
-use lru::LruCache;
-use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use super::{GetPieceRequest, PieceStorageEngineDumb};
+use super::{GetPieceRequest, OpenFileCache, PieceStorageEngineDumb};
 use crate::model::{InternalError, MagnetiteError, ProtocolViolation};
 
 struct TorrentState {
@@ -24,7 +22,7 @@ struct TorrentState {
 
 #[derive(Clone)]
 pub struct MultiFileStorageEngine {
-    open_files_lru: Arc<Mutex<lru::LruCache<PathKey, Arc<Mutex<TokioFile>>>>>,
+    file_cache: OpenFileCache,
     torrents: Arc<Mutex<BTreeMap<TorrentId, Arc<TorrentState>>>>,
 }
 
@@ -69,7 +67,7 @@ impl Builder {
     pub fn build(self) -> MultiFileStorageEngine {
         MultiFileStorageEngine {
             torrents: Arc::new(Mutex::new(self.torrents)),
-            open_files_lru: Arc::new(Mutex::new(LruCache::new(32))),
+            file_cache: OpenFileCache::new(32),
         }
     }
 }
@@ -127,7 +125,7 @@ impl PieceStorageEngineDumb for MultiFileStorageEngine {
                 piece_offset_start += file_remaining;
 
                 let path = ts.base_dir.join(&file_info.rel_path);
-                let file = open_helper(&self_cloned, &path).await?;
+                let file = self_cloned.file_cache.open(&path).await?;
                 let mut file_locked = file.lock().await;
                 let mut file_pinned = Pin::new(&mut *file_locked);
                 event!(Level::TRACE, path=?path.display(), offset=file_rel_offset);
@@ -139,22 +137,6 @@ impl PieceStorageEngineDumb for MultiFileStorageEngine {
         }
         .boxed()
     }
-}
-
-async fn open_helper(m: &MultiFileStorageEngine, path: &Path) -> io::Result<Arc<Mutex<TokioFile>>> {
-    let key = PathKey {
-        fully_qualified: path.into(),
-    };
-    let mut open_files = m.open_files_lru.lock().await;
-    if let Some(file) = open_files.get(&key) {
-        return Ok(file.clone());
-    }
-
-    let file = TokioFile::open(&key.fully_qualified).await?;
-    let file_arc = Arc::new(Mutex::new(file));
-    open_files.put(key, file_arc.clone());
-
-    Ok(file_arc)
 }
 
 async fn file_read_buf<R: AsyncRead>(mut file: R, out: &mut BytesMut) -> io::Result<()> {
