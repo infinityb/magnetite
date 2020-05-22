@@ -91,6 +91,11 @@ impl TorrentId {
     pub fn as_mut_bytes(&mut self) -> &mut [u8] {
         &mut self.0[..]
     }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let tid: TorrentId = *self;
+        tid.into()
+    }
 }
 
 impl fmt::Display for TorrentIdHexFormat<'_> {
@@ -147,6 +152,20 @@ impl fmt::Display for TorrentIdError {
 }
 
 impl std::error::Error for TorrentIdError {}
+
+impl From<[u8; TORRENT_ID_LENGTH]> for TorrentId {
+    fn from(data: [u8; TORRENT_ID_LENGTH]) -> TorrentId {
+        TorrentId(data)
+    }
+}
+
+impl From<TorrentId> for Vec<u8> {
+    fn from(tid: TorrentId) -> Vec<u8> {
+        let mut out = vec![0; 20];
+        out.copy_from_slice(&tid.0[..]);
+        out
+    }
+}
 
 // --
 
@@ -225,7 +244,7 @@ fn dehex_fixed_size<'a>(val: &str, into: &'a mut [u8]) -> Result<&'a [u8], ()> {
             b'A'..=b'F' => Ok(ch - b'A' + 10),
             b'a'..=b'f' => Ok(ch - b'a' + 10),
             b'0'..=b'9' => Ok(ch - b'0'),
-            _ => return Err(()),
+            _ => Err(()),
         }
     }
     let mut copied_bytes = 0;
