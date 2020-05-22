@@ -1,34 +1,38 @@
 syntax = "proto3";
 
-package magnetite.api.torrent_host;
+package magnetite.api;
 
 message AddTorrentRequest {
-    bytes info_data = 1;
-    bytes crypto_key = 2;
-    TorrentSource source = 3;
+    oneof torrent_file {
+        // the whole torrent in a bytestring
+        bytes bytes = 1;
+
+        // can be HTTP(s) or Magnet, maybe more in the future
+        string uri = 2;
+    }
+    
+    oneof backing_file {
+        TorrentDataSourceMultiFile multifile = 128;
+
+        TorrentDataSourceTome tome = 129;
+
+        TorrentDataSourceRemoteMagnetite remote = 130;
+    }
+
+    bytes crypto_key = 1024;
 }
 
-message TorrentSource {
-    oneof selector {
-        TorrentSourceMultiFile multifile = 1;
-
-        TorrentSourceTome tome = 128;
-
-        TorrentSourceRemoteMagnetite remote = 129;
-  }
-}
-
-message TorrentSourceMultiFile {
+message TorrentDataSourceMultiFile {
     string base_path = 1;
 }
 
-message TorrentSourceTome {
+message TorrentDataSourceTome {
     string file_path = 1;
 }
 
 // can't specify multiple upstreams now - just registers the torrent, so no
 // fields are included.
-message TorrentSourceRemoteMagnetite {
+message TorrentDataSourceRemoteMagnetite {
 
 }
 

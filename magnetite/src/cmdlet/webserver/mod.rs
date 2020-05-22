@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -17,7 +18,7 @@ use hyper::{Request, Response, Server, StatusCode};
 use metrics::{counter, timing};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
@@ -25,6 +26,7 @@ use magnetite_common::TorrentId;
 use crate::model::config::{build_storage_engine_states, BuiltStates, StorageEngineServices};
 use crate::model::InternalError;
 use crate::storage::PieceStorageEngineDumb;
+use crate::utils::ByteSize;
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType, FilesystemImpl, FilesystemImplMutable,
     NoEntityExists, Vfs,
@@ -66,7 +68,10 @@ struct Opts {
     enable_directory_listings: bool,
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(
+    ebus: broadcast::Sender<crate::BusMessage>,
+    matches: &clap::ArgMatches<'_>,
+) -> Result<(), failure::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
@@ -80,12 +85,13 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     let opts = Opts {
         enable_directory_listings: matches.is_present("enable-directory-listings"),
     };
-    
+
     let BuiltStates {
-        storage_engine: StorageEngineServices {
-            piece_fetcher,
-            torrent_managers,
-        },
+        storage_engine:
+            StorageEngineServices {
+                piece_fetcher,
+                torrent_managers,
+            },
         content_info_manager,
         path_to_torrent,
     } = build_storage_engine_states(&config).unwrap();
@@ -679,39 +685,6 @@ fn response_ok_rendering_directory(vfs: &Vfs, dir: &Directory) -> Response<Body>
         );
 
     builder.body(data[..].to_vec().into()).unwrap()
-}
-
-// --
-
-struct ByteSize(u64);
-
-impl fmt::Display for ByteSize {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        const UNIT_NAMES: &[&str] = &["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei"];
-        let mut unit_acc = self.0;
-        let mut unit_num = 0;
-        while 1024 <= unit_acc && unit_num < UNIT_NAMES.len() {
-            unit_acc /= 1024;
-            unit_num += 1;
-        }
-
-        let value = match unit_num {
-            0 => self.0 as f64,
-            1 => self.0 as f64 / 1024.0,
-            _ => {
-                // use integer division first, to ensure that the value
-                // fits into floats
-                let unit_denom_int = 1 << (10 * (unit_num - 1));
-                (self.0 / unit_denom_int) as f64 / 1024.0
-            }
-        };
-
-        if unit_num == 0 {
-            write!(f, "{}B", value)
-        } else {
-            write!(f, "{:.1}{}B", value, UNIT_NAMES[unit_num])
-        }
-    }
 }
 
 // --

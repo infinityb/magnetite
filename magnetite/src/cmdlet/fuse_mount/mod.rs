@@ -1,5 +1,6 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
+use std::any::Any;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -13,7 +14,7 @@ use fuse::{
 };
 use libc::{c_int, EINVAL};
 
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tracing::{event, Level};
 
 use crate::model::config::{build_storage_engine_states, BuiltStates, StorageEngineServices};
@@ -27,15 +28,6 @@ use crate::vfs::{
 mod adapter;
 
 use self::adapter::{fuse_result_wrapper, FuseReplyAttr, FuseReplyDirectory, FuseReplyEntry};
-
-pub mod fuse_api {
-    tonic::include_proto!("magnetite.api.fuse");
-}
-
-use fuse_api::{
-    magnetite_fuse_host_server::MagnetiteFuseHost, AddTorrentRequest, AddTorrentResponse,
-    RemoveTorrentRequest, RemoveTorrentResponse,
-};
 
 fn file_entry_attrs(fe: &FileEntry) -> FileAttr {
     let kind;
@@ -252,35 +244,19 @@ pub fn get_subcommand() -> App<'static, 'static> {
 }
 
 #[cfg(not(unix))]
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(
+    ebus: broadcast::Sender<crate::BusMessage>,
+    matches: &clap::ArgMatches<'_>,
+) -> Result<(), failure::Error> {
     panic!("The `fuse-mount` feature only works on unix systems!");
-}
-
-#[derive(Default)]
-pub struct FuseHost {}
-
-#[tonic::async_trait]
-impl MagnetiteFuseHost for FuseHost {
-    async fn add_torrent(
-        &self,
-        _request: tonic::Request<AddTorrentRequest>,
-    ) -> Result<tonic::Response<AddTorrentResponse>, tonic::Status> {
-        Ok(tonic::Response::new(fuse_api::AddTorrentResponse {
-            info_hash: vec![0; 20],
-        }))
-    }
-
-    async fn remove_torrent(
-        &self,
-        _request: tonic::Request<RemoveTorrentRequest>,
-    ) -> Result<tonic::Response<RemoveTorrentResponse>, tonic::Status> {
-        Ok(tonic::Response::new(fuse_api::RemoveTorrentResponse {}))
-    }
 }
 
 #[cfg(unix)]
 #[allow(clippy::cognitive_complexity)] // macro bug around event!()
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(
+    ebus: broadcast::Sender<crate::BusMessage>,
+    matches: &clap::ArgMatches<'_>,
+) -> Result<(), failure::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
@@ -295,10 +271,11 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     let mount_point = Path::new(mount_point).to_owned();
 
     let BuiltStates {
-        storage_engine: StorageEngineServices {
-            piece_fetcher,
-            torrent_managers,
-        },
+        storage_engine:
+            StorageEngineServices {
+                piece_fetcher,
+                torrent_managers,
+            },
         content_info_manager,
         path_to_torrent,
     } = build_storage_engine_states(&config).unwrap();

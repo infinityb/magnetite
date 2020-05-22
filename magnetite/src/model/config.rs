@@ -298,7 +298,6 @@ pub struct StorageEngineServicesWithMeta {
     pub torrent_managers: Vec<Arc<dyn TorrentManager + Send + Sync + 'static>>,
 }
 
-
 struct MultiFileTorrentManager {
     inst: MultiFileStorageEngine,
 }
@@ -461,9 +460,7 @@ fn build_storage_engine_helper(
     unimplemented!();
 }
 
-pub fn build_storage_engine_dumb(
-    config: &Config,
-) -> Result<StorageEngineServices, failure::Error> {
+pub fn build_storage_engine_dumb(config: &Config) -> Result<StorageEngineServices, failure::Error> {
     let path_to_torrent = build_torrent_map(config)?;
     build_storage_engine_dumb_helper(config, &path_to_torrent)
 }

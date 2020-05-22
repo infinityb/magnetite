@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -16,7 +17,7 @@ use futures::stream::{Stream, StreamExt};
 use iresult::IResult;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
@@ -24,7 +25,9 @@ use magnetite_common::TorrentId;
 use crate::bittorrent::peer_state::{
     merge_global_payload_stats, GlobalState, PeerState, Session, Stats,
 };
-use crate::model::config::{build_storage_engine, Config, Frontend, FrontendSeed, StorageEngineServicesWithMeta};
+use crate::model::config::{
+    build_storage_engine, Config, Frontend, FrontendSeed, StorageEngineServicesWithMeta,
+};
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
 use crate::model::{generate_peer_id_seeded, BadHandshake, BitField, ProtocolViolation, Truncated};
@@ -303,7 +306,10 @@ fn apply_work_state(
     }
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(
+    ebus: broadcast::Sender<crate::BusMessage>,
+    matches: &clap::ArgMatches<'_>,
+) -> Result<(), failure::Error> {
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
     let mut cfg_by = Vec::new();

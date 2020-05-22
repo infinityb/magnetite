@@ -1,15 +1,20 @@
 #![allow(dead_code)]
 
+use std::any::Any;
+use std::sync::Arc;
+
 use clap::{App, AppSettings, Arg};
 use futures::future::FutureExt;
 use metrics_runtime::Receiver;
 use tokio::runtime::Runtime;
+use tokio::sync::broadcast;
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
 mod bittorrent;
 mod cmdlet;
+mod control;
 mod model;
 mod scheduler;
 mod storage;
@@ -19,6 +24,8 @@ mod vfs;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
+
+type BusMessage = Arc<dyn Any + Send + Sync>;
 
 fn main() -> Result<(), failure::Error> {
     let mut rt = Runtime::new().unwrap();
@@ -50,6 +57,14 @@ fn main() -> Result<(), failure::Error> {
                 .help("The address to bind to for prometheus")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("control-bind-address")
+                .long("control-bind-address")
+                .value_name("[ADDRESS]")
+                .help("The address to bind to for control commands")
+                .takes_value(true),
+        )
+        .subcommand(cmdlet::ctl::get_subcommand())
         .subcommand(cmdlet::seed::get_subcommand())
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
         .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
@@ -93,18 +108,35 @@ fn main() -> Result<(), failure::Error> {
         });
     }
 
+    let (eb_tx, _) = broadcast::channel(1024);
+
     let (sub_name, args) = matches.subcommand();
     let args = args.expect("subcommand args");
 
+    if let Some(addr) = matches.value_of("control-bind-address") {
+        if sub_name != cmdlet::ctl::SUBCOMMAND_NAME {
+            let addr = addr.to_string();
+            let eb_tx = eb_tx.clone();
+            rt.spawn(async move {
+                if let Err(err) = crate::control::start_control_service(eb_tx, &addr).await {
+                    event!(Level::ERROR, "control service shut down: {}", err);
+                };
+            });
+        }
+    }
+
     let main_future = match sub_name {
-        cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(args).boxed(),
+        cmdlet::ctl::SUBCOMMAND_NAME => cmdlet::ctl::main(args).boxed(),
+        cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(eb_tx.clone(), args).boxed(),
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main(args).boxed(),
         cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main(args).boxed(),
         cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main(args).boxed(),
         #[cfg(feature = "with-fuse")]
-        cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main(args).boxed(),
-        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(args).boxed(),
-        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(args).boxed(),
+        cmdlet::fuse_mount::SUBCOMMAND_NAME => {
+            cmdlet::fuse_mount::main(eb_tx.clone(), args).boxed()
+        }
+        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(eb_tx.clone(), args).boxed(),
+        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(eb_tx.clone(), args).boxed(),
         cmdlet::validate_torrent_data::SUBCOMMAND_NAME => {
             cmdlet::validate_torrent_data::main(args).boxed()
         }

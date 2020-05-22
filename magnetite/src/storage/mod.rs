@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+
 use bytes::{Bytes, BytesMut};
 use futures::future::{Future, FutureExt};
 use lru::LruCache;
@@ -304,26 +305,31 @@ impl OpenFileCache {
 
 // -- 
 
+#[deprecated]
 pub struct AddTorrentRequest {
     info_hash: TorrentId,
     torrent_data: TorrentMeta,
     source: TorrentDataSource,
 }
 
+#[deprecated]
 pub enum TorrentDataSource {
     PieceFile(TorrentDataSourcePieceFile),
     MultiFile(TorrentDataSourceMultiFile),
     Remote(TorrentDataSourceRemote),
 }
 
+#[deprecated]
 pub struct TorrentDataSourcePieceFile {
     file_path: PathBuf,
 }
 
+#[deprecated]
 pub struct TorrentDataSourceMultiFile {
     base_path: PathBuf,
 }
 
+#[deprecated]
 pub struct TorrentDataSourceRemote {
     // holder: Arc<Holder>,
 }

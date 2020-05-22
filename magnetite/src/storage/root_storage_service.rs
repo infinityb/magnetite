@@ -16,7 +16,7 @@ use magnetite_common::TorrentId;
 
 use super::{
     utils::piece_file_pread_exact, AddTorrentRequest, GetPieceRequest, GetPieceRequestResolver,
-    PieceStorageEngineDumb, TorrentDataSource,
+    PieceStorageEngineDumb, TorrentDataSource, OpenFileCache,
 };
 use crate::model::{CompletionLost, MagnetiteError, ProtocolViolation};
 use crate::utils::close_waiter::Done;
@@ -65,113 +65,79 @@ impl PieceStorageEngineDumb for PieceFileStorageHandle {
 }
 
 async fn piece_fetch_loop(
-    mut term_sig: Done,
-    s: ServiceState,
-    mut rx: mpsc::Receiver<GetPieceRequestResolver>,
+    init_sig: mpsc::Sender<()>,
+    term_sig: Done,
 ) {
-    let sema = Arc::new(tokio::sync::Semaphore::new(10));
-    let mut stop_signal_encountered = false;
-    loop {
-        let req;
-        tokio::select! {
-            _ = Pin::new(&mut term_sig), if !stop_signal_encountered => {
-                rx.close();
-                stop_signal_encountered = true;
-                continue;
-            }
-            req_opt = rx.next() => {
-                req = match req_opt {
-                    Some(v) => v,
-                    None => return,
-                };
-            }
-        };
+    let files = OpenFileCache::new(64);
 
-        let self_cloned = s.clone();
-        let sema_acquired = sema.clone().acquire_owned();
-        let GetPieceRequestResolver {
-            request: req,
-            resolver,
-        } = req;
+    // let sema = Arc::new(tokio::sync::Semaphore::new(10));
+    // let mut stop_signal_encountered = false;
+    // loop {
+    //     let req;
+    //     tokio::select! {
+    //         _ = Pin::new(&mut term_sig), if !stop_signal_encountered => {
+    //             rx.close();
+    //             stop_signal_encountered = true;
+    //             continue;
+    //         }
+    //         req_opt = rx.next() => {
+    //             req = match req_opt {
+    //                 Some(v) => v,
+    //                 None => return,
+    //             };
+    //         }
+    //     };
 
-        tokio::spawn(async move {
-            let resolve_res = resolver.send(
-                async move {
-                    let ts: TorrentState = {
-                        let locked = self_cloned.lockable.lock().await;
+    //     let self_cloned = s.clone();
+    //     let sema_acquired = sema.clone().acquire_owned();
+    //     let GetPieceRequestResolver {
+    //         request: req,
+    //         resolver,
+    //     } = req;
 
-                        locked
-                            .torrents
-                            .get(&req.content_key)
-                            .ok_or_else(|| ProtocolViolation)?
-                            .clone()
-                    };
+    //     tokio::spawn(async move {
+    //         let resolve_res = resolver.send(
+    //             async move {
+    //                 let ts: TorrentState = {
+    //                     let locked = self_cloned.lockable.lock().await;
 
-                    let (piece_offset_start, piece_offset_end) = super::utils::compute_offset(
-                        req.piece_index,
-                        req.piece_length,
-                        req.total_length,
-                    );
+    //                     locked
+    //                         .torrents
+    //                         .get(&req.content_key)
+    //                         .ok_or_else(|| ProtocolViolation)?
+    //                         .clone()
+    //                 };
 
-                    let mut chonker = vec![0; (piece_offset_end - piece_offset_start) as usize];
-                    piece_file_pread_exact(&*ts.piece_file, piece_offset_start, &mut chonker[..])
-                        .await?;
+    //                 let (piece_offset_start, piece_offset_end) = super::utils::compute_offset(
+    //                     req.piece_index,
+    //                     req.piece_length,
+    //                     req.total_length,
+    //                 );
 
-                    if let Some(ref crypto) = ts.crypto {
-                        let mut cr = crypto.lock().await;
-                        cr.seek(piece_offset_start);
-                        cr.apply_keystream(&mut chonker);
-                    }
+    //                 let mut chonker = vec![0; (piece_offset_end - piece_offset_start) as usize];
+    //                 piece_file_pread_exact(&*ts.piece_file, piece_offset_start, &mut chonker[..])
+    //                     .await?;
 
-                    Ok(Bytes::from(chonker))
-                }
-                .await,
-            );
+    //                 if let Some(ref crypto) = ts.crypto {
+    //                     let mut cr = crypto.lock().await;
+    //                     cr.seek(piece_offset_start);
+    //                     cr.apply_keystream(&mut chonker);
+    //                 }
 
-            if resolve_res.is_err() {
-                event!(Level::WARN, "dropped a response");
-            }
+    //                 Ok(Bytes::from(chonker))
+    //             }
+    //             .await,
+    //         );
 
-            drop(sema_acquired);
-        });
-    }
+    //         if resolve_res.is_err() {
+    //             event!(Level::WARN, "dropped a response");
+    //         }
+
+    //         drop(sema_acquired);
+    //     });
+    // }
 }
 
-pub async fn add_torrent(s: &ServiceState, add: &AddTorrentRequest) {
-    let mut locked = s.lockable.lock().await;
-
-    match add.source {
-        TorrentDataSource::PieceFile(ref pf) => {
-            //
-        }
-        TorrentDataSource::MultiFile(ref mf) => {
-            //
-        }
-        TorrentDataSource::Remote(..) => {
-            //
-        }
-    };
-    locked.torrents.insert(
-        add.info_hash,
-        TorrentState {
-            crypto: unreachable!(),
-            piece_file: unreachable!(),
-            // crypto: Option<Arc<Mutex<XSalsa20>>>,
-            // piece_file: Arc<Mutex<TokioFile>>,
-        },
-    );
-}
-
-pub async fn remove_torrent(s: &ServiceState, id: &TorrentId) {
-    let mut locked = s.lockable.lock().await;
-    locked.torrents.remove(id);
-}
-
-pub fn start_piece_storage_engine(term_sig: Done, s: &ServiceState) -> PieceFileStorageHandle {
-    let (tx, rx) = mpsc::channel(10);
-
-    let task_term_sig = term_sig.clone();
-    tokio::task::spawn(piece_fetch_loop(task_term_sig, s.clone(), rx));
-
-    PieceFileStorageHandle { tx }
+pub fn start_piece_storage_engine(init_sig: mpsc::Sender<()>, term_sig: Done) {
+    tokio::task::spawn(piece_fetch_loop(init_sig, term_sig));
 }
