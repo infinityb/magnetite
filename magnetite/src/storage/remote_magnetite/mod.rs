@@ -1,25 +1,39 @@
+use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::fs::OpenOptions;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
+use futures::stream::StreamExt;
 use metrics::counter;
 use rand::{thread_rng, Rng};
 use slab::Slab;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task;
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use tracing::{event, Level};
+use futures::future::Future;
 
 use magnetite_common::TorrentId;
 
-use crate::model::{MagnetiteError, ProtocolViolation};
-use crate::storage::{
-    utils as storage_utils, GetPieceRequest, PieceStorageEngine, PieceStorageEngineDumb,
+use crate::CommonInit;
+use crate::model::{get_torrent_salsa, MagnetiteError, ProtocolViolation};
+use crate::control::messages::BusFindPieceFetcher;
+
+use super::{
+    root_storage_service::RootStorageOpts,
+    GetPieceRequestChannel,
+    disk_cache::{DiskCacheWrapper},
+    memory_cache::{MemoryCacheWrapper},
+    state_holder_system::{BusNewState, State},
+    utils as storage_utils, GetPieceRequest, PieceStorageEngineDumb,
+    GetPieceRequestResolver,
 };
+
 
 mod wire;
 
@@ -296,201 +310,399 @@ fn resolve_response(
     Ok(())
 }
 
-async fn run_connected(
+fn run_connected<'a>(
     mut socket: TcpStream,
-    incoming_request_queue: &mut mpsc::Receiver<MagnetiteRequest>,
-) -> Result<bool, MagnetiteError> {
-    let mut current_window_size: usize = WINDOW_SIZE_START;
-    let mut inflight: Slab<RequestState> = Default::default();
-    // this shouldn't really exceed one or two elements, I think.
-    let mut piece_state: Slab<PieceState> = Default::default();
+    incoming_request_queue: &'a mut mpsc::Receiver<GetPieceRequestResolver>,
+) -> Pin<Box<dyn Future<Output=Result<bool, MagnetiteError>> + Send + 'a>> {
+    async move {
+        let mut current_window_size: usize = WINDOW_SIZE_START;
+        let mut inflight: Slab<RequestState> = Default::default();
+        // this shouldn't really exceed one or two elements, I think.
+        let mut piece_state: Slab<PieceState> = Default::default();
 
-    let mut wbuf = BytesMut::with_capacity(BUF_SIZE_REQUEST);
-    let mut rbuf = BytesMut::with_capacity(BUF_SIZE_RESPONSE);
-    let mut latency = LatencyStats::new();
-    // get a piece request, convert it into chunk requests,
-    // send remaining_window_size chunk requests, wait until a chunk returns
-    // before sending one more.  Between sends, we can check if the piece future
-    // is cancelled.
-    //
-    let mut split_request_queue: VecDeque<PendingRequest> = VecDeque::new();
-    let mut request_queue_open = true;
-    let mut connection_open = true;
+        let mut wbuf = BytesMut::with_capacity(BUF_SIZE_REQUEST);
+        let mut rbuf = BytesMut::with_capacity(BUF_SIZE_RESPONSE);
+        let mut latency = LatencyStats::new();
+        // get a piece request, convert it into chunk requests,
+        // send remaining_window_size chunk requests, wait until a chunk returns
+        // before sending one more.  Between sends, we can check if the piece future
+        // is cancelled.
+        //
+        let mut split_request_queue: VecDeque<PendingRequest> = VecDeque::new();
+        let mut request_queue_open = true;
+        let mut connection_open = true;
 
-    while connection_open {
-        if let Some(average) = latency.average() {
-            if average < LATENCY_TARGET_MIN_MILLISECONDS {
-                let prev_window_size = current_window_size;
-                current_window_size += 1;
-                if WINDOW_SIZE_HARD_LIMIT < current_window_size {
-                    current_window_size = WINDOW_SIZE_HARD_LIMIT;
+        while connection_open {
+            if let Some(average) = latency.average() {
+                if average < LATENCY_TARGET_MIN_MILLISECONDS {
+                    let prev_window_size = current_window_size;
+                    current_window_size += 1;
+                    if WINDOW_SIZE_HARD_LIMIT < current_window_size {
+                        current_window_size = WINDOW_SIZE_HARD_LIMIT;
+                    }
+                    if prev_window_size != current_window_size {
+                        event!(
+                            Level::DEBUG,
+                            "increased window size to {}",
+                            current_window_size
+                        );
+                    }
                 }
-                if prev_window_size != current_window_size {
-                    event!(
-                        Level::DEBUG,
-                        "increased window size to {}",
-                        current_window_size
-                    );
+                if LATENCY_TARGET_MAX_MILLISECONDS < average {
+                    let prev_window_size = current_window_size;
+                    current_window_size /= 2;
+                    if current_window_size < 2 {
+                        current_window_size = 2;
+                    }
+                    if prev_window_size != current_window_size {
+                        event!(
+                            Level::INFO,
+                            "halved window size to {}, current latency {}ms",
+                            current_window_size,
+                            average
+                        );
+                    }
                 }
             }
-            if LATENCY_TARGET_MAX_MILLISECONDS < average {
-                let prev_window_size = current_window_size;
-                current_window_size /= 2;
-                if current_window_size < 2 {
-                    current_window_size = 2;
-                }
-                if prev_window_size != current_window_size {
-                    event!(
-                        Level::INFO,
-                        "halved window size to {}, current latency {}ms",
-                        current_window_size,
-                        average
-                    );
-                }
-            }
-        }
 
-        let take_count = if inflight.len() < current_window_size {
-            current_window_size - inflight.len()
-        } else {
-            0
-        };
-
-        // opportunistically fill split_request_queue
-        while split_request_queue.len() < take_count && request_queue_open {
-            match incoming_request_queue.try_recv() {
-                Ok(MagnetiteRequest::Piece { gp, responder }) => {
-                    let (_, fetch_length) = storage_utils::compute_offset_length(
-                        gp.piece_index,
-                        gp.piece_length,
-                        gp.total_length,
-                    );
-
-                    let ps = PieceState::new(fetch_length, responder);
-                    let pf = PiecePendingRequestFactory::new(piece_state.insert(ps), &gp);
-                    split_request_queue.extend(pf);
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Closed) => {
-                    request_queue_open = false;
-                }
-            };
-        }
-
-        for _ in 0..take_count {
-            let now = Instant::now();
-            if let Some(ri) = split_request_queue.pop_front() {
-                enqueue_request_partial(now, &mut wbuf, &mut inflight, ri)?;
+            let take_count = if inflight.len() < current_window_size {
+                current_window_size - inflight.len()
             } else {
-                break;
-            }
-        }
+                0
+            };
 
-        let to_write = wbuf.split().freeze();
-        if !to_write.is_empty() {
-            socket.write_all(&to_write[..]).await?;
-        }
-        drop(to_write);
-
-        // now: either slab is full or split_request_queue is empty.  If slab is full, we shouldn't
-        // take any more requests, and we must complete a response read.
-        while inflight.len() == current_window_size {
-            let is_eof = socket.read_buf(&mut rbuf).await? == 0;
-
-            while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
-                resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
-            }
-
-            if is_eof {
-                connection_open = false;
-                break;
-            }
-        }
-
-        if !request_queue_open && inflight.is_empty() && split_request_queue.is_empty() {
-            break;
-        }
-
-        if request_queue_open || !inflight.is_empty() {
-            ::tokio::select! {
-                req = incoming_request_queue.recv(), if request_queue_open => {
-                    if let Some(v) = req {
-                        let MagnetiteRequest::Piece { gp, responder } = v;
+            // opportunistically fill split_request_queue
+            while split_request_queue.len() < take_count && request_queue_open {
+                match incoming_request_queue.try_recv() {
+                    Ok(GetPieceRequestResolver { request, resolver }) => {
                         let (_, fetch_length) = storage_utils::compute_offset_length(
-                        gp.piece_index, gp.piece_length, gp.total_length);
+                            request.piece_index,
+                            request.piece_length,
+                            request.total_length,
+                        );
 
-                        let ps = PieceState::new(fetch_length, responder);
-                        let pf = PiecePendingRequestFactory::new(piece_state.insert(ps), &gp);
+                        let ps = PieceState::new(fetch_length, resolver);
+                        let pf = PiecePendingRequestFactory::new(piece_state.insert(ps), &request);
                         split_request_queue.extend(pf);
-                    } else {
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Closed) => {
                         request_queue_open = false;
                     }
-                },
-                read_res = socket.read_buf(&mut rbuf), if !inflight.is_empty() => {
-                    if read_res? == 0 {
-                        connection_open = false;
-                    }
-                    while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
-                        resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
+                };
+            }
+
+            for _ in 0..take_count {
+                let now = Instant::now();
+                if let Some(ri) = split_request_queue.pop_front() {
+                    enqueue_request_partial(now, &mut wbuf, &mut inflight, ri)?;
+                } else {
+                    break;
+                }
+            }
+
+            let to_write = wbuf.split().freeze();
+            if !to_write.is_empty() {
+                socket.write_all(&to_write[..]).await?;
+            }
+            drop(to_write);
+
+            // now: either slab is full or split_request_queue is empty.  If slab is full, we shouldn't
+            // take any more requests, and we must complete a response read.
+            while inflight.len() == current_window_size {
+                let is_eof = socket.read_buf(&mut rbuf).await? == 0;
+
+                while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
+                    resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
+                }
+
+                if is_eof {
+                    connection_open = false;
+                    break;
+                }
+            }
+
+            if !request_queue_open && inflight.is_empty() && split_request_queue.is_empty() {
+                break;
+            }
+
+            if request_queue_open || !inflight.is_empty() {
+                ::tokio::select! {
+                    req = incoming_request_queue.recv(), if request_queue_open => {
+                        if let Some(v) = req {
+                            let GetPieceRequestResolver { request, resolver } = v;
+                            let (_, fetch_length) = storage_utils::compute_offset_length(
+                                request.piece_index, request.piece_length, request.total_length);
+
+                            let ps = PieceState::new(fetch_length, resolver);
+                            let pf = PiecePendingRequestFactory::new(piece_state.insert(ps), &request);
+                            split_request_queue.extend(pf);
+                        } else {
+                            request_queue_open = false;
+                        }
+                    },
+                    read_res = socket.read_buf(&mut rbuf), if !inflight.is_empty() => {
+                        if read_res? == 0 {
+                            connection_open = false;
+                        }
+                        while let Some(resp) = read_response_from_buffer(&mut rbuf)? {
+                            resolve_response(resp, &mut inflight, &mut piece_state, &mut latency)?;
+                        }
                     }
                 }
             }
         }
-    }
 
-    Ok(request_queue_open)
+        Ok(request_queue_open)
+    }.boxed()
 }
 
-impl RemoteMagnetite {
-    pub fn connected(addr: &str) -> RemoteMagnetite {
-        let addr: String = addr.to_string();
-        let (sender, mut incoming_request_queue) = mpsc::channel(16);
+pub fn start_remote_magnetite_client(
+    common: CommonInit,
+    connect_address: &str,
+    opts: RootStorageOpts,
+) -> Pin<Box<dyn Future<Output = Result<(), failure::Error>> + Send + 'static>> {
+    let (tx, rx) = mpsc::channel(10);
+    let control = tokio::task::spawn(start_remote_magnetite_client_control_loop(
+        common.clone(),
+        tx,
+        opts,
+    ));
+    let data = tokio::task::spawn(start_remote_magnetite_client_data_loop(
+        common,
+        rx,
+        connect_address.to_string(),
+    ));
 
-        task::spawn(async move {
-            const FAILURE_DELAY_MILLISECONDS_MAX: u64 = 60_000;
-            const FAILURE_DELAY_MILLISECONDS_START: u64 = 100;
-            let mut failure_delay_milliseconds: u64 = 0;
+    async {
+        let (a, b) = futures::future::join(control, data).await;
 
-            loop {
-                let socket = match TcpStream::connect(&addr).await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        event!(Level::ERROR, "upstream connection failure: {}", err);
+        a??;
+        b??;
 
-                        failure_delay_milliseconds += failure_delay_milliseconds;
-                        if FAILURE_DELAY_MILLISECONDS_MAX < failure_delay_milliseconds {
-                            failure_delay_milliseconds = FAILURE_DELAY_MILLISECONDS_MAX;
+        event!(Level::INFO, "shut down remote magnetite piece storage engine");
+
+        Ok(())
+    }
+    .boxed()
+}
+
+fn start_remote_magnetite_client_control_loop(
+    common: CommonInit,
+    requests: mpsc::Sender<GetPieceRequestResolver>,
+    opts: RootStorageOpts,
+) -> Pin<Box<dyn Future<Output = Result<(), failure::Error>> + Send + 'static>> {
+    let CommonInit { ebus, init_sig, mut term_sig } = common;
+
+    let mut ebus_incoming = ebus.subscribe();
+    drop(ebus);
+    drop(init_sig); // we've finished initializing.
+
+    let gp: GetPieceRequestChannel = requests.into();
+    
+    async move {
+
+        let engine_tmp: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> = Box::new(gp);
+        let mut engine: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static> = engine_tmp.into();
+        if opts.disk_cache_size_bytes != 0 {
+            let mut engine_disk_builder = DiskCacheWrapper::build_with_capacity_bytes(opts.disk_cache_size_bytes);
+            
+            if let Some(cr) = get_torrent_salsa(&opts.disk_crypto_secret, &TorrentId::zero()) {
+                engine_disk_builder.set_crypto(cr);
+            }
+
+            let cache_file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open("magnetite.cache")?;
+            let engine_disk = engine_disk_builder.build(cache_file.into(), engine);
+
+            let engine_tmp: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> = Box::new(engine_disk);
+            engine = engine_tmp.into();
+        }
+        if opts.memory_cache_size_bytes != 0 {
+            let engine_mem = MemoryCacheWrapper::build_with_capacity_bytes(opts.memory_cache_size_bytes)
+                .build(engine);
+
+            let engine_tmp: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> = Box::new(engine_mem);
+            engine = engine_tmp.into();
+        }
+
+        loop {
+            tokio::select! {
+                _ = &mut term_sig => {
+                    drop(ebus_incoming);
+                    break;
+                }
+                control_req = ebus_incoming.recv() => {
+                    let creq = match control_req {
+                        Ok(v) => v,
+                        Err(broadcast::RecvError::Closed) => {
+                            break;
                         }
+                        Err(broadcast::RecvError::Lagged(..)) => {
+                            event!(Level::ERROR, "piece fetch loop lagged - we're dropping requests");
+                            continue;
+                        },
+                    };
 
-                        tokio::time::delay_for(tokio::time::Duration::from_millis(
-                            failure_delay_milliseconds,
-                        ))
-                        .await;
-
-                        continue;
-                    }
-                };
-
-                failure_delay_milliseconds = FAILURE_DELAY_MILLISECONDS_START;
-
-                match run_connected(socket, &mut incoming_request_queue).await {
-                    Ok(false) => break,
-                    Ok(true) => (),
-                    Err(err) => {
-                        event!(Level::ERROR, "upstream connection aborted: {}", err);
-                        continue;
-                    }
+                    if let Some(pf) = creq.downcast_ref::<BusFindPieceFetcher>() {
+                        let pf: BusFindPieceFetcher = pf.clone();
+                        tokio::task::spawn(pf.respond(engine.clone()));
+                    };
                 }
             }
-        });
+        }
 
-        RemoteMagnetite { sender }
-    }
+        event!(Level::INFO, "piece fetcher control system has shut down");
+
+        Ok(())
+    }.boxed()
 }
 
-pub async fn start_server<S>(mut socket: TcpStream, engine: S) -> Result<(), MagnetiteError>
+fn start_remote_magnetite_client_data_loop(
+    common: CommonInit,
+    mut incoming_request_queue: mpsc::Receiver<GetPieceRequestResolver>,
+    addr: String,
+) -> Pin<Box<dyn Future<Output = Result<(), failure::Error>> + Send + 'static>> {
+    async move {
+        use tokio::time::delay_for;
+
+        let CommonInit { ebus, init_sig, mut term_sig } = common;
+
+        drop(ebus);
+        drop(init_sig); // we've finished initializing.
+
+        const FAILURE_DELAY_MILLISECONDS_MAX: u64 = 60_000;
+        const FAILURE_DELAY_MILLISECONDS_START: u64 = 100;
+        let mut failure_delay_milliseconds: u64 = 0;
+
+        loop {
+            let term_sig_p = Pin::new(&mut term_sig);
+            let connect = TcpStream::connect(&addr).boxed();
+            let socket = match term_sig_p.await_with(connect).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(err)) => {
+                    event!(Level::ERROR, "upstream connection failure: {}", err);
+
+                    failure_delay_milliseconds += failure_delay_milliseconds;
+                    if FAILURE_DELAY_MILLISECONDS_MAX < failure_delay_milliseconds {
+                        failure_delay_milliseconds = FAILURE_DELAY_MILLISECONDS_MAX;
+                    }
+                    
+                    delay_for(Duration::from_millis(failure_delay_milliseconds)).await;
+
+                    continue;
+                }
+                Err(()) => {
+                    break;
+                }
+            };
+
+            failure_delay_milliseconds = FAILURE_DELAY_MILLISECONDS_START;
+
+            let run_fut = run_connected(socket, &mut incoming_request_queue);
+            let term_sig_p = Pin::new(&mut term_sig);
+            match term_sig_p.await_with(run_fut).await {
+                Ok(Ok(false)) => break,
+                Ok(Ok(true)) => (),
+                Ok(Err(err)) => {
+                    event!(Level::ERROR, "upstream connection aborted: {}", err);
+                    continue;
+                },
+                Err(()) => break,
+            }
+        }
+
+        event!(Level::INFO, "piece fetcher data system has shut down");
+
+        Ok(())
+    }.boxed()
+}
+
+
+pub fn start_remote_magnetite_host_service(
+    common: CommonInit,
+    bind_address: &str,
+) -> Pin<Box<dyn Future<Output=Result<(), failure::Error>> + Send + 'static>> {
+    let bind_address = bind_address.to_string();
+    async move {
+        let CommonInit { mut ebus, mut init_sig, mut term_sig } = common;
+
+        let mut ebus_incoming = ebus.subscribe();
+        drop(init_sig);
+
+        let (bus_req, mut rx) = BusFindPieceFetcher::pair();
+
+        // FIXME: obviously this is bad.  Maybe we can use a barrier here.
+        tokio::time::delay_for(Duration::from_millis(10)).await;
+
+        let bus_req: Box<dyn Any + Send + Sync> = Box::new(bus_req);
+        ebus.send(bus_req.into()).unwrap();
+        drop(ebus);
+
+        let piece_fetcher = rx.next().await.unwrap();
+
+        let mut listener = TcpListener::bind(&bind_address).await.unwrap();
+
+        event!(Level::INFO, "host backend bind successful: {:?}", bind_address);
+
+        let state: State = Default::default();
+        let state = Arc::new(RwLock::new(Arc::new(state)));
+
+        loop {
+            tokio::select! {
+                _ = &mut term_sig => {
+                    break;
+                }
+                control_req = ebus_incoming.recv() => {
+                    let creq = match control_req {
+                        Ok(v) => v,
+                        Err(broadcast::RecvError::Closed) => {
+                            break;
+                        }
+                        Err(broadcast::RecvError::Lagged(..)) => {
+                            event!(Level::ERROR, "piece fetch loop lagged - we're dropping requests");
+                            continue;
+                        },
+                    };
+                    if let Some(ns) = creq.downcast_ref::<BusNewState>() {
+                        let mut s = state.write().await;
+                        *s = Arc::clone(&ns.state);
+                    }
+                    
+                }
+                res = listener.accept() => {
+                    let (socket, addr) = match res {
+                        Ok(v) => v,
+                        Err(err) => {
+                            event!(Level::ERROR, "listener error {:?}", err);
+                            continue;
+                        },
+                    };
+
+                    event!(Level::INFO, "got connection from {:?}", addr);
+                    let piece_fetcher = piece_fetcher.clone();
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = start_server(socket, piece_fetcher, state).await {
+                            event!(Level::ERROR, "error: {}", err);
+                        }
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }.boxed()
+}
+
+
+async fn start_server<S>(mut socket: TcpStream, engine: S, state: Arc<RwLock<Arc<State>>>) -> Result<(), MagnetiteError>
 where
-    S: PieceStorageEngine,
+    S: PieceStorageEngineDumb,
 {
     use std::collections::hash_map::HashMap;
 
@@ -517,7 +729,44 @@ where
                     let piece = match fast_cache.get(&cache_key) {
                         Some(piece) => piece.clone(),
                         None => {
-                            let piece = engine.get_piece(&p.content_key, p.piece_index).await?;
+                            let s = state.read().await;
+
+                            let content_info = s.get(&p.content_key)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    event!(Level::ERROR, "failed to find content {}", p.content_key.hex());
+                                    ProtocolViolation
+                                })
+                                ?;
+
+                            drop(s);
+
+                            let piece_sha = content_info
+                                .piece_shas
+                                .get(p.piece_index as usize)
+                                .ok_or_else(|| {
+                                    event!(Level::ERROR, "protocol violation #1");
+                                    ProtocolViolation
+                                })
+                                ?;
+
+                            let req = GetPieceRequest {
+                                content_key: p.content_key,
+                                piece_sha: *piece_sha,
+                                piece_length: content_info.piece_length,
+                                total_length: content_info.total_length,
+                                piece_index: p.piece_index,
+                            };
+
+                            event!(Level::DEBUG, "doing fetch for {:?}", req);
+
+                            let piece_res = engine.get_piece_dumb(&req).await;
+
+                            if let Err(ref err) = piece_res {
+                                event!(Level::ERROR, "error fetching {:?}: {}", req, err);
+                            };
+
+                            let piece = piece_res?;
 
                             fast_cache.insert(cache_key, piece.clone());
 
@@ -526,11 +775,13 @@ where
                     };
 
                     if piece.len() < piece_offset as usize {
+                        event!(Level::ERROR, "protocol violation #2");
                         return Err(ProtocolViolation.into());
                     }
 
                     let piece_rest = &piece[piece_offset..];
                     if piece_rest.len() < fetch_length {
+                        event!(Level::ERROR, "protocol violation #3");
                         return Err(ProtocolViolation.into());
                     }
                     let piece_rest = &piece_rest[..fetch_length];

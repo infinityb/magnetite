@@ -2,13 +2,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-
+use std::fmt;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::{Future, FutureExt};
 use lru::LruCache;
 use tokio::fs::File as TokioFile;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use magnetite_common::TorrentId;
 
@@ -20,6 +20,7 @@ pub mod piggyback;
 pub mod remote_magnetite;
 pub mod root_storage_service;
 pub mod sha_verify;
+pub mod state_holder_system;
 pub mod state_wrapper;
 
 #[cfg(test)]
@@ -32,7 +33,7 @@ pub use self::piece_file::PieceFileStorageEngine;
 pub use self::sha_verify::{ShaVerify, ShaVerifyMode};
 pub use self::state_wrapper::StateWrapper;
 
-use crate::model::{MagnetiteError, TorrentMeta};
+use crate::model::{CompletionLost, MagnetiteError, TorrentMeta};
 use crate::storage::state_wrapper::{ContentInfo, ContentInfoManager};
 
 #[derive(Copy, Clone, Debug)]
@@ -63,6 +64,43 @@ pub trait PieceStorageEngineDumb {
         &self,
         req: &GetPieceRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>>;
+}
+
+// --
+
+#[derive(Clone)]
+pub struct GetPieceRequestChannel {
+    sender: mpsc::Sender<GetPieceRequestResolver>,
+}
+
+impl From<mpsc::Sender<GetPieceRequestResolver>> for GetPieceRequestChannel {
+    fn from(s: mpsc::Sender<GetPieceRequestResolver>) -> GetPieceRequestChannel {
+        GetPieceRequestChannel { sender: s }
+    }
+}
+
+impl PieceStorageEngineDumb for GetPieceRequestChannel {
+    fn get_piece_dumb(
+        &self,
+        req: &GetPieceRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+        let mut self_cloned: Self = self.clone();
+        let req: GetPieceRequest = *req;
+        async move {
+            let (tx, rx) = oneshot::channel();
+            self_cloned
+                .sender
+                .send(GetPieceRequestResolver {
+                    request: req,
+                    resolver: tx,
+                })
+                .await
+                .map_err(|e| CompletionLost)?;
+
+            rx.await.map_err(|e| CompletionLost)?
+        }
+        .boxed()
+    }
 }
 
 // pub trait PieceStorageEngineMut: PieceStorageEngine {
@@ -100,8 +138,9 @@ pub trait PieceStorageEngineDumb {
 pub mod utils {
     use std::io::{self, SeekFrom};
 
+    use bytes::BytesMut;
     use tokio::fs::File as TokioFile;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncRead, AsyncReadExt};
     use tokio::sync::Mutex;
 
     pub async fn piece_file_pread_exact(
@@ -112,6 +151,16 @@ pub mod utils {
         let mut piece_file = file.lock().await;
         piece_file.seek(SeekFrom::Start(offset)).await?;
         piece_file.read_exact(buf).await?;
+        Ok(())
+    }
+
+    pub async fn file_read_buf<R: AsyncRead>(mut file: R, out: &mut BytesMut) -> io::Result<()> {
+        loop {
+            let bytes_read = file.read_buf(out).await?;
+            if bytes_read == 0 {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -303,7 +352,20 @@ impl OpenFileCache {
     }
 }
 
-// -- 
+// --
+
+#[derive(Debug)]
+pub struct CacheMiss;
+
+impl fmt::Display for CacheMiss {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "CacheMiss")
+    }
+}
+
+impl std::error::Error for CacheMiss {}
+
+// --
 
 #[deprecated]
 pub struct AddTorrentRequest {

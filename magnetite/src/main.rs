@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::any::Any;
 use std::sync::Arc;
 
@@ -7,10 +5,13 @@ use clap::{App, AppSettings, Arg};
 use futures::future::FutureExt;
 use metrics_runtime::Receiver;
 use tokio::runtime::Runtime;
-use tokio::sync::broadcast;
+use tokio::signal;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
+
+use crate::utils::close_waiter;
 
 mod bittorrent;
 mod cmdlet;
@@ -26,6 +27,13 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 type BusMessage = Arc<dyn Any + Send + Sync>;
+
+#[derive(Clone)]
+pub struct CommonInit {
+    ebus: broadcast::Sender<BusMessage>,
+    init_sig: mpsc::Sender<()>,
+    term_sig: crate::utils::close_waiter::Done,
+}
 
 fn main() -> Result<(), failure::Error> {
     let mut rt = Runtime::new().unwrap();
@@ -64,17 +72,13 @@ fn main() -> Result<(), failure::Error> {
                 .help("The address to bind to for control commands")
                 .takes_value(true),
         )
+        .subcommand(cmdlet::host::get_subcommand())
         .subcommand(cmdlet::ctl::get_subcommand())
-        .subcommand(cmdlet::seed::get_subcommand())
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
         .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
         .subcommand(cmdlet::validate_mse_tome::get_subcommand())
-        .subcommand(cmdlet::host::get_subcommand())
-        .subcommand(cmdlet::webserver::get_subcommand())
         .subcommand(cmdlet::validate_torrent_data::get_subcommand());
 
-    #[cfg(feature = "with-fuse")]
-    let app = app.subcommand(cmdlet::fuse_mount::get_subcommand());
     let matches = app.get_matches();
 
     let verbosity = matches.occurrences_of("v");
@@ -108,7 +112,19 @@ fn main() -> Result<(), failure::Error> {
         });
     }
 
-    let (eb_tx, _) = broadcast::channel(1024);
+    let (init_sig, init_sig_rx) = mpsc::channel(1);
+    let (holder, term_sig) = close_waiter::channel();
+    rt.spawn(async move {
+        signal::ctrl_c().await.expect("failed to listen for event");
+        event!(Level::INFO, "got ctrl+c - finishing up pending work");
+        drop(holder);
+    });
+    let (ebus, _) = broadcast::channel(1024);
+    let common_init = CommonInit {
+        ebus,
+        init_sig,
+        term_sig,
+    };
 
     let (sub_name, args) = matches.subcommand();
     let args = args.expect("subcommand args");
@@ -116,9 +132,9 @@ fn main() -> Result<(), failure::Error> {
     if let Some(addr) = matches.value_of("control-bind-address") {
         if sub_name != cmdlet::ctl::SUBCOMMAND_NAME {
             let addr = addr.to_string();
-            let eb_tx = eb_tx.clone();
+            let common_init = common_init.clone();
             rt.spawn(async move {
-                if let Err(err) = crate::control::start_control_service(eb_tx, &addr).await {
+                if let Err(err) = crate::control::start_control_service(common_init, &addr).await {
                     event!(Level::ERROR, "control service shut down: {}", err);
                 };
             });
@@ -127,16 +143,11 @@ fn main() -> Result<(), failure::Error> {
 
     let main_future = match sub_name {
         cmdlet::ctl::SUBCOMMAND_NAME => cmdlet::ctl::main(args).boxed(),
-        cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(eb_tx.clone(), args).boxed(),
+        // cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(common_init, args).boxed(),
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main(args).boxed(),
         cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main(args).boxed(),
         cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main(args).boxed(),
-        #[cfg(feature = "with-fuse")]
-        cmdlet::fuse_mount::SUBCOMMAND_NAME => {
-            cmdlet::fuse_mount::main(eb_tx.clone(), args).boxed()
-        }
-        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(eb_tx.clone(), args).boxed(),
-        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(eb_tx.clone(), args).boxed(),
+        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(common_init, args).boxed(),
         cmdlet::validate_torrent_data::SUBCOMMAND_NAME => {
             cmdlet::validate_torrent_data::main(args).boxed()
         }

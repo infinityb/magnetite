@@ -1,18 +1,18 @@
 use std::collections::BTreeMap;
-use std::io::{self, SeekFrom};
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use super::{GetPieceRequest, OpenFileCache, PieceStorageEngineDumb};
+use super::{utils::file_read_buf, GetPieceRequest, OpenFileCache, PieceStorageEngineDumb};
 use crate::model::{InternalError, MagnetiteError, ProtocolViolation};
 
 struct TorrentState {
@@ -113,7 +113,7 @@ impl PieceStorageEngineDumb for MultiFileStorageEngine {
                     .rev()
                     .next()
                     .ok_or_else(|| InternalError {
-                        msg: "failed to find file",
+                        msg: "failed to find span",
                     })?;
 
                 let file_rel_offset = piece_offset_start - *offset;
@@ -137,14 +137,4 @@ impl PieceStorageEngineDumb for MultiFileStorageEngine {
         }
         .boxed()
     }
-}
-
-async fn file_read_buf<R: AsyncRead>(mut file: R, out: &mut BytesMut) -> io::Result<()> {
-    loop {
-        let bytes_read = file.read_buf(out).await?;
-        if bytes_read == 0 {
-            break;
-        }
-    }
-    Ok(())
 }

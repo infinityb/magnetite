@@ -32,9 +32,6 @@ impl fmt::Debug for PieceCacheEntry {
 struct MemoryPieceCacheInfo {
     cache_size_max: u64,
     cache_size_cur: u64,
-    fetched_bytes: u64,
-    fetched_upstream_bytes: u64,
-    next_cache_report_print: Instant,
     pieces: LruCache<(TorrentId, u32), PieceCacheEntry>,
 }
 
@@ -65,9 +62,6 @@ impl Builder {
             piece_cache: Arc::new(Mutex::new(MemoryPieceCacheInfo {
                 cache_size_max: self.cache_size_max,
                 cache_size_cur: 0,
-                fetched_bytes: 0,
-                fetched_upstream_bytes: 0,
-                next_cache_report_print: Instant::now() + Duration::new(60, 0),
                 // we control the eviction manually by bytes instead of items.
                 pieces: LruCache::unbounded(),
             })),
@@ -138,9 +132,6 @@ where
             );
 
             let now = Instant::now();
-            if piece_cache.next_cache_report_print < now {
-                piece_cache.next_cache_report_print = now + Duration::new(60, 0);
-            }
 
             if let Some(v) = piece_cache.pieces.get(&piece_key) {
                 let completion_fut = v.inflight.clone().complete();
@@ -148,13 +139,10 @@ where
 
                 let res = completion_fut.await;
                 if let Ok(ref bytes) = res {
-                    let mut piece_cache = self_cloned.piece_cache.lock().await;
-                    piece_cache.fetched_bytes += bytes.len() as u64;
-                    gauge!(
-                        "memorycache.served_bytes",
-                        piece_cache.fetched_bytes.try_into().unwrap()
-                    );
+                    counter!("memorycache.cache_read_bytes", bytes.len() as u64);
                     counter!("memorycache.cache_hit", 1);
+                } else {
+                    counter!("memorycache.cache_failure", 1);
                 }
                 return res;
             }
@@ -177,16 +165,6 @@ where
                 if let Ok(ref bytes) = res {
                     let mut piece_cache = self_cloned2.piece_cache.lock().await;
                     piece_cache.cache_size_cur += bytes.len() as u64;
-                    piece_cache.fetched_bytes += bytes.len() as u64;
-                    piece_cache.fetched_upstream_bytes += bytes.len() as u64;
-                    gauge!(
-                        "memorycache.served_bytes",
-                        piece_cache.fetched_bytes.try_into().unwrap()
-                    );
-                    gauge!(
-                        "memorycache.fetched_bytes",
-                        piece_cache.fetched_upstream_bytes.try_into().unwrap()
-                    );
                     counter!("memorycache.cache_miss", 1);
                 }
 

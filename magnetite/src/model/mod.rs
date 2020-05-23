@@ -7,10 +7,14 @@ use failure::Fail;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use salsa20::XSalsa20;
+use salsa20::stream_cipher::{NewStreamCipher, generic_array::GenericArray};
 
 use magnetite_common::TorrentId;
 
-pub mod config;
+use crate::storage::CacheMiss;
+
+// pub mod config;
 pub mod proto;
 
 use crate::CARGO_PKG_VERSION;
@@ -35,8 +39,20 @@ pub enum MagnetiteError {
     CompletionLost,
     #[fail(display = "internal error: {}", msg)]
     InternalError { msg: String },
+    #[fail(display = "invalid argument: {}", msg)]
+    InvalidArgument { msg: String },
+    #[fail(display = "cache miss")]
+    CacheMiss,
 }
 
+impl MagnetiteError {
+    pub fn is_cache_miss(&self) -> bool {
+        match *self {
+            MagnetiteError::CacheMiss => true,
+            _ => false,
+        }
+    }
+}
 impl From<CompletionLost> for MagnetiteError {
     fn from(_e: CompletionLost) -> MagnetiteError {
         MagnetiteError::CompletionLost
@@ -78,6 +94,12 @@ impl From<InternalError> for MagnetiteError {
         MagnetiteError::InternalError {
             msg: e.msg.to_string(),
         }
+    }
+}
+
+impl From<CacheMiss> for MagnetiteError {
+    fn from(e: CacheMiss) -> MagnetiteError {
+        MagnetiteError::CacheMiss
     }
 }
 //
@@ -605,5 +627,19 @@ impl<'a> Iterator for Iter<'a> {
             self.cur_byte = *self.parent.next()?;
             self.bit_offset = 0;
         }
+    }
+}
+
+// --
+
+pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentId) -> Option<XSalsa20> {
+    if !crypto_secret.is_empty() {
+        let mut nonce_data = [0; 24];
+        nonce_data[4..].copy_from_slice(info_hash.as_bytes());
+        let nonce = GenericArray::from_slice(&nonce_data[..]);
+        let key = GenericArray::from_slice(crypto_secret.as_bytes());
+        Some(XSalsa20::new(&key, &nonce))
+    } else {
+        None
     }
 }

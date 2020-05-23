@@ -1,6 +1,5 @@
 #![cfg_attr(not(unix), allow(unused_imports))]
 
-use std::any::Any;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -14,11 +13,11 @@ use fuse::{
 };
 use libc::{c_int, EINVAL};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tracing::{event, Level};
 
-use crate::model::config::{build_storage_engine_states, BuiltStates, StorageEngineServices};
-
+use crate::model::config::{build_storage_engine_states, BuiltStates};
+use crate::CommonInit;
 use crate::storage::{multi_piece_read, MultiPieceReadRequest, PieceStorageEngineDumb};
 use crate::vfs::{
     Directory, FileEntry, FileEntryData, FileType as VfsFileType, FilesystemImpl,
@@ -254,7 +253,7 @@ pub async fn main(
 #[cfg(unix)]
 #[allow(clippy::cognitive_complexity)] // macro bug around event!()
 pub async fn main(
-    ebus: broadcast::Sender<crate::BusMessage>,
+    common: CommonInit,
     matches: &clap::ArgMatches<'_>,
 ) -> Result<(), failure::Error> {
     use crate::model::config::Config;
@@ -271,11 +270,7 @@ pub async fn main(
     let mount_point = Path::new(mount_point).to_owned();
 
     let BuiltStates {
-        storage_engine:
-            StorageEngineServices {
-                piece_fetcher,
-                torrent_managers,
-            },
+        storage_engine: piece_fetcher,
         content_info_manager,
         path_to_torrent,
     } = build_storage_engine_states(&config).unwrap();

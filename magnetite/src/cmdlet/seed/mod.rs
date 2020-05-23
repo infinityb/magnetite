@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -17,7 +16,7 @@ use futures::stream::{Stream, StreamExt};
 use iresult::IResult;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
@@ -26,8 +25,9 @@ use crate::bittorrent::peer_state::{
     merge_global_payload_stats, GlobalState, PeerState, Session, Stats,
 };
 use crate::model::config::{
-    build_storage_engine, Config, Frontend, FrontendSeed, StorageEngineServicesWithMeta,
+    build_storage_engine, Config, Frontend, FrontendSeed,
 };
+use crate::CommonInit;
 use crate::model::proto::{deserialize, serialize, Handshake, Message, PieceSlice, HANDSHAKE_SIZE};
 use crate::model::MagnetiteError;
 use crate::model::{generate_peer_id_seeded, BadHandshake, BitField, ProtocolViolation, Truncated};
@@ -307,7 +307,7 @@ fn apply_work_state(
 }
 
 pub async fn main(
-    ebus: broadcast::Sender<crate::BusMessage>,
+    common: CommonInit,
     matches: &clap::ArgMatches<'_>,
 ) -> Result<(), failure::Error> {
     let config = matches.value_of("config").unwrap();
@@ -317,10 +317,7 @@ pub async fn main(
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
     let peer_id = generate_peer_id_seeded(&config.client_secret);
-    let StorageEngineServicesWithMeta {
-        piece_fetcher,
-        torrent_managers,
-    } = build_storage_engine(&config).unwrap();
+    let piece_fetcher = build_storage_engine(&config).unwrap();
 
     let torrent_stats: Arc<Mutex<HashMap<TorrentId, Arc<Mutex<Stats>>>>> = Default::default();
     let gs: Arc<Mutex<GlobalState>> = Default::default();

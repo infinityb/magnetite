@@ -1,21 +1,16 @@
-use std::any::Any;
 use std::fs::File;
 use std::io::Read;
 
 use clap::{App, AppSettings, Arg, SubCommand};
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
 use tonic::transport::channel::Channel;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use crate::model::config::{
-    build_storage_engine, Frontend, FrontendHost, StorageEngineServicesWithMeta,
-};
-use crate::storage::remote_magnetite::start_server;
 use crate::utils::ByteSize;
 use crate::CARGO_PKG_VERSION;
+use crate::control::api::add_torrent_request::BackingFile;
+use crate::control::api::TorrentDataSourceTome;
 
 pub const SUBCOMMAND_NAME: &str = "ctl";
 
@@ -26,10 +21,8 @@ pub const SUBCOMMAND_REMOVE_TORRENT_NAME: &str = "remove-torrent";
 pub const SUBCOMMAND_LIST_TORRENTS_NAME: &str = "list-torrents";
 
 use crate::control::api::{
-    add_torrent_request::{BackingFile, TorrentFile},
-    torrent_host_client::TorrentHostClient,
-    AddTorrentRequest, AddTorrentResponse, ListTorrentsRequest, ListTorrentsResponse,
-    RemoveTorrentRequest, RemoveTorrentResponse, TorrentDataSourceMultiFile,
+    add_torrent_request::TorrentFile, torrent_host_client::TorrentHostClient, AddTorrentRequest,
+    ListTorrentsRequest, RemoveTorrentRequest,
 };
 
 pub fn get_subcommand() -> App<'static, 'static> {
@@ -41,6 +34,12 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .help("load from this path or URL")
                 .required(true)
                 .index(1),
+        )
+        .arg(
+            Arg::with_name("location")
+                .long("location")
+                .help("where to get the data from")
+                .takes_value(true)
         );
 
     let remove_torrent = SubCommand::with_name(SUBCOMMAND_REMOVE_TORRENT_NAME)
@@ -83,11 +82,19 @@ pub async fn add_torrent(
     let mut file_data = Vec::new();
     fi.read_to_end(&mut file_data)?;
 
+    let mut backing_file = None;
+    if let Some(file_path) = matches.value_of("location") {
+        backing_file = Some(BackingFile::Tome(TorrentDataSourceTome {
+            file_path: file_path.to_string(),
+        }));
+    }
+
     let request = tonic::Request::new(AddTorrentRequest {
         torrent_file: Some(TorrentFile::Bytes(file_data)),
         crypto_key: Vec::new(),
-        backing_file: None,
+        backing_file: backing_file,
     });
+
     let response = client.add_torrent(request).await?;
     let resp_data = response.get_ref();
     let info_hash = TorrentId::from_slice(&resp_data.info_hash[..])?;

@@ -1,17 +1,19 @@
 use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Instant};
 
+use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use metrics::{counter, timing};
 use tokio::sync::{broadcast, mpsc};
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::transport::Server;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
 use crate::model::TorrentMetaWrapped;
+use crate::CommonInit;
 
 pub mod messages;
 pub mod api {
@@ -19,10 +21,9 @@ pub mod api {
 }
 
 use self::api::{
-    add_torrent_request::TorrentFile,
-    torrent_host_server::{TorrentHost, TorrentHostServer},
-    AddTorrentRequest, AddTorrentResponse, ListTorrentsRequest, ListTorrentsResponse,
-    RemoveTorrentRequest, RemoveTorrentResponse, TorrentEntry,
+    add_torrent_request::TorrentFile, torrent_host_server::TorrentHost, AddTorrentRequest,
+    AddTorrentResponse, ListTorrentsRequest, ListTorrentsResponse, RemoveTorrentRequest,
+    RemoveTorrentResponse, TorrentEntry,
 };
 use self::messages::{BusAddTorrent, BusListTorrents, BusRemoveTorrent};
 
@@ -56,14 +57,22 @@ impl TorrentHost for Control {
             }
             None => return Err(tonic::Status::invalid_argument("torrent_file is mandatory")),
         };
+        let backing_file = req
+            .backing_file
+            .clone()
+            .ok_or_else(|| {
+                tonic::Status::invalid_argument("backing_file is mandatory")
+            })?;
+
         timing!("control.add_torrent_parse_time", parse_start.elapsed());
 
         let info_hash = torrent.info_hash;
         let torrent = Arc::new(torrent);
 
         let (tx, mut rx) = mpsc::channel(8);
-        let bus_req: Box<Any + Send + Sync> = Box::new(BusAddTorrent {
+        let bus_req: Box<dyn Any + Send + Sync> = Box::new(BusAddTorrent {
             torrent: torrent,
+            backing_file: backing_file,
             response: tx,
         });
 
@@ -92,7 +101,15 @@ impl TorrentHost for Control {
         counter!("magnetite_control.remove_torrent_requests", 1);
 
         let (tx, mut rx) = mpsc::channel(8);
-        let bus_req: Box<Any + Send + Sync> = Box::new(BusRemoveTorrent { response: tx });
+
+        let info_hash_buf = &request.get_ref().info_hash[..];
+        let info_hash = TorrentId::from_slice(info_hash_buf)
+            .map_err(|e| tonic::Status::invalid_argument("invalid info_hash"))?;
+
+        let bus_req: Box<dyn Any + Send + Sync> = Box::new(BusRemoveTorrent {
+            info_hash,
+            response: tx,
+        });
 
         let resolve_start = Instant::now();
         self.sender.send(bus_req.into()).map_err(|e| {
@@ -120,7 +137,7 @@ impl TorrentHost for Control {
         counter!("control.list_torrents_requests", 1);
 
         let (tx, mut rx) = mpsc::channel(8);
-        let bus_req: Box<Any + Send + Sync> = Box::new(BusListTorrents { response: tx });
+        let bus_req: Box<dyn Any + Send + Sync> = Box::new(BusListTorrents { response: tx });
 
         let resolve_start = Instant::now();
         self.sender.send(bus_req.into()).map_err(|e| {
@@ -146,87 +163,30 @@ impl TorrentHost for Control {
 }
 
 pub async fn start_control_service(
-    ebus: broadcast::Sender<crate::BusMessage>,
+    common: CommonInit,
     bind_addr: &str,
 ) -> Result<(), failure::Error> {
-    let mut mock_ebus_rx = ebus.subscribe();
-    tokio::task::spawn(async move {
-        loop {
-            let req = match mock_ebus_rx.recv().await {
-                Ok(v) => v,
-                Err(broadcast::RecvError::Closed) => break,
-                Err(broadcast::RecvError::Lagged(v)) => {
-                    event!(Level::WARN, "mock ebus responder lagged {}", v);
-                    continue;
-                }
-            };
-
-            if let Some(blt) = req.downcast_ref::<BusListTorrents>() {
-                let mut blt: BusListTorrents = blt.clone();
-                drop(req);
-
-                tokio::task::spawn(async move {
-                    let _ = blt
-                        .response
-                        .send(vec![TorrentEntry {
-                            info_hash: TorrentId::from([
-                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                            ])
-                            .into(),
-                            name: "collection #0".to_string(),
-                            size_bytes: 100000,
-                        }])
-                        .await;
-                });
-            }
-        }
-    });
-
-    let mut mock_ebus_rx = ebus.subscribe();
-    tokio::task::spawn(async move {
-        loop {
-            let req = match mock_ebus_rx.recv().await {
-                Ok(v) => v,
-                Err(broadcast::RecvError::Closed) => break,
-                Err(broadcast::RecvError::Lagged(v)) => {
-                    event!(Level::WARN, "mock ebus responder lagged {}", v);
-                    continue;
-                }
-            };
-            if let Some(blt) = req.downcast_ref::<BusListTorrents>() {
-                let mut blt: BusListTorrents = blt.clone();
-                drop(req);
-
-                tokio::time::delay_for(Duration::from_millis(600)).await;
-
-                tokio::task::spawn(async move {
-                    let _ = blt
-                        .response
-                        .send(vec![TorrentEntry {
-                            info_hash: TorrentId::from([
-                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-                            ])
-                            .into(),
-                            name: "collection #1".to_string(),
-                            size_bytes: 900000,
-                        }])
-                        .await;
-                });
-            }
-        }
-    });
-
     event!(Level::INFO, "binding control socket {}", bind_addr);
 
+    let CommonInit {
+        ebus, mut term_sig, ..
+    } = common;
     let server = Control { sender: ebus };
+
     let addr: SocketAddr = bind_addr.parse()?;
 
     let serve = Server::builder()
         .add_service(api::torrent_host_server::TorrentHostServer::new(server))
         .serve(addr)
-        .await?;
+        .boxed();
+
+    use std::pin::Pin;
+    let pinned_term_sig = Pin::new(&mut term_sig);
+    if let Ok(serve_res) = pinned_term_sig.await_with(serve).await {
+        serve_res?;
+    }
+
+    event!(Level::INFO, "shutdown control server");
 
     Ok(())
 }
