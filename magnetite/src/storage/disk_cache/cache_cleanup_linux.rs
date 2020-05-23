@@ -1,14 +1,14 @@
 use std::cmp::Ordering;
-use std::time::{SystemTime, Duration};
 use std::collections::BinaryHeap;
+use std::time::{Duration, SystemTime};
 
-use tracing::{event, Level};
+use metrics::counter;
 use nix::fcntl::{fallocate, FallocateFlags};
-use metrics::{counter};
+use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use super::{PieceCacheInfo, FileSpan};
+use super::{FileSpan, PieceCacheInfo};
 use crate::utils::OwnedFd;
 
 #[derive(Debug)]
@@ -39,7 +39,11 @@ impl PartialEq for HeapEntry {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size: u64) -> Vec<FileSpan> {
+pub(super) fn cache_cleanup(
+    cache: &mut PieceCacheInfo,
+    adding: u64,
+    batch_size: u64,
+) -> Vec<FileSpan> {
     let predicted_used_space = cache.cache_size_cur + adding;
     if predicted_used_space < cache.cache_size_max {
         return Vec::new();
@@ -82,7 +86,10 @@ pub(super) fn cache_cleanup(cache: &mut PieceCacheInfo, adding: u64, batch_size:
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn punch_cache(cache: OwnedFd, punch_spans: Vec<FileSpan>) -> Result<(), nix::Error> {
+pub(super) async fn punch_cache(
+    cache: OwnedFd,
+    punch_spans: Vec<FileSpan>,
+) -> Result<(), nix::Error> {
     use std::os::unix::io::AsRawFd;
 
     use metrics::timing;

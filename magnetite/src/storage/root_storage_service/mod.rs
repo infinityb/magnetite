@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::fs::OpenOptions;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::fmt;
-use std::fs::OpenOptions;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::{Future, FutureExt};
@@ -18,17 +18,15 @@ use tracing::{event, Level};
 use magnetite_common::TorrentId;
 
 use super::{
-    utils::file_read_buf, GetPieceRequest, GetPieceRequestResolver, OpenFileCache,
+    disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, utils::file_read_buf,
+    GetPieceRequest, GetPieceRequestChannel, GetPieceRequestResolver, OpenFileCache,
     PieceStorageEngineDumb,
-    GetPieceRequestChannel,
-    disk_cache::{DiskCacheWrapper},
-    memory_cache::{MemoryCacheWrapper},
 };
-use crate::control::messages::{BusAddTorrent, BusFindPieceFetcher, BusRemoveTorrent};
 use crate::control::api::add_torrent_request::BackingFile;
+use crate::control::messages::{BusAddTorrent, BusFindPieceFetcher, BusRemoveTorrent};
 use crate::model::{
-    get_torrent_salsa,
-    CompletionLost, InternalError, MagnetiteError, ProtocolViolation, TorrentMetaWrapped,
+    get_torrent_salsa, CompletionLost, InternalError, MagnetiteError, ProtocolViolation,
+    TorrentMetaWrapped,
 };
 use crate::CommonInit;
 
@@ -105,10 +103,13 @@ impl SharedState {
                     let mut acc = 0;
                     let mut piece_file_paths: BTreeMap<u64, FileInfo> = Default::default();
                     for f in &wrapped.meta.info.files {
-                        piece_file_paths.insert(acc, FileInfo {
-                            rel_path: f.path.clone(),
-                            file_size: f.length,
-                        });
+                        piece_file_paths.insert(
+                            acc,
+                            FileInfo {
+                                rel_path: f.path.clone(),
+                                file_size: f.length,
+                            },
+                        );
                         acc += f.length;
                     }
 
@@ -117,11 +118,9 @@ impl SharedState {
                         piece_file_paths,
                     })
                 }
-                BackingFile::Tome(ref mf) => {
-                    BackingStore::Tome(BackingStoreTome {
-                        file_path: PathBuf::from(&mf.file_path),
-                    })
-                }
+                BackingFile::Tome(ref mf) => BackingStore::Tome(BackingStoreTome {
+                    file_path: PathBuf::from(&mf.file_path),
+                }),
                 BackingFile::Remote(ref mf) => {
                     return Err(MagnetiteError::InvalidArgument {
                         msg: format!("remote resources not supported in local mode"),
@@ -130,10 +129,13 @@ impl SharedState {
             };
 
             let mut locked = self_cloned.lockable.lock().await;
-            locked.torrents.insert(wrapped.info_hash, TorrentState {
-                crypto: None,
-                backing_store: Arc::new(backing_store),
-            });
+            locked.torrents.insert(
+                wrapped.info_hash,
+                TorrentState {
+                    crypto: None,
+                    backing_store: Arc::new(backing_store),
+                },
+            );
 
             event!(Level::INFO, "state = {:?}", locked.torrents);
 
@@ -334,7 +336,7 @@ fn piece_fetch_control_loop(
             let engine_tmp: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> = Box::new(engine_mem);
             engine = engine_tmp.into();
         }
-    
+
         loop {
             tokio::select! {
                 _ = Pin::new(&mut term_sig) => {

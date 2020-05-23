@@ -33,7 +33,7 @@ pub use self::cache_cleanup_stub as cache_cleanup;
 use magnetite_common::TorrentId;
 
 use super::CacheMiss;
-use crate::model::{MagnetiteError, get_torrent_salsa};
+use crate::model::{get_torrent_salsa, MagnetiteError};
 use crate::storage::GetPieceRequest;
 
 mod piece_storage_engine_dumb_adapter;
@@ -71,11 +71,19 @@ fn update_logging_and_metrics(res: &Result<Bytes, MagnetiteError>) {
             counter!("diskcache.cache_read_bytes", bytes.len() as u64);
             counter!("diskcache.cache_hit_count", 1);
 
-            event!(Level::DEBUG, "got piece from disk cache: len()={:?}", bytes.len());
-        },
+            event!(
+                Level::DEBUG,
+                "got piece from disk cache: len()={:?}",
+                bytes.len()
+            );
+        }
         Err(ref err) => {
             counter!("diskcache.read_error", 1);
-            event!(Level::ERROR, "failed to load piece from disk cache: {}", err);
+            event!(
+                Level::ERROR,
+                "failed to load piece from disk cache: {}",
+                err
+            );
         }
     }
 }
@@ -83,7 +91,11 @@ fn update_logging_and_metrics(res: &Result<Bytes, MagnetiteError>) {
 const PUNCH_SIZE: u64 = 128 * 1024 * 1024;
 
 impl DiskCacheState {
-    fn inject_piece(&self, req: &GetPieceRequest, bytes: Bytes) -> Pin<Box<dyn std::future::Future<Output = Result<(), MagnetiteError>> + Send>> {
+    fn inject_piece(
+        &self,
+        req: &GetPieceRequest,
+        bytes: Bytes,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), MagnetiteError>> + Send>> {
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
@@ -96,7 +108,11 @@ impl DiskCacheState {
         async move {
             let cache_inject_start = Instant::now();
             let mut piece_cache = self_cloned.piece_cache.lock().await;
-            let punch_spans = cache_cleanup::cache_cleanup(&mut *piece_cache, piece_length_actual.into(), PUNCH_SIZE);
+            let punch_spans = cache_cleanup::cache_cleanup(
+                &mut *piece_cache,
+                piece_length_actual.into(),
+                PUNCH_SIZE,
+            );
             gauge!("diskcache.cached_bytes", piece_cache.cache_size_cur as i64);
             drop(piece_cache);
 
@@ -138,7 +154,7 @@ impl DiskCacheState {
 
             assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);
 
-            let write_start = Instant::now();            
+            let write_start = Instant::now();
             file.write_all(&piece_padded[..]).await?;
             timing!("diskcache.cache_write_latency", write_start.elapsed());
             counter!("diskcache.cache_write_bytes", piece_padded.len() as u64);
@@ -168,15 +184,22 @@ impl DiskCacheState {
             piece_cache.cache_size_cur += piece_length;
             gauge!("diskcache.cached_bytes", piece_cache.cache_size_cur as i64);
             counter!("diskcache.cache_miss", 1);
-            timing!("diskcache.cache_inject_latency", cache_inject_start.elapsed());
+            timing!(
+                "diskcache.cache_inject_latency",
+                cache_inject_start.elapsed()
+            );
 
             drop(piece_cache);
 
             Result::<(), MagnetiteError>::Ok(())
-        }.boxed()
+        }
+        .boxed()
     }
 
-    fn fetch_piece(&self, req: &GetPieceRequest) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+    fn fetch_piece(
+        &self,
+        req: &GetPieceRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
@@ -190,11 +213,10 @@ impl DiskCacheState {
 
         async move {
             let mut piece_cache = self_cloned.piece_cache.lock().await;
-            let cache_entry = piece_cache.pieces.get_mut(&piece_key)
-                .ok_or_else(|| {
-                    counter!("diskcache.cache_miss", 1);
-                    CacheMiss
-                })?;
+            let cache_entry = piece_cache.pieces.get_mut(&piece_key).ok_or_else(|| {
+                counter!("diskcache.cache_miss", 1);
+                CacheMiss
+            })?;
 
             cache_entry.last_touched = SystemTime::now();
             let cache_entry_cloned = cache_entry.clone();
@@ -212,7 +234,8 @@ impl DiskCacheState {
             update_logging_and_metrics(&disk_load_res);
 
             return disk_load_res;
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
@@ -246,6 +269,3 @@ async fn load_from_disk(
 
     Ok(Bytes::from(piece_data))
 }
-
-
-

@@ -7,10 +7,10 @@ use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use crate::utils::ByteSize;
-use crate::CARGO_PKG_VERSION;
 use crate::control::api::add_torrent_request::BackingFile;
 use crate::control::api::TorrentDataSourceTome;
+use crate::utils::ByteSize;
+use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "ctl";
 
@@ -39,7 +39,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
             Arg::with_name("location")
                 .long("location")
                 .help("where to get the data from")
-                .takes_value(true)
+                .takes_value(true),
         );
 
     let remove_torrent = SubCommand::with_name(SUBCOMMAND_REMOVE_TORRENT_NAME)

@@ -6,7 +6,6 @@ use crate::storage::root_storage_service::{start_piece_storage_engine, RootStora
 use crate::storage::state_holder_system::state_holder_system;
 use crate::CommonInit;
 
-
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "host";
@@ -71,12 +70,11 @@ pub async fn main(
     if let Some(b) = matches.value_of("host-bind-address") {
         futures.push(start_remote_magnetite_host_service(common.clone(), b));
     }
+    if let Some(b) = matches.value_of("bittorrent-bind-address") {
+        futures.push(start_remote_magnetite_host_service(common.clone(), b));
+    }
 
-    // futures.push(load_databases(common2));
-
-    // if let Some(b) = matches.value_of("bittorrent-bind-address") {
-    //     futures.push(start_remote_magnetite_host_service(common.clone(), b));
-    // }
+    futures.push(load_databases(common2));
 
     for v in futures::future::join_all(futures).await {
         v?;

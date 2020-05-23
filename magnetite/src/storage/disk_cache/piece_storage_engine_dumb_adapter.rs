@@ -1,15 +1,15 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bytes::{Bytes};
+use bytes::Bytes;
 use futures::future::FutureExt;
 use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
 use tokio::sync::Mutex;
 
+use super::{DiskCacheState, PieceCacheEntry, PieceCacheInfo};
 use crate::model::MagnetiteError;
-use super::{DiskCacheState, PieceCacheInfo, PieceCacheEntry};
-use crate::storage::{PieceStorageEngineDumb, GetPieceRequest};
+use crate::storage::{GetPieceRequest, PieceStorageEngineDumb};
 
 pub struct Builder {
     cache_alignment: u64,
@@ -66,7 +66,8 @@ where
     fn get_piece_dumb(
         &self,
         req: &GetPieceRequest,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send + 'static>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send + 'static>>
+    {
         let self_cloned: Self = self.clone();
         let piece_key = (req.content_key, req.piece_index);
         let req: GetPieceRequest = *req;
@@ -91,7 +92,10 @@ where
                 }
             };
             if should_inject {
-                self_cloned.state.inject_piece(&req, piece_bytes.clone()).await?;
+                self_cloned
+                    .state
+                    .inject_piece(&req, piece_bytes.clone())
+                    .await?;
             }
 
             Ok(piece_bytes)

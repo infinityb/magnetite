@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use super::TorrentEntry;
 use crate::control::api::add_torrent_request::BackingFile;
 use crate::model::{MagnetiteError, TorrentMetaWrapped};
-use crate::storage::{PieceStorageEngineDumb, GetPieceRequestChannel};
+use crate::storage::{GetPieceRequestChannel, PieceStorageEngineDumb};
 
 use magnetite_common::TorrentId;
 
@@ -39,12 +39,18 @@ pub struct BusFindPieceFetcher {
 }
 
 impl BusFindPieceFetcher {
-    pub fn pair() -> (BusFindPieceFetcher, mpsc::Receiver<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>>) {
+    pub fn pair() -> (
+        BusFindPieceFetcher,
+        mpsc::Receiver<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>>,
+    ) {
         let (tx, rx) = mpsc::channel(8);
         (BusFindPieceFetcher { response: tx }, rx)
     }
 
-    pub async fn respond(mut self, fetcher: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>) {
+    pub async fn respond(
+        mut self,
+        fetcher: Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>,
+    ) {
         let _ = self.response.send(fetcher).await;
     }
 }

@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Instant};
+use std::time::Instant;
 
 use futures::future::FutureExt;
 use futures::stream::StreamExt;
@@ -60,9 +60,7 @@ impl TorrentHost for Control {
         let backing_file = req
             .backing_file
             .clone()
-            .ok_or_else(|| {
-                tonic::Status::invalid_argument("backing_file is mandatory")
-            })?;
+            .ok_or_else(|| tonic::Status::invalid_argument("backing_file is mandatory"))?;
 
         timing!("control.add_torrent_parse_time", parse_start.elapsed());
 

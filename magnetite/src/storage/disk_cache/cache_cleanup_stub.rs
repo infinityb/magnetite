@@ -1,5 +1,9 @@
-use super::{PieceCacheInfo, FileSpan};
+use super::{FileSpan, PieceCacheInfo};
 
-pub(super) fn cache_cleanup(_cache: &mut PieceCacheInfo, _adding: u64, _batch_size: u64) -> Vec<FileSpan> {
+pub(super) fn cache_cleanup(
+    _cache: &mut PieceCacheInfo,
+    _adding: u64,
+    _batch_size: u64,
+) -> Vec<FileSpan> {
     Vec::new()
 }

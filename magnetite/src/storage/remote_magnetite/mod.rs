@@ -1,11 +1,12 @@
 use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
-use std::pin::Pin;
-use std::time::{Duration, Instant};
-use std::sync::Arc;
 use std::fs::OpenOptions;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use futures::future::Future;
 use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use metrics::counter;
@@ -16,24 +17,21 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use tracing::{event, Level};
-use futures::future::Future;
 
 use magnetite_common::TorrentId;
 
-use crate::CommonInit;
-use crate::model::{get_torrent_salsa, MagnetiteError, ProtocolViolation};
 use crate::control::messages::BusFindPieceFetcher;
+use crate::model::{get_torrent_salsa, MagnetiteError, ProtocolViolation};
+use crate::CommonInit;
 
 use super::{
+    disk_cache::DiskCacheWrapper,
+    memory_cache::MemoryCacheWrapper,
     root_storage_service::RootStorageOpts,
-    GetPieceRequestChannel,
-    disk_cache::{DiskCacheWrapper},
-    memory_cache::{MemoryCacheWrapper},
     state_holder_system::{BusNewState, State},
-    utils as storage_utils, GetPieceRequest, PieceStorageEngineDumb,
-    GetPieceRequestResolver,
+    utils as storage_utils, GetPieceRequest, GetPieceRequestChannel, GetPieceRequestResolver,
+    PieceStorageEngineDumb,
 };
-
 
 mod wire;
 
@@ -313,7 +311,7 @@ fn resolve_response(
 fn run_connected<'a>(
     mut socket: TcpStream,
     incoming_request_queue: &'a mut mpsc::Receiver<GetPieceRequestResolver>,
-) -> Pin<Box<dyn Future<Output=Result<bool, MagnetiteError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<bool, MagnetiteError>> + Send + 'a>> {
     async move {
         let mut current_window_size: usize = WINDOW_SIZE_START;
         let mut inflight: Slab<RequestState> = Default::default();
@@ -480,7 +478,10 @@ pub fn start_remote_magnetite_client(
         a??;
         b??;
 
-        event!(Level::INFO, "shut down remote magnetite piece storage engine");
+        event!(
+            Level::INFO,
+            "shut down remote magnetite piece storage engine"
+        );
 
         Ok(())
     }
@@ -492,14 +493,18 @@ fn start_remote_magnetite_client_control_loop(
     requests: mpsc::Sender<GetPieceRequestResolver>,
     opts: RootStorageOpts,
 ) -> Pin<Box<dyn Future<Output = Result<(), failure::Error>> + Send + 'static>> {
-    let CommonInit { ebus, init_sig, mut term_sig } = common;
+    let CommonInit {
+        ebus,
+        init_sig,
+        mut term_sig,
+    } = common;
 
     let mut ebus_incoming = ebus.subscribe();
     drop(ebus);
     drop(init_sig); // we've finished initializing.
 
     let gp: GetPieceRequestChannel = requests.into();
-    
+
     async move {
 
         let engine_tmp: Box<dyn PieceStorageEngineDumb + Send + Sync + 'static> = Box::new(gp);
@@ -570,7 +575,11 @@ fn start_remote_magnetite_client_data_loop(
     async move {
         use tokio::time::delay_for;
 
-        let CommonInit { ebus, init_sig, mut term_sig } = common;
+        let CommonInit {
+            ebus,
+            init_sig,
+            mut term_sig,
+        } = common;
 
         drop(ebus);
         drop(init_sig); // we've finished initializing.
@@ -591,7 +600,7 @@ fn start_remote_magnetite_client_data_loop(
                     if FAILURE_DELAY_MILLISECONDS_MAX < failure_delay_milliseconds {
                         failure_delay_milliseconds = FAILURE_DELAY_MILLISECONDS_MAX;
                     }
-                    
+
                     delay_for(Duration::from_millis(failure_delay_milliseconds)).await;
 
                     continue;
@@ -611,7 +620,7 @@ fn start_remote_magnetite_client_data_loop(
                 Ok(Err(err)) => {
                     event!(Level::ERROR, "upstream connection aborted: {}", err);
                     continue;
-                },
+                }
                 Err(()) => break,
             }
         }
@@ -619,14 +628,14 @@ fn start_remote_magnetite_client_data_loop(
         event!(Level::INFO, "piece fetcher data system has shut down");
 
         Ok(())
-    }.boxed()
+    }
+    .boxed()
 }
-
 
 pub fn start_remote_magnetite_host_service(
     common: CommonInit,
     bind_address: &str,
-) -> Pin<Box<dyn Future<Output=Result<(), failure::Error>> + Send + 'static>> {
+) -> Pin<Box<dyn Future<Output = Result<(), failure::Error>> + Send + 'static>> {
     let bind_address = bind_address.to_string();
     async move {
         let CommonInit { mut ebus, mut init_sig, mut term_sig } = common;
@@ -699,8 +708,11 @@ pub fn start_remote_magnetite_host_service(
     }.boxed()
 }
 
-
-async fn start_server<S>(mut socket: TcpStream, engine: S, state: Arc<RwLock<Arc<State>>>) -> Result<(), MagnetiteError>
+async fn start_server<S>(
+    mut socket: TcpStream,
+    engine: S,
+    state: Arc<RwLock<Arc<State>>>,
+) -> Result<(), MagnetiteError>
 where
     S: PieceStorageEngineDumb,
 {
@@ -731,13 +743,14 @@ where
                         None => {
                             let s = state.read().await;
 
-                            let content_info = s.get(&p.content_key)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    event!(Level::ERROR, "failed to find content {}", p.content_key.hex());
-                                    ProtocolViolation
-                                })
-                                ?;
+                            let content_info = s.get(&p.content_key).cloned().ok_or_else(|| {
+                                event!(
+                                    Level::ERROR,
+                                    "failed to find content {}",
+                                    p.content_key.hex()
+                                );
+                                ProtocolViolation
+                            })?;
 
                             drop(s);
 
@@ -747,8 +760,7 @@ where
                                 .ok_or_else(|| {
                                     event!(Level::ERROR, "protocol violation #1");
                                     ProtocolViolation
-                                })
-                                ?;
+                                })?;
 
                             let req = GetPieceRequest {
                                 content_key: p.content_key,

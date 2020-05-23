@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use failure::Fail;
 use rand::RngCore;
+use salsa20::stream_cipher::{generic_array::GenericArray, NewStreamCipher};
+use salsa20::XSalsa20;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use salsa20::XSalsa20;
-use salsa20::stream_cipher::{NewStreamCipher, generic_array::GenericArray};
 
 use magnetite_common::TorrentId;
 

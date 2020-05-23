@@ -1,8 +1,8 @@
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::fmt;
 
 use bytes::{Bytes, BytesMut};
 use futures::future::{Future, FutureExt};
