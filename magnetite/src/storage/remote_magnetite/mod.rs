@@ -51,21 +51,6 @@ const LATENCY_TARGET_MIN_MILLISECONDS: u32 = 180;
 const LATENCY_TARGET_MAX_MILLISECONDS: u32 = 1800;
 const CHUNK_SIZE: u32 = 32 * 1024; // 26ms @ 10Mbps
 
-#[test]
-fn xx() {
-    let gp = GetPieceRequest {
-        content_key: TorrentId::zero(),
-        piece_sha: TorrentId::zero(),
-        piece_length: 0x0100_0000,
-        total_length: 287_396_254_600,
-        piece_index: 17130,
-    };
-
-    for (idx, x) in PiecePendingRequestFactory::new(0, &gp).enumerate() {
-        println!("[{}] = {:?}", idx, x);
-    }
-}
-
 #[derive(Debug)]
 struct PiecePendingRequestFactory {
     piece_slab_index: usize,

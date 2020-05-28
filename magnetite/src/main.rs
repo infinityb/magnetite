@@ -28,11 +28,12 @@ const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 type BusMessage = Arc<dyn Any + Send + Sync>;
 
+
 #[derive(Clone)]
 pub struct CommonInit {
     ebus: broadcast::Sender<BusMessage>,
-    init_sig: mpsc::Sender<()>,
     term_sig: crate::utils::close_waiter::Done,
+    init_sig: mpsc::Sender<()>,
 }
 
 fn main() -> Result<(), failure::Error> {

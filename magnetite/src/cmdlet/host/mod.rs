@@ -74,7 +74,8 @@ pub async fn main(
         futures.push(start_remote_magnetite_host_service(common.clone(), b));
     }
 
-    futures.push(load_databases(common2));
+    unimplemented!("load databases"); // v 
+    // futures.push(load_databases(common2));
 
     for v in futures::future::join_all(futures).await {
         v?;

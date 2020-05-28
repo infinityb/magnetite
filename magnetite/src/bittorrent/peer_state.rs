@@ -1,43 +1,17 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
+
+use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
-use crate::model::proto::Handshake;
-use crate::model::{BitField, TorrentMetaWrapped};
+use crate::model::proto::{Handshake, Message};
+use crate::model::{ProtocolViolation, BitField, MagnetiteError};
 
-pub struct TrackerGroup {
-    //
-}
-
-pub struct Torrent {
-    pub id: TorrentId,
-    pub name: String,
-    pub meta: Arc<TorrentMetaWrapped>,
-    pub have_bitfield: BitField,
-    pub tracker_groups: Vec<TrackerGroup>,
-}
-
-#[derive(Default)]
-pub struct GlobalState {
-    pub session_id_seq: u64,
-    pub torrents: HashMap<TorrentId, Torrent>,
-    pub sessions: HashMap<u64, Session>,
-    pub global_stats: Stats,
-}
-
-pub fn merge_global_payload_stats(cc: &mut GlobalState, ps: &mut PeerState) {
-    cc.global_stats.recv_payload_bytes += ps.global_uncommitted_stats.recv_payload_bytes;
-    cc.global_stats.sent_payload_bytes += ps.global_uncommitted_stats.sent_payload_bytes;
-    ps.global_uncommitted_stats = Default::default();
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct Stats {
-    pub sent_payload_bytes: u64,
-    pub recv_payload_bytes: u64,
+#[deprecated]  // use timers in the peer task.
+enum StreamReaderItem {
+    Message(Message<'static>),
+    AntiIdle,
 }
 
 pub struct Session {
@@ -54,8 +28,6 @@ pub struct Session {
 pub struct PeerState {
     pub last_read: Instant,
     pub next_keepalive: Instant,
-    pub stats: Stats,
-    pub global_uncommitted_stats: Stats,
     pub peer_bitfield: BitField,
     pub choking: bool,
     pub interesting: bool,
@@ -69,13 +41,68 @@ impl PeerState {
         PeerState {
             last_read: now,
             next_keepalive: now,
-            stats: Default::default(),
-            global_uncommitted_stats: Default::default(),
             peer_bitfield: BitField::none(bf_length),
             choking: true,
             interesting: false,
             choked: true,
             interested: false,
         }
+    }
+}
+
+
+fn apply_work_state(
+    ps: &mut PeerState,
+    work: &StreamReaderItem,
+    now: Instant,
+    session_id: u64,
+) -> Result<(), MagnetiteError> {
+    if let StreamReaderItem::Message(..) = work {
+        ps.last_read = now;
+    }
+
+    match work {
+        StreamReaderItem::Message(Message::Choke) => {
+            ps.choked = true;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Unchoke) => {
+            ps.choked = false;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Interested) => {
+            ps.interested = true;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Uninterested) => {
+            ps.interested = false;
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Have { piece_id }) => {
+            if *piece_id < ps.peer_bitfield.bit_length {
+                ps.peer_bitfield.set(*piece_id, true);
+            }
+            Ok(())
+        }
+        StreamReaderItem::Message(Message::Bitfield { ref field_data }) => {
+            if field_data.as_slice().len() != ps.peer_bitfield.data.len() {
+                return Err(ProtocolViolation.into());
+            }
+            ps.peer_bitfield.data = field_data.as_slice().to_vec().into_boxed_slice();
+            let completed = ps.peer_bitfield.count_ones();
+            let total_pieces = ps.peer_bitfield.bit_length;
+            event!(
+                Level::TRACE,
+                name = "update-bitfield",
+                session_id = session_id,
+                completed_pieces = completed,
+                total_pieces = ps.peer_bitfield.bit_length,
+                "#{}: {:.2}% confirmed",
+                session_id,
+                100.0 * completed as f64 / total_pieces as f64
+            );
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }

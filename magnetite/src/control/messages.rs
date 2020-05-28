@@ -1,11 +1,17 @@
 use std::sync::Arc;
+use std::net::SocketAddr;
 
 use tokio::sync::mpsc;
+use bytes::BytesMut;
+use smallvec::SmallVec;
+use ksuid::Ksuid;
 
 use super::TorrentEntry;
-use crate::control::api::add_torrent_request::BackingFile;
+use crate::control::api::{AddPeerRequest, add_torrent_request::BackingFile};
 use crate::model::{MagnetiteError, TorrentMetaWrapped};
 use crate::storage::{GetPieceRequestChannel, PieceStorageEngineDumb};
+use crate::model::proto::Handshake;
+
 
 use magnetite_common::TorrentId;
 
@@ -54,3 +60,67 @@ impl BusFindPieceFetcher {
         let _ = self.response.send(fetcher).await;
     }
 }
+
+// --
+
+pub struct BusAddPeer {
+    peer_addr: SocketAddr,
+    target_info_hash: TorrentId,
+    source: BusAddPeerSource,
+}
+
+pub enum BusAddPeerSource {
+    Tracker,
+    UserImmediate,
+    User(BusAddPeerSourceUserResponse),
+    Incoming(BusAddPeerSourceIncomingState),
+}
+
+pub struct BusAddPeerSourceIncomingState {
+    rbuf: BytesMut,
+    handshake: Handshake,
+}
+
+pub struct BusAddPeerSourceUserResponse {
+    response: mpsc::Sender<Result<PeerConnectSuccess, MagnetiteError>>,
+}
+
+pub struct PeerConnectSuccess {
+    pub peer_id: TorrentId,
+    pub session_id: Ksuid,
+}
+
+// --
+
+pub struct BusPeerAdded {
+    pub connect: PeerConnectSuccess
+}
+
+// --
+
+pub struct BusPeerDisconnect {
+    pub session_id: Ksuid,
+}
+
+// --
+
+pub struct BusKillConnection {
+    pub session_id: Ksuid,
+    pub response: mpsc::Sender<Result<(), MagnetiteError>>,
+}
+
+// ---
+
+pub struct BusSessionPeerBitfieldUpdate {
+    pub target_info_hash: TorrentId,
+    pub session_id: Ksuid,
+    pub update: SmallVec<[BusSessionPeerBitfieldUpdateElement; 16]>,
+}
+
+pub struct BusSessionPeerBitfieldUpdateElement {
+    pub piece_id: u32,
+    // support both HAVE and UNHAVE 
+    pub have_piece: bool,
+}
+
+// --

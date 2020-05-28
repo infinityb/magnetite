@@ -499,6 +499,10 @@ impl<'a> BitXor for &'a BitField {
 }
 
 impl BitField {
+    pub fn len(&self) -> u32 {
+        self.bit_length
+    }
+
     pub fn as_raw_slice(&self) -> &[u8] {
         &self.data
     }
@@ -581,6 +585,10 @@ impl BitField {
 
     pub fn count_ones(&self) -> u32 {
         self.set_count
+    }
+
+    pub fn count_zeroes(&self) -> u32 {
+        self.bit_length - self.set_count
     }
 
     pub fn is_empty(&self) -> bool {

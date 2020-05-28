@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::future::FutureExt;
-use futures::stream::StreamExt;
 use metrics::{counter, timing};
 use tokio::sync::{broadcast, mpsc};
 use tonic::transport::Server;
 use tracing::{event, Level};
+use futures::stream::StreamExt;
 
 use magnetite_common::TorrentId;
 
@@ -23,9 +23,14 @@ pub mod api {
 use self::api::{
     add_torrent_request::TorrentFile, torrent_host_server::TorrentHost, AddTorrentRequest,
     AddTorrentResponse, ListTorrentsRequest, ListTorrentsResponse, RemoveTorrentRequest,
-    RemoveTorrentResponse, TorrentEntry,
+    RemoveTorrentResponse, TorrentEntry,AddPeerRequest,
+    AddPeerResponse,
+    DisconnectPeerResponse,
+    SubscribeStatusUpdatesRequest,
+    SubscribeStatusUpdateResponse,
+    DisconnectPeerRequest,
 };
-use self::messages::{BusAddTorrent, BusListTorrents, BusRemoveTorrent};
+use self::messages::{BusPeerAdded, BusPeerDisconnect, BusSessionPeerBitfieldUpdate, BusAddTorrent, BusListTorrents, BusRemoveTorrent};
 
 struct Control {
     sender: broadcast::Sender<crate::BusMessage>,
@@ -37,9 +42,11 @@ struct Control {
 // to the event bus.  We'll wait for all systems to initialize before sending
 // any data over the event bus.  This will be painful - there's a lot of refactoring
 // to do here.
-
+//
 #[tonic::async_trait]
 impl TorrentHost for Control {
+    type SubscribeStatusUpdatesStream = mpsc::Receiver<Result<SubscribeStatusUpdateResponse, tonic::Status>>;
+
     async fn add_torrent(
         &self,
         request: tonic::Request<AddTorrentRequest>,
@@ -118,7 +125,9 @@ impl TorrentHost for Control {
             tonic::Status::aborted("no service")
         })?;
 
-        while let Some(v) = rx.next().await {}
+        while let Some(v) = rx.next().await {
+            //
+        }
 
         timing!(
             "control.remove_torrent_resolve_time",
@@ -157,6 +166,94 @@ impl TorrentHost for Control {
         );
 
         Ok(tonic::Response::new(ListTorrentsResponse { entries }))
+    }
+
+    async fn add_peer(
+        &self,
+        request: tonic::Request<AddPeerRequest>,
+    ) -> Result<tonic::Response<AddPeerResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not yet implemented"))
+    }
+
+    async fn disconnect_peer(
+        &self,
+        request: tonic::Request<DisconnectPeerRequest>,
+    ) -> Result<tonic::Response<DisconnectPeerResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not yet implemented"))
+    }
+
+    async fn subscribe_status_updates(
+        &self,
+        request: tonic::Request<SubscribeStatusUpdatesRequest>,
+    ) -> Result<tonic::Response<Self::SubscribeStatusUpdatesStream>, tonic::Status> {
+        use crate::control::api::{StatusUpdatePeerDisconnect, StatusUpdatePeerBitfieldUpdateElement, StatusUpdateNewPeer, StatusUpdatePeerBitfieldUpdate};
+        use crate::control::api::subscribe_status_update_response::Event;
+
+        let (mut tx, rx) = mpsc::channel(4);
+        // let features = self.features.clone();
+
+        let mut ebus_rx = self.sender.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let creq = match ebus_rx.recv().await {
+                    Ok(creq) => creq,
+                    Err(err) => {
+                        let status = match err {
+                            broadcast::RecvError::Closed => tonic::Status::aborted("shutting down"),
+                            broadcast::RecvError::Lagged(..) => tonic::Status::resource_exhausted("lagged"),
+                        };
+                        if let Err(err) = tx.send(Err(status)).await {
+                            event!(Level::ERROR, "send to subscriber: {}", err);
+                        }
+                        break;
+                    }
+                };
+
+                let mut event = None;
+                let mut session_id = Vec::new();
+                if let Some(at) = creq.downcast_ref::<BusPeerAdded>() {
+                    session_id = at.connect.session_id.as_bytes().to_vec();
+                    event = Some(Event::NewPeer(StatusUpdateNewPeer {
+                        socket_addr: unimplemented!(),
+                        peer_id: unimplemented!(),
+                        bitfield_data: unimplemented!(),
+                    }));
+                }
+                if let Some(pbu) = creq.downcast_ref::<BusSessionPeerBitfieldUpdate>() {
+                    let mut elements = Vec::new();
+
+                    for v in &pbu.update {
+                        elements.push(StatusUpdatePeerBitfieldUpdateElement {
+                            piece_id: v.piece_id,
+                            have: v.have_piece,
+                        });
+                    }
+
+                    session_id = pbu.session_id.as_bytes().to_vec();
+                    event = Some(Event::Update(StatusUpdatePeerBitfieldUpdate {
+                        elements,
+                    }));
+                }
+
+                if let Some(pbu) = creq.downcast_ref::<BusPeerDisconnect>() {
+                    session_id = pbu.session_id.as_bytes().to_vec();
+                    event = Some(Event::Disconnect(StatusUpdatePeerDisconnect {}));
+                }
+
+                if event.is_some() {
+                    let resp = SubscribeStatusUpdateResponse { session_id, event };
+                    if let Err(err) = tx.send(Ok(resp)).await {
+                        event!(Level::ERROR, "send to subscriber: {}", err);
+                        break;
+                    }
+                }
+            }
+
+            // tx.send(Err(tonic::Status::unimplemented("not yet implemented"))).await.unwrap();
+            // https://github.com/hyperium/tonic/blob/master/examples/src/routeguide/server.rs#L45
+        });
+
+        Ok(tonic::Response::new(rx))
     }
 }
 

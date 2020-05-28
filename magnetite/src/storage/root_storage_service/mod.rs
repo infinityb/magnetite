@@ -17,6 +17,8 @@ use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
 
+// mod torrent_task;
+
 use super::{
     disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, utils::file_read_buf,
     GetPieceRequest, GetPieceRequestChannel, GetPieceRequestResolver, OpenFileCache,
@@ -236,7 +238,7 @@ impl PieceStorageEngineDumb for PieceFileStorageHandle {
     fn get_piece_dumb(
         &self,
         req: &GetPieceRequest,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send + 'static>> {
         let (resolver, response) = oneshot::channel();
         let req = GetPieceRequestResolver {
             request: req.clone(),

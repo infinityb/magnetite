@@ -60,10 +60,99 @@ message TorrentEntry {
     uint64 size_bytes = 3;
 }
 
+message AddPeerRequest {
+    // If set, the add peer request will be responded to once it reaches the
+    // task managing that torrent.  If unset, the RPC will wait until the outgoing
+    // connection is attempted and return a response indicating whether the 
+    // peer was successfully connected or not.
+    bool immediate_response = 1;
+
+    // the IP and port of the peer.  e.g. 192.0.2.99:6881 or \[2001:db8::6\]:6881
+    string socket_addr = 2;
+
+    // If non-empty, aborts the connection if the peer ID mismatches.  This might
+    // be useful on private trackers or in unforeseen circumstances.  raw, 20 bytes.
+    bytes peer_id = 3;
+
+    // The target torrent info hash to add the peer to.  raw, 20 bytes.
+    bytes target_info_hash = 4;
+}
+
+message AddPeerResponse {
+    // present if immediate_response is false
+    bytes peer_id = 1;
+
+    bytes bitfield = 2;
+}
+
+message DisconnectPeerRequest {
+    bytes ksuid = 1;
+}
+
+message DisconnectPeerResponse {
+    /* empty for now  - indicates that it was found and the task was terminated */
+}
+
+message SubscribeStatusUpdatesRequest {
+    bytes target_info_hash = 1;
+
+    bool include_bitfields = 2;
+}
+
+message SubscribeStatusUpdateResponse {
+    bytes session_id = 1;
+
+    oneof event {
+        StatusUpdateNewPeer new_peer = 2;
+
+        StatusUpdatePeerBitfieldReplace replace = 3;
+
+        StatusUpdatePeerBitfieldUpdate update = 4;
+
+        StatusUpdatePeerDisconnect disconnect = 5;
+    }
+}
+
+message StatusUpdateNewPeer {
+    // the IP and port of the peer.  e.g. 192.0.2.99:6881 or \[2001:db8::6\]:6881
+    string socket_addr = 1;
+
+    // The peer ID in its raw 20-byte binary format.
+    bytes peer_id = 2;
+
+    StatusUpdatePeerBitfieldReplace bitfield_data = 3;
+}
+
+message StatusUpdatePeerBitfieldReplace {
+    bytes bitfield = 1;
+
+    // number of pieces held by peer - the same as number of 1 bits in the bitfield.
+    // useful when not receiving bitfields.
+    uint32 progress = 2;
+}
+
+message StatusUpdatePeerBitfieldUpdate {
+    repeated StatusUpdatePeerBitfieldUpdateElement elements = 1;
+}
+
+message StatusUpdatePeerDisconnect {}
+
+message StatusUpdatePeerBitfieldUpdateElement {
+    uint32 piece_id = 1;
+
+    bool have = 2;
+}
+
 service TorrentHost {
     rpc AddTorrent(AddTorrentRequest) returns (AddTorrentResponse) {}
 
     rpc RemoveTorrent(RemoveTorrentRequest) returns (RemoveTorrentResponse) {}
 
     rpc ListTorrents(ListTorrentsRequest) returns (ListTorrentsResponse) {}
+
+    rpc AddPeer(AddPeerRequest) returns (AddPeerResponse) {}
+
+    rpc DisconnectPeer(DisconnectPeerRequest) returns (DisconnectPeerResponse) {}
+
+    rpc SubscribeStatusUpdates(SubscribeStatusUpdatesRequest) returns (stream SubscribeStatusUpdateResponse);
 }
