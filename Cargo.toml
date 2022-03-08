@@ -2,6 +2,8 @@
 members = [
 	"bencode",
 	"iresult",
-	"magnetite",
+	# "magnetite",
 	"magnetite-common",
+	"dht",
+	"dht/dht-example",
 ]

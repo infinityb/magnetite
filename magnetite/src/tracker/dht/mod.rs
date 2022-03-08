@@ -12,8 +12,8 @@ mod tracker;
 mod search;
 
 // Please make this a power of two, since Vec::with_capacity aligns to
-// powers of two anyway.  We're paying the cost of the memory anyway.
-const BUCKET_SIZE: usize = 32;
+// powers of two so we're paying the cost of the memory anyway.
+const BUCKET_SIZE: usize = 1 << 5;
 
 const MAX_UNRESPONDED_QUERIES: i32 = 5;
 
@@ -125,6 +125,7 @@ impl Node {
 struct BucketManager {
     self_peer_id: TorrentId,
     buckets: BTreeMap<TorrentId, Bucket>,
+    recent_dead_hosts: (),
 }
 
 impl BucketManager {
@@ -135,7 +136,7 @@ impl BucketManager {
         limit: usize,
         env: &NodeEnvironment,
     ) -> Vec<&Node> {
-        // chooseing an inefficient but obviously correct implemenation for now.
+        // choosing an inefficient but obviously correct implemenation for now.
 
         struct HeapEntry<'a> {
             dist_key: TorrentId,
@@ -219,7 +220,9 @@ impl BucketManager {
         {
             // home bucket full - let's split.
             let new_bucket = b.split();
-            drop(b);
+            
+            drop(b); // unborrow self.buckets for insertion
+
             self.buckets.insert(new_bucket.prefix.base, new_bucket);
             b = self.find_bucket_mut_for_id(&node.peer_id);
         }
@@ -229,7 +232,7 @@ impl BucketManager {
 }
 
 struct Bucket {
-    af: AddressFamily,
+    // af: AddressFamily,
     prefix: TorrentIdPrefix,
 
     nodes: SmallVec<[Node; BUCKET_SIZE]>,
@@ -263,9 +266,9 @@ impl TorrentIdPrefix {
 }
 
 impl Bucket {
-    fn new(af: AddressFamily) -> Bucket {
+    fn new(/*af: AddressFamily*/) -> Bucket {
         Bucket {
-            af: af,
+            // af: af,
             prefix: TorrentIdPrefix {
                 base: TorrentId::zero(),
                 prefix_len: 0,
@@ -342,7 +345,7 @@ impl Bucket {
         }
 
         Bucket {
-            af: self.af,
+            // af: self.af,
             prefix: other_prefix,
             last_touched_time: self.last_touched_time,
             nodes: new_bucket_nodes,

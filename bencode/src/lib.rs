@@ -389,7 +389,10 @@ impl de::Error for Error {
     where
         T: Display,
     {
-        unimplemented!("adapting error: {}", msg);
+        Error {
+            offset: u64::max_value(),
+            data: ErrorData::Custom(msg.to_string()),
+        }
     }
 }
 

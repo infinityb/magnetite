@@ -1,0 +1,20 @@
+[package]
+name = "dht-example"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# external
+tokio = { version = "1", features = ["full"] }
+chrono = "0.4"
+serde_bytes = "0.11.5"
+tracing = "0.1.29"
+tracing-subscriber = { version = "0.3.0", features = ["smallvec", "fmt", "ansi", "tracing-log", "std", "json"] }
+clap = { version = "2.33.1", default-features = false }
+
+# interal
+dht = { path = ".." }
+bencode = { path = "../../bencode" }
+magnetite-common = { path = "../../magnetite-common" }

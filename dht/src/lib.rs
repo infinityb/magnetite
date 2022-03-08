@@ -4,28 +4,32 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime};
+use std::collections::hash_map::RandomState;
+use std::hash::{Hasher, BuildHasher};
 
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use smallvec::SmallVec;
 
 use magnetite_common::TorrentId;
 
-pub mod wire;
-mod tracker;
 mod search;
+mod tracker;
+pub mod wire;
 
 // Please make this a power of two, since Vec::with_capacity aligns to
 // powers of two so we're paying the cost of the memory anyway.
-const BUCKET_SIZE: usize = 1 << 5;
+pub const BUCKET_SIZE: usize = 1 << 3;
+
+pub const RECURSION_CACHED_NODE_COUNT: usize = BUCKET_SIZE;
+
+pub const TRANSACTION_SIZE_BYTES: usize = 8;
+
+const BUCKET_EXCLUSION_COUNT: usize = 2;
 
 const MAX_UNRESPONDED_QUERIES: i32 = 5;
 
 const QUESTIONABLE_THRESH: Duration = Duration::from_secs(15 * 60);
-
-// This prevents bucket prefix length overflows, which would lead to an attempt
-// at out-of-bounds array access, panicking.  80 was picked arbitrarily.
-const MAX_BUCKET_PREFIX_LENGTH: u32 = 80;
 
 #[derive(Copy, Clone)]
 enum AddressFamily {
@@ -33,22 +37,117 @@ enum AddressFamily {
     Ipv6,
 }
 
-struct Node {
-    peer_id: TorrentId,
-    peer_addr: SocketAddr,
+pub struct RecursionState {
+    nodes: BinaryHeap<TorrentIdHeapEntry<Node>>,
+}
+
+impl RecursionState {
+    pub fn new(target: TorrentId, bm: &BucketManager, env: &NodeEnvironment) -> RecursionState {
+        type HeapEntry = TorrentIdHeapEntry<Node>;
+
+        let mut heap = BinaryHeap::with_capacity(RECURSION_CACHED_NODE_COUNT);
+
+        for b in &bm.buckets {
+            for n in &b.nodes {
+                if !n.quality(env).is_good() {
+                    continue;
+                }
+
+                let entry = HeapEntry {
+                    dist_key: n.peer_id ^ target,
+                    value: n.clone(),
+                };
+
+                if heap.len() < RECURSION_CACHED_NODE_COUNT {
+                    heap.push(entry);
+                } else {
+                    // current entry is better than the worst node, in our heap
+                    // replace the worst node with this new better node.
+                    if entry.dist_key < heap.peek().unwrap().dist_key {
+                        heap.pop().unwrap();
+                        heap.push(entry);
+                    }
+                }
+            }
+        }
+
+        // self.searches.insert(target, heap);
+
+        unimplemented!();
+    }
+
+    pub fn get_work(&mut self) -> () {
+        //
+    }
+
+    pub fn start_recursion(&self, target: TorrentId, bm: &BucketManager, env: &NodeEnvironment) {
+        
+    }
+
+    pub fn add_node(&mut self, x: ()) {
+       
+    }
+}
+
+struct TorrentIdHeapEntry<T> {
+    dist_key: TorrentId,
+    value: T,
+}
+
+impl<T> Eq for TorrentIdHeapEntry<T> {}
+
+impl<T> Ord for TorrentIdHeapEntry<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.dist_key.cmp(&other.dist_key)
+    }
+}
+
+impl<T> PartialOrd for TorrentIdHeapEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> PartialEq for TorrentIdHeapEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.dist_key == other.dist_key
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Node {
+    pub peer_id: TorrentId,
+    pub peer_addr: SocketAddr,
 
     // time of last correct reply received
-    last_message_time: Instant,
+    pub last_message_time: Instant,
     // time of last correct reply received
-    last_correct_reply_time: Instant,
+    pub last_correct_reply_time: Instant,
     // time of last request
-    last_request_sent_time: Instant,
+    pub last_request_sent_time: Instant,
     // how many requests we sent since last reply
-    pinged: i32,
+    pub pinged: i32,
+}
+
+impl Node {
+    pub fn debug(&self) -> NodeDebug {
+        NodeDebug { node: self }
+    }
+}
+
+pub struct NodeDebug<'a> {
+    node: &'a Node,
+}
+
+impl<'a> std::fmt::Debug for NodeDebug<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}@{:?}", self.node.peer_id.hex(), self.node.peer_addr)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum NodeQuality {
+pub enum NodeQuality {
     Good,
     Questionable,
     Bad,
@@ -77,8 +176,9 @@ impl NodeQuality {
     }
 }
 
-struct NodeEnvironment {
-    now: Instant,
+pub struct NodeEnvironment {
+    pub now: Instant,
+    pub is_reply: bool,
 }
 
 impl Node {
@@ -107,7 +207,7 @@ impl Node {
         }
     }
 
-    fn quality(&self, env: &NodeEnvironment) -> NodeQuality {
+    pub fn quality(&self, env: &NodeEnvironment) -> NodeQuality {
         if (env.now - self.last_correct_reply_time) < QUESTIONABLE_THRESH {
             return NodeQuality::Good;
         }
@@ -126,58 +226,115 @@ impl Node {
     }
 }
 
-struct BucketManager {
-    self_peer_id: TorrentId,
-    buckets: BTreeMap<TorrentId, Bucket>,
-    recent_dead_hosts: (),
+#[derive(Debug)]
+pub struct BucketManager {
+    pub self_peer_id: TorrentId,
+    pub buckets: Vec<Bucket>,
+    pub recent_dead_hosts: (),
+
+    pub token_rs_next_incr: Instant,
+    pub token_rs_current: RandomState,
+    pub token_rs_previous: RandomState,
 }
 
 impl BucketManager {
     pub fn new(self_peer_id: TorrentId) -> BucketManager {
+        let mut buckets = Vec::new();
+        let mut now = Instant::now();
+
+        buckets.push(Bucket {
+            prefix: TorrentIdPrefix {
+                base: TorrentId::zero(),
+                prefix_len: 0,
+            },
+            exclusions: Default::default(),
+            nodes: SmallVec::new(),
+            last_touched_time: now,
+        });
+
+        let mut rs = RandomState::new();
         BucketManager {
             self_peer_id,
-            buckets: BTreeMap::new(),
+            buckets,
             recent_dead_hosts: (),
+            token_rs_next_incr: now + Duration::new(300, 0),
+            token_rs_current: rs.clone(),
+            token_rs_previous: rs,
         }
     }
 
+    pub fn tick(&mut self, env: &NodeEnvironment) {
+        if env.now < self.token_rs_next_incr {
+            self.token_rs_previous = self.token_rs_current.clone();
+            self.token_rs_current = RandomState::new();
+            self.token_rs_next_incr = env.now + Duration::new(300, 0);
+        }
+    }
+
+    pub fn generate_token(&self, client_addr: &SocketAddr) -> Vec<u8> {
+        let ipv4_buf;
+        let ipv6_buf;
+        let ip_buf;
+
+        match client_addr {
+            SocketAddr::V4(v4) => {
+                ipv4_buf = v4.ip().octets();
+                ip_buf = &ipv4_buf[..];
+            }
+            SocketAddr::V6(v6) => {
+                ipv6_buf = v6.ip().octets();
+                ip_buf = &ipv6_buf[..];
+            }
+        }
+
+        let mut hasher = self.token_rs_current.build_hasher();
+        hasher.write(&ip_buf[..]);
+        hasher.finish().to_be_bytes().to_vec()
+    }
+
+    pub fn check_token(&self, token: &[u8], client_addr: &SocketAddr) -> bool {
+        let ipv4_buf;
+        let ipv6_buf;
+        let ip_buf;
+
+        match client_addr {
+            SocketAddr::V4(v4) => {
+                ipv4_buf = v4.ip().octets();
+                ip_buf = &ipv4_buf[..];
+            }
+            SocketAddr::V6(v6) => {
+                ipv6_buf = v6.ip().octets();
+                ip_buf = &ipv6_buf[..];
+            }
+        }
+
+        let mut hasher = self.token_rs_current.build_hasher();
+        hasher.write(&ip_buf[..]);
+        let token_candidate = hasher.finish().to_be_bytes();
+        if token == &token_candidate[..] {
+            return true
+        }
+
+        let mut hasher = self.token_rs_previous.build_hasher();
+        hasher.write(&ip_buf[..]);
+        let token_candidate = hasher.finish().to_be_bytes();
+        token == &token_candidate[..]
+    }
+
     /// may panic if limit is 0.
-    fn find_close_nodes(
+    pub fn find_close_nodes(
         &self,
         target: &TorrentId,
         limit: usize,
         env: &NodeEnvironment,
     ) -> Vec<&Node> {
-        // choosing an inefficient but obviously correct implemenation for now.
+        // choosing an inefficient but obviously correct implementation for now.
 
-        struct HeapEntry<'a> {
-            dist_key: TorrentId,
-            node: &'a Node,
-        }
-
-        impl<'a> Eq for HeapEntry<'a> {}
-
-        impl<'a> Ord for HeapEntry<'a> {
-            fn cmp(&self, other: &Self) -> Ordering {
-                self.dist_key.cmp(&other.dist_key)
-            }
-        }
-
-        impl<'a> PartialOrd for HeapEntry<'a> {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-
-        impl<'a> PartialEq for HeapEntry<'a> {
-            fn eq(&self, other: &Self) -> bool {
-                self.dist_key == other.dist_key
-            }
-        }
+        type HeapEntry<'a> = TorrentIdHeapEntry<&'a Node>;
 
         let mut heap = BinaryHeap::with_capacity(limit);
 
-        for b in self.buckets.values() {
+        for b in self.buckets.iter() {
             for n in &b.nodes {
                 if !n.quality(env).is_good() {
                     continue;
@@ -185,9 +342,9 @@ impl BucketManager {
 
                 let entry = HeapEntry {
                     dist_key: n.peer_id ^ *target,
-                    node: n,
+                    value: n,
                 };
-                if limit <= heap.len() {
+                if heap.len() < limit {
                     heap.push(entry);
                 } else {
                     // current entry is better than the worst node, in our heap
@@ -202,7 +359,7 @@ impl BucketManager {
 
         let mut out = Vec::with_capacity(heap.len());
         for entry in heap.drain() {
-            out.push(entry.node);
+            out.push(entry.value);
         }
 
         out
@@ -210,32 +367,34 @@ impl BucketManager {
 
     fn find_bucket_mut_for_id<'man>(&'man mut self, id: &TorrentId) -> &'man mut Bucket {
         let mut bucket_counter = 0;
+
         let mut target_bucket = None;
-        for b in self.buckets.values_mut() {
+        for b in self.buckets.iter_mut() {
             if b.contains(id) {
                 bucket_counter += 1;
                 target_bucket = Some(b)
             }
         }
 
-        assert_eq!(bucket_counter, 1);
+        assert_eq!(
+            bucket_counter, 1,
+            "must have found one bucket, we always cover the entire keyspace"
+        );
         target_bucket.unwrap()
     }
 
-    fn add_node(&mut self, node: Node, confirm: ConfirmLevel, env: &NodeEnvironment) {
+    pub fn add_node(&mut self, node: Node, confirm: ConfirmLevel, env: &NodeEnvironment) {
         let self_peer_id = self.self_peer_id;
         let mut b = self.find_bucket_mut_for_id(&node.peer_id);
 
-        while b.contains(&self_peer_id)
-            && b.is_full()
-            && b.prefix.prefix_len < MAX_BUCKET_PREFIX_LENGTH
-        {
+        while b.contains(&self_peer_id) && b.would_split(&node, env) {
             // home bucket full - let's split.
             let new_bucket = b.split();
-            
+
             drop(b); // unborrow self.buckets for insertion
 
-            self.buckets.insert(new_bucket.prefix.base, new_bucket);
+            self.buckets.push(new_bucket);
+            self.buckets.sort_by_key(|bm| bm.prefix.base);
             b = self.find_bucket_mut_for_id(&node.peer_id);
         }
 
@@ -243,24 +402,53 @@ impl BucketManager {
     }
 }
 
-struct Bucket {
+#[derive(Debug)]
+pub struct Bucket {
     // af: AddressFamily,
-    prefix: TorrentIdPrefix,
-
-    nodes: SmallVec<[Node; BUCKET_SIZE]>,
-    last_touched_time: SystemTime,
-    cached: (),
+    pub prefix: TorrentIdPrefix,
+    // these prefixes are held elsewhere, potentially because of running
+    // recursions.
+    pub exclusions: SmallVec<[TorrentIdPrefix; BUCKET_EXCLUSION_COUNT]>,
+    pub nodes: SmallVec<[Node; BUCKET_SIZE]>,
+    pub last_touched_time: Instant,
 }
 
-#[derive(Copy, Clone)]
-struct TorrentIdPrefix {
-    base: TorrentId,
-    prefix_len: u32,
+#[derive(Copy, Clone, Debug)]
+pub struct TorrentIdPrefix {
+    pub base: TorrentId,
+    pub prefix_len: u32,
 }
+
+
+#[test]
+fn foobar() {
+    let first_half = TorrentIdPrefix {
+        base: TorrentId::zero(),
+        prefix_len: 1,
+    };
+
+    let whole_set = TorrentIdPrefix {
+        base: TorrentId::zero(),
+        prefix_len: 0,
+    };
+
+    assert!(first_half.is_proper_subset_of(&whole_set));
+    assert_eq!(false, whole_set.is_proper_subset_of(&first_half));
+    assert_eq!(false, whole_set.is_proper_subset_of(&whole_set));
+}
+
 
 impl TorrentIdPrefix {
     fn contains(&self, id: &TorrentId) -> bool {
         self.prefix_len <= (self.base ^ *id).leading_zeros()
+    }
+
+    fn is_proper_subset_of(&self, other: &TorrentIdPrefix) -> bool {
+        if other.prefix_len <= self.prefix_len {
+            return false;
+        }
+
+        unimplemented!();
     }
 
     fn split(&mut self) -> TorrentIdPrefix {
@@ -285,9 +473,9 @@ impl Bucket {
                 base: TorrentId::zero(),
                 prefix_len: 0,
             },
+            exclusions: Default::default(),
             nodes: Default::default(),
-            last_touched_time: std::time::UNIX_EPOCH,
-            cached: (),
+            last_touched_time: Instant::now(),
         }
     }
 
@@ -295,13 +483,21 @@ impl Bucket {
         self.prefix.contains(id)
     }
 
-    fn touch(&mut self) {
-        self.last_touched_time = SystemTime::now();
+    fn touch(&mut self, env: &NodeEnvironment) {
+        self.last_touched_time = env.now;
     }
 
     fn is_full(&self) -> bool {
         assert!(self.nodes.len() <= BUCKET_SIZE);
         BUCKET_SIZE <= self.nodes.len()
+    }
+
+    fn would_split(&self, node: &Node, env: &NodeEnvironment) -> bool {
+        if !self.is_full() {
+            return false;
+        }
+
+        unimplemented!();
     }
 
     fn new_node(
@@ -316,8 +512,25 @@ impl Bucket {
 
     fn add_node(&mut self, node: Node, confirm: ConfirmLevel, env: &NodeEnvironment) {
         assert!(self.contains(&node.peer_id));
+        for e in &self.exclusions {
+            assert!(!e.contains(&node.peer_id));
+        }
 
-        self.touch();
+        self.touch(env);
+
+        for n in self.nodes.iter_mut() {
+            if n.peer_id == node.peer_id && n.peer_addr == node.peer_addr {
+                n.last_message_time = node.last_message_time;
+                if env.is_reply {
+                    n.last_correct_reply_time = node.last_message_time;
+                    n.pinged = 0;
+                }
+                return;
+            } else if n.peer_id == node.peer_id {
+                // FIXME: drop incorrect source address.
+                return;
+            }
+        }
 
         if self.is_full() {
             let mut bad_node = None;
@@ -341,6 +554,7 @@ impl Bucket {
 
         let mut self_nodes: SmallVec<[Node; BUCKET_SIZE]> = Default::default();
         let mut new_bucket_nodes: SmallVec<[Node; BUCKET_SIZE]> = Default::default();
+        let mut new_bucket_exclusions: SmallVec<[TorrentIdPrefix; BUCKET_EXCLUSION_COUNT]> = Default::default();
 
         for node in self.nodes.drain(..) {
             if self_new_prefix.contains(&node.peer_id) {
@@ -359,15 +573,15 @@ impl Bucket {
         Bucket {
             // af: self.af,
             prefix: other_prefix,
+            exclusions: Default::default(),
             last_touched_time: self.last_touched_time,
             nodes: new_bucket_nodes,
-            cached: (),
         }
     }
 }
 
 #[derive(Clone, Copy)]
-enum ConfirmLevel {
+pub enum ConfirmLevel {
     /// Haven't had any response
     Empty,
 
@@ -411,12 +625,11 @@ pub struct DhtCommandAddPeer {
 pub enum DhtCommand {
     AddPeer(DhtCommandAddPeer),
     GetPeers(),
-
 }
 
-pub fn start_service(mut rx: tokio::sync::mpsc::Receiver<DhtCommand>)
-    -> impl Future<Output=Result<(), anyhow::Error>>
-{
+pub fn start_service(
+    mut rx: tokio::sync::mpsc::Receiver<DhtCommand>,
+) -> impl Future<Output = Result<(), anyhow::Error>> {
     // 172.105.96.16:3019
 
     let mut tid = TorrentId::zero();
@@ -439,9 +652,30 @@ pub fn start_service(mut rx: tokio::sync::mpsc::Receiver<DhtCommand>)
         //         },
         //     }
         // }
-        loop {
-            
+        loop {}
+        Ok(())
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
+struct BinStr<'a>(pub &'a [u8]);
+
+impl std::fmt::Debug for BinStr<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "b\"")?;
+        for &b in self.0 {
+            match b {
+                b'\0' => write!(f, "\\0")?,
+                b'\n' => write!(f, "\\n")?,
+                b'\r' => write!(f, "\\r")?,
+                b'\t' => write!(f, "\\t")?,
+                b'\\' => write!(f, "\\\\")?,
+                b'"' => write!(f, "\\\"")?,
+                _ if 0x20 <= b && b < 0x7F => write!(f, "{}", b as char)?,
+                _ => write!(f, "\\x{:02x}", b)?,
+            }
         }
+        write!(f, "\"")?;
         Ok(())
     }
 }
