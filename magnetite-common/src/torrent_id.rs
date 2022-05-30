@@ -24,6 +24,11 @@ impl TorrentId {
         TorrentId([0; TORRENT_ID_LENGTH])
     }
 
+    /// Returns a TorrentId with all bits set to zero.
+    pub fn max_value() -> TorrentId {
+        TorrentId([0xFF; TORRENT_ID_LENGTH])
+    }
+
     /// Checks if all bits are set to zero, useful for the results of bitwise
     /// operations.
     pub fn is_zero(&self) -> bool {
@@ -93,6 +98,19 @@ impl TorrentId {
     }
 }
 
+impl std::str::FromStr for TorrentId {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut buf: [u8; 20] = [0; 20];
+        let dehexed = dehex_fixed_size(s, &mut buf[..])?;
+        match TorrentId::from_slice(dehexed) {
+            Ok(v) => Ok(v),
+            Err(..) => Err(()),
+        }
+    }
+}
+
 impl fmt::Display for TorrentIdHexFormat<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for b in self.torrent_id.as_bytes() {
@@ -137,6 +155,17 @@ impl BitXor for TorrentId {
         }
 
         out
+    }
+}
+
+impl std::ops::Not for TorrentId {
+    type Output = TorrentId;
+
+    fn not(mut self) -> TorrentId {
+        for i in &mut self.0 {
+            *i = !*i
+        }
+        self
     }
 }
 
@@ -186,32 +215,27 @@ impl<'de> serde::de::Visitor<'de> for TorrentIdVisitor {
     where
         E: serde::de::Error,
     {
-        if s.len() == TorrentId::LENGTH {
-            return self.visit_bytes(s.as_bytes());
-        }
+        
         if s.len() != TorrentId::LENGTH * 2 {
             return Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(s),
                 &self,
             ));
         }
-        let mut buf: [u8; 20] = [0; 20];
-        let dehexed = match dehex_fixed_size(s, &mut buf[..]) {
-            Ok(v) => v,
-            Err(()) => {
-                return Err(serde::de::Error::invalid_value(
-                    serde::de::Unexpected::Str(s),
-                    &self,
-                ))
-            }
-        };
-        Ok(TorrentId::from_slice(dehexed).unwrap())
+        match s.parse() {
+            Ok(v) => Ok(v),
+            Err(()) => Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(s),
+                &self,
+            )),
+        }
     }
 
     fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
+        // TODO: handle strings that get passed as bytes.
         if v.len() != TorrentId::LENGTH {
             return Err(serde::de::Error::invalid_length(v.len(), &self));
         }
@@ -225,9 +249,10 @@ fn dehex_fixed_size<'a>(val: &str, into: &'a mut [u8]) -> Result<&'a [u8], ()> {
             b'A'..=b'F' => Ok(ch - b'A' + 10),
             b'a'..=b'f' => Ok(ch - b'a' + 10),
             b'0'..=b'9' => Ok(ch - b'0'),
-            _ => return Err(()),
+            _ => Err(()),
         }
     }
+
     let mut copied_bytes = 0;
     let mut inbytes = val.bytes();
     for oby in into.iter_mut() {
@@ -246,5 +271,5 @@ fn dehex_fixed_size<'a>(val: &str, into: &'a mut [u8]) -> Result<&'a [u8], ()> {
         *oby = buf;
         copied_bytes += 1;
     }
-    Ok(&into[copied_bytes..])
+    Ok(&into[..copied_bytes])
 }

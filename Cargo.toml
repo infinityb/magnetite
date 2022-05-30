@@ -6,4 +6,5 @@ members = [
 	"magnetite-common",
 	"dht",
 	"dht/dht-example",
+	"dht/dht-traffic-stealer",
 ]

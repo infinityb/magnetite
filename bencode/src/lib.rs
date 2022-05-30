@@ -41,6 +41,14 @@ where
     }
 }
 
+pub fn from_bytes_allow_unconsumed<'a, T>(s: &'a [u8]) -> Result<T>
+where
+    T: de::Deserialize<'a>,
+{
+    let mut deserializer = Deserializer::from_bytes(s);
+    T::deserialize(&mut deserializer)
+}
+
 trait CopyReadChunk {
     // because we're guaranteed to copy because of the lifetime requirements for reading
     // from an I/O resource, we can just copy the data into the tokenizer's scratch
@@ -64,6 +72,15 @@ where
         scratch.extend(&tmp_buf[..read_length]);
         Ok(read_length)
     }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum NodeItem {
+    DictionaryStart,
+    ArrayStart,
+    ContainerEnd,
+    Integer,
+    Bytes,
 }
 
 #[derive(PartialEq, Eq)]
@@ -223,7 +240,15 @@ fn parse_next_item<'a>(data: &'a [u8]) -> IResult<(usize, Node<'a>), Box<dyn Std
         b'i' => match rem_iter_copy.position(|x| *x == b'e') {
             Some(pos) => {
                 let rem_slice = rem_iter.as_slice();
-                let value = check_is_digits(&rem_slice[..pos - 1]).expect("xTODO: error handling");
+                let value = match check_is_digits(&rem_slice[..pos - 1]) {
+                    Some(v) => v,
+                    None => {
+                        return IResult::Err(Error {
+                            offset: u64::max_value(),
+                            data: ErrorData::Custom("parsing numeric failed - invalid data".into()),
+                        }.into());
+                    },
+                };
                 IResult::Done((1 + pos, Node::Integer(Cow::Borrowed(value))))
             }
             None => IResult::ReadMore(1),
@@ -233,9 +258,24 @@ fn parse_next_item<'a>(data: &'a [u8]) -> IResult<(usize, Node<'a>), Box<dyn Std
                 let pos = pos + 1; // first byte consumed by match.
                 let (length_prefix, rest) = rem_iter_copy.as_slice().split_at(pos);
                 let rest = &rest[1..]; // skip the b':'
-
-                let str_len = check_is_digits(&length_prefix).expect("yTODO: error handling");
-                let length: usize = str_len.parse().expect("aTODO: error handling");
+                let str_len = match check_is_digits(&length_prefix) {
+                    Some(v) => v,
+                    None => {
+                        return IResult::Err(Error {
+                            offset: u64::max_value(),
+                            data: ErrorData::Custom("parsing numeric failed - invalid data".into()),
+                        }.into());
+                    },
+                };
+                let length: usize = match str_len.parse() {
+                    Ok(v) => v,
+                    Err(..) => {
+                        return IResult::Err(Error {
+                            offset: u64::max_value(),
+                            data: ErrorData::Custom("parsing numeric failed - likely integer exceeds the allowed size".into()),
+                        }.into());
+                    }
+                };
                 if rest.len() < length {
                     return IResult::ReadMore(length - rest.len());
                 }
@@ -246,7 +286,12 @@ fn parse_next_item<'a>(data: &'a [u8]) -> IResult<(usize, Node<'a>), Box<dyn Std
             }
             None => IResult::ReadMore(1),
         },
-        v => panic!("zTODO: error handling - bad byte {}", *v as char),
+        v => {
+            return IResult::Err(Error {
+                offset: u64::max_value(),
+                data: ErrorData::UnexpectedByte { got: *v },
+            }.into());
+        },
     }
 }
 
@@ -264,6 +309,7 @@ pub enum ErrorData {
     MissingField { field_name: &'static str },
     ExpectedString { got: String },
     ExpectedBytes { got: String },
+    UnexpectedByte { got: u8 },
 }
 
 impl serde::ser::Error for Error {
@@ -817,8 +863,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         unimplemented!()
     }
 
-    // The `Serializer` implementation on the previous page serialized chars as
-    // single-character strings so handle that representation here.
     fn deserialize_char<V>(self, _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
@@ -827,14 +871,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         unimplemented!()
     }
 
-    // An absent optional is represented as the JSON `null` and a present
-    // optional is represented as just the contained value.
-    //
-    // As commented in `Serializer` implementation, this is a lossy
-    // representation. For example the values `Some(())` and `None` both
-    // serialize as just `null`. Unfortunately this is typically what people
-    // expect when working with JSON. Other formats are encouraged to behave
-    // more intelligently if possible.
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
@@ -1216,6 +1252,15 @@ mod test {
             "3:Foo",
         );
         assert!(super::from_bytes::<Foobar>(data.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn source_scan_crash() {
+        // crash caused by TODOs hanging around too long.
+        use crate::Value;
+
+        let data = b"\xff\xff\xff\xffTSource Engine Query\0";
+        assert!(super::from_bytes::<Value>(data).is_err());
     }
 }
 
