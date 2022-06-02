@@ -237,8 +237,8 @@ impl Tracker {
             if v.is_expired(&search.now) {
                 continue;
             }
-            // max-heap so get the bitwise not of the xor-distance between the search cookie
-            // and the entry/peer cookie.
+            // max-heap so get the opposite (max with value subtracted) of the xor-distance
+            // between the search cookie and the entry/peer cookie.
             //
             // The search cookie is generated from the peers identity and a 15 minute randomly
             // generated value.  This causes the lookup results to be deterministic (ignoring
@@ -248,7 +248,7 @@ impl Tracker {
                 &mut heap,
                 A::size(),
                 HeapEntry {
-                    dist_key: !(search.cookie ^ k.cookie),
+                    dist_key: !0 - (search.cookie ^ k.cookie),
                     value: &k.address,
                 },
             );

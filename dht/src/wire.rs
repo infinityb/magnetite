@@ -102,6 +102,15 @@ pub struct DhtMessageQueryAnnouncePeer {
     pub token: Vec<u8>,
 }
 
+impl Into<DhtMessage> for DhtMessageQueryAnnouncePeer {
+    fn into(self) -> DhtMessage {
+        DhtMessage {
+            transaction: Vec::new(),
+            data: DhtMessageData::Query(DhtMessageQuery::AnnouncePeer(self)),
+        }
+    }
+}
+
 impl std::fmt::Debug for DhtMessageQueryAnnouncePeer {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("DhtMessageQueryAnnouncePeer")
@@ -119,12 +128,30 @@ pub struct DhtMessageQueryGetPeers {
     pub info_hash: TorrentId,
 }
 
+impl Into<DhtMessage> for DhtMessageQueryGetPeers {
+    fn into(self) -> DhtMessage {
+        DhtMessage {
+            transaction: Vec::new(),
+            data: DhtMessageData::Query(DhtMessageQuery::GetPeers(self)),
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
 pub struct DhtMessageQueryFindNode {
     pub id: TorrentId,
     pub target: TorrentId,
     #[serde(default, skip_serializing_if = "SmallVec::is_empty")]
     pub want: SmallVec<[String; 2]>,
+}
+
+impl Into<DhtMessage> for DhtMessageQueryFindNode {
+    fn into(self) -> DhtMessage {
+        DhtMessage {
+            transaction: Vec::new(),
+            data: DhtMessageData::Query(DhtMessageQuery::FindNode(self)),
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]

@@ -4,6 +4,7 @@ use std::io;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::collections::BTreeSet;
 
 use clap::{App, Arg};
 use futures::channel::oneshot;
@@ -17,6 +18,7 @@ use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::FmtSubscriber;
 
+use dht::TorrentIdPrefix;
 use dht::tracker::{AnnounceCtx, TrackerSearch};
 use dht::wire::{
     DhtErrorResponse, DhtMessage, DhtMessageData, DhtMessageQuery, DhtMessageQueryAnnouncePeer,
@@ -24,10 +26,13 @@ use dht::wire::{
     DhtMessageResponse, DhtMessageResponseData,
 };
 use dht::{
-    ThinNode,
+    ThinNode, RecursionState,
     BucketManager, NodeEnvironment, TransactionCompletion, BUCKET_SIZE,
 };
 use magnetite_common::TorrentId;
+
+const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn handle_query_ping(bm: &BucketManager, message: &DhtMessage) -> DhtMessage {
     DhtMessage {
@@ -181,20 +186,18 @@ fn handle_query_announce_peer(
     }
 }
 
-const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
-const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
-
 fn dht_query_apply_txid(
     bm: &mut BucketManager,
     bma: &Arc<Mutex<BucketManager>>,
     message: &mut DhtMessage,
     to: SocketAddr,
     now: &Instant,
+    queried_peer_id: Option<TorrentId>,
 ) -> oneshot::Receiver<Box<TransactionCompletion>> {
     let txslot = bm.acquire_transaction_slot();
     let txid = txslot.key();
 
-    let future = txslot.assign(message, to, now);
+    let future = txslot.assign(message, to, now, queried_peer_id);
     drop(bm);
 
     let bm_tmp = Arc::clone(&bma);
@@ -266,7 +269,7 @@ async fn main() -> io::Result<()> {
 
     let sock = Arc::new(UdpSocket::bind(&bind_address).await?);
     let mut starter_tasks: Vec<tokio::task::JoinHandle<Result<(), failure::Error>>> = Vec::new();
-    let self_id = TorrentId(*b"\xe8E)\xd0j\xc4V\x9e\x03Yu[t\xbb\x85\x12{Z\xc4o");
+    let self_id = TorrentId(*b"\x18E)\xd0j\xc4V\x9e\x03Yu[t\xbb\x85\x12{Z\xc4o");
     let bm = Arc::new(Mutex::new(BucketManager::new(self_id)));
 
     let bm_tmp = Arc::clone(&bm);
@@ -374,19 +377,316 @@ async fn main() -> io::Result<()> {
             so: sock_tmp,
         };
 
+        use std::str::FromStr;
+        use std::io::Write;
         use std::convert::Infallible;
         use std::net::SocketAddr;
-        use hyper::{Body, Request, Response, Server};
+        use hyper::{Body, Request, Response, Server, StatusCode};
         use hyper::service::{make_service_fn, service_fn};
         use hyper::server::conn::AddrStream;
+
+        async fn handle_find_nodes(
+            context: HyperHandler,
+            addr: SocketAddr,
+            req: Request<Body>,
+            target: TorrentId,
+        ) -> Result<Response<Body>, hyper::http::Error> {
+            let nenv = NodeEnvironment {
+                now: Instant::now(),
+                is_reply: false,
+            };
+
+            let mut rs;
+            let mut bm_locked = context.bm.lock().await;
+            if let Some(rs_tmp) = RecursionState::new(target, &bm_locked, &nenv, 32) {
+                rs = rs_tmp;
+            } else {
+                let mut builder = Response::builder()
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .status(StatusCode::SERVICE_UNAVAILABLE);
+
+                return builder.body(Body::from("Service Unavailable - no nodes"));
+            }
+            rs.message_template = Into::into(DhtMessageQueryFindNode {
+                id: bm_locked.self_peer_id,
+                target: target,
+                want: SmallVec::new(),
+            });
+
+            for b in &bm_locked.buckets {
+                for n in &b.nodes {
+                    rs.add_candidate(ThinNode {
+                        id: n.peer_id,
+                        saddr: n.peer_addr,
+                    });
+                }
+            }
+            drop(bm_locked);
+
+            let (mut sender, body) = hyper::Body::channel();
+            tokio::spawn(async move {
+                let mut seen_torrent_peers = BTreeSet::new();
+                let buf = "Starting search...\n".as_bytes();
+                if let Err(..) = sender.send_data(buf.into()).await {
+                    return Ok(());
+                }
+
+                let mut inflight: FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
+                let mut next_query = Instant::now();
+                
+                let mut timer = tokio::time::sleep_until(next_query.into());
+                tokio::pin!(timer);
+
+                while !inflight.is_empty() || rs.has_work() {
+                    let mut buf: Vec<u8> = Default::default();
+                    let mut completed: Option<Box<TransactionCompletion>> = None;
+                    tokio::select! {
+                        c = inflight.next(), if !inflight.is_empty() => {
+                            completed = Some(match c.unwrap() {
+                                Ok(v) => {
+                                    // write!(&mut buf, "got response back: {:?}\n", v);
+                                    v
+                                }
+                                Err(..) => {
+                                    write!(&mut buf, "unexpected break {}:{}", file!(), line!());
+                                    break;
+                                }
+                            });
+                        },
+                        _ = timer.as_mut() => {
+                            next_query += Duration::from_millis(900);
+                            timer.as_mut().reset(next_query.into());
+                        }
+                    }
+                    if let Some(c) = completed {
+                        let thin_node = c.queried_thin_node().expect("we submitted a peer id so we'll get one back");
+                        event!(Level::TRACE, completed=?c, "got response");
+                        if let Ok(mr) = c.response {
+                            for node in &mr.data.nodes {
+                                let saddr = SocketAddr::V4(node.1);
+                                rs.add_candidate(ThinNode {
+                                    id: node.0,
+                                    saddr,
+                                });
+                            }
+                            if !mr.data.nodes.is_empty() {
+                                write!(&mut buf, "current search eye: {}, {} candidates, {} inflight\n",
+                                    TorrentIdPrefix::new(target, rs.search_eye().prefix_len),
+                                    rs.nodes.len(),
+                                    inflight.len(),
+                                );
+                            }
+                            for value in &mr.data.values {
+                                if !seen_torrent_peers.contains(value) {
+                                    write!(&mut buf, "found peer for torrent: {}\n", value).unwrap();
+                                    seen_torrent_peers.insert(*value);
+                                }
+                            }
+                        }
+                        if let Err(..) = sender.send_data(buf.into()).await {
+                            break;
+                        }
+                        continue;
+                    }
+                                        
+                    let now = Instant::now();
+                    if let Some((wn, mut msg)) = rs.get_work() {
+                        let mut bm_locked = context.bm.lock().await;
+                        let future = dht_query_apply_txid(&mut bm_locked, &context.bm, &mut msg, wn.saddr, &now, Some(wn.id));
+                        drop(bm_locked);
+                        inflight.push(future);
+
+                        let resp_bytes = bencode::to_bytes(&msg).unwrap();
+                        event!(Level::TRACE, what=?BinStr(&resp_bytes), to=?target, "sending");
+
+                        write!(&mut buf, "querying: {} {}\n", wn.id.hex(), wn.saddr).unwrap();
+                        context.so.send_to(&resp_bytes, wn.saddr).await?;
+                    }
+                    if let Err(..) = sender.send_data(buf.into()).await {
+                        break;
+                    }
+                }
+
+                Result::<_, failure::Error>::Ok(())
+            });
+
+            let mut builder = Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::OK);
+
+            let resp = builder.body(body)?;
+            Ok(resp)
+        }
+
+        async fn handle_get_peers(
+            context: HyperHandler,
+            addr: SocketAddr,
+            req: Request<Body>,
+            target: TorrentId,
+        ) -> Result<Response<Body>, hyper::http::Error> {
+            let nenv = NodeEnvironment {
+                now: Instant::now(),
+                is_reply: false,
+            };
+
+            let mut rs;
+            let mut bm_locked = context.bm.lock().await;
+            if let Some(rs_tmp) = RecursionState::new(target, &bm_locked, &nenv, 32) {
+                rs = rs_tmp;
+            } else {
+                let mut builder = Response::builder()
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .status(StatusCode::SERVICE_UNAVAILABLE);
+
+                return builder.body(Body::from("Service Unavailable - no nodes"));
+            }
+            for b in &bm_locked.buckets {
+                for n in &b.nodes {
+                    rs.add_candidate(ThinNode {
+                        id: n.peer_id,
+                        saddr: n.peer_addr,
+                    });
+                }
+            }
+            drop(bm_locked);
+
+            let (mut sender, body) = hyper::Body::channel();
+            tokio::spawn(async move {
+                let mut seen_torrent_peers = BTreeSet::new();
+                let buf = "Starting search...\n".as_bytes();
+                if let Err(..) = sender.send_data(buf.into()).await {
+                    return Ok(());
+                }
+
+                let mut inflight: FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
+                let mut next_query = Instant::now();
+                
+                let mut timer = tokio::time::sleep_until(next_query.into());
+                tokio::pin!(timer);
+
+                while !inflight.is_empty() || rs.has_work() {
+                    let mut buf: Vec<u8> = Default::default();
+                    let mut completed: Option<Box<TransactionCompletion>> = None;
+                    tokio::select! {
+                        c = inflight.next(), if !inflight.is_empty() => {
+                            completed = Some(match c.unwrap() {
+                                Ok(v) => {
+                                    // write!(&mut buf, "got response back: {:?}\n", v);
+                                    v
+                                }
+                                Err(..) => {
+                                    write!(&mut buf, "unexpected break {}:{}", file!(), line!());
+                                    break;
+                                }
+                            });
+                        },
+                        _ = timer.as_mut() => {
+                            next_query += Duration::from_millis(900);
+                            timer.as_mut().reset(next_query.into());
+                        }
+                    }
+                    if let Some(c) = completed {
+                        let thin_node = c.queried_thin_node().expect("we submitted a peer id so we'll get one back");
+                        event!(Level::TRACE, completed=?c, "got response");
+                        if let Ok(mr) = c.response {
+                            for node in &mr.data.nodes {
+                                let saddr = SocketAddr::V4(node.1);
+                                rs.add_candidate(ThinNode {
+                                    id: node.0,
+                                    saddr,
+                                });
+                            }
+                            if !mr.data.nodes.is_empty() {
+                                write!(&mut buf, "current search eye: {}, {} candidates, {} inflight\n",
+                                    TorrentIdPrefix::new(target, rs.search_eye().prefix_len),
+                                    rs.nodes.len(),
+                                    inflight.len(),
+                                );
+                            }
+                            for value in &mr.data.values {
+                                if !seen_torrent_peers.contains(value) {
+                                    write!(&mut buf, "found peer for torrent: {}\n", value).unwrap();
+                                    seen_torrent_peers.insert(*value);
+                                }
+                            }
+                        }
+                        if let Err(..) = sender.send_data(buf.into()).await {
+                            break;
+                        }
+                        continue;
+                    }
+                                        
+                    let now = Instant::now();
+                    if let Some((wn, mut msg)) = rs.get_work() {
+                        let mut bm_locked = context.bm.lock().await;
+                        let future = dht_query_apply_txid(&mut bm_locked, &context.bm, &mut msg, wn.saddr, &now, Some(wn.id));
+                        drop(bm_locked);
+                        inflight.push(future);
+
+                        let resp_bytes = bencode::to_bytes(&msg).unwrap();
+                        event!(Level::TRACE, what=?BinStr(&resp_bytes), to=?target, "sending");
+
+                        write!(&mut buf, "querying: {} {}\n", wn.id.hex(), wn.saddr).unwrap();
+                        context.so.send_to(&resp_bytes, wn.saddr).await?;
+                    }
+                    if let Err(..) = sender.send_data(buf.into()).await {
+                        break;
+                    }
+                }
+
+                Result::<_, failure::Error>::Ok(())
+            });
+
+            let mut builder = Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::OK);
+
+            let resp = builder.body(body)?;
+            Ok(resp)
+        }
 
         async fn handle(
             context: HyperHandler,
             addr: SocketAddr,
-            req: Request<Body>
-        ) -> Result<Response<Body>, Infallible> {
+            req: Request<Body>,
+        ) -> Result<Response<Body>, hyper::http::Error> {
+            let uri = req.uri().path();
+            event!(Level::INFO, uri=?uri, "requested");
+            if uri.starts_with("/get-peers/") {
+                let uri_rest = &uri["/get-peers/".len()..];
+                if let Ok(tid) = TorrentId::from_str(uri_rest) {
+                    event!(Level::INFO, route_handler="get-peers", target=?tid, "requested");
+                    return handle_get_peers(context, addr, req, tid).await;
+                }
+            }
+            if uri.starts_with("/find-nodes/") {
+                let uri_rest = &uri["/find-nodes/".len()..];
+                if let Ok(tid) = TorrentId::from_str(uri_rest) {
+                    event!(Level::INFO, route_handler="find-nodes", target=?tid, "requested");
+                    return handle_find_nodes(context, addr, req, tid).await;
+                }
+            }
+            
 
-            Ok(Response::new(Body::from("Hello World")))
+            if uri == "/show-buckets" {
+                let mut bm_locked = context.bm.lock().await;
+                let formatted = bm_locked.format_buckets().to_string();
+                drop(bm_locked);
+
+                let mut builder = Response::builder()
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .status(StatusCode::OK);
+
+                let resp = builder.body(Body::from(formatted))?;
+                return Ok(resp);
+            }
+
+            let mut builder = Response::builder()
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .status(StatusCode::NOT_FOUND);
+
+            let resp = builder.body(Body::from("Not Found"))?;
+            Ok(resp)
         }
 
         let make_service = make_service_fn(move |conn: &AddrStream| {
@@ -416,19 +716,15 @@ async fn main() -> io::Result<()> {
         let bm = bm_tmp;
 
         let target: SocketAddr = "172.105.96.16:3019".parse().unwrap();
-        let mut msg = DhtMessage {
-            transaction: Vec::new(),
-            data: DhtMessageData::Query(DhtMessageQuery::FindNode(DhtMessageQueryFindNode {
-                id: self_id,
-                target: target_id,
-                want: Default::default(),
-            })),
-        };
-
+        let mut msg = Into::into(DhtMessageQueryFindNode {
+            id: self_id,
+            target: target_id,
+            want: Default::default(),
+        });
         let now = Instant::now();
 
         let mut bm_locked = bm.lock().await;
-        let future = dht_query_apply_txid(&mut bm_locked, &bm, &mut msg, target, &now);
+        let future = dht_query_apply_txid(&mut bm_locked, &bm, &mut msg, target, &now, None);
         drop(bm_locked);
 
         let resp_bytes = bencode::to_bytes(&msg).unwrap();
@@ -454,10 +750,15 @@ async fn main() -> io::Result<()> {
 
         let mut inflight: FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
 
+        let mut packets = 400;
         while !targets.is_empty() || !inflight.is_empty() {
-            let bm_locked = bm.lock().await;
-            println!("{:#?}", bm_locked.buckets);
-            drop(bm_locked);
+            packets -= 1;
+            if packets == 0 {
+                break;
+            }
+            // let bm_locked = bm.lock().await;
+            // println!("{}", bm_locked.format_buckets());
+            // drop(bm_locked);
 
             const CONCURRENCY_LIMIT: usize = 4;
             if CONCURRENCY_LIMIT <= inflight.len() {
@@ -478,22 +779,17 @@ async fn main() -> io::Result<()> {
                 }
             }
 
-            if let Some((_tid, saddr)) = targets.pop_front() {
-                let mut msg = DhtMessage {
-                    transaction: Vec::new(),
-                    data: DhtMessageData::Query(DhtMessageQuery::FindNode(
-                        DhtMessageQueryFindNode {
-                            id: self_id,
-                            target: target_id,
-                            want: Default::default(),
-                        },
-                    )),
-                };
+            if let Some((tid, saddr)) = targets.pop_front() {
+                let mut msg = Into::into(DhtMessageQueryFindNode {
+                    id: self_id,
+                    target: target_id,
+                    want: Default::default(),
+                });
 
                 let now = Instant::now();
                 
                 let mut bm_locked = bm.lock().await;
-                let future = dht_query_apply_txid(&mut bm_locked, &bm, &mut msg, saddr, &now);
+                let future = dht_query_apply_txid(&mut bm_locked, &bm, &mut msg, saddr, &now, Some(tid));
                 drop(bm_locked);
                 inflight.push(future);
 

@@ -1,3 +1,5 @@
+#![feature(map_first_last)]
+
 use std::fmt;
 use std::cmp::Ordering;
 use std::collections::btree_map::{Entry, VacantEntry};
@@ -6,6 +8,7 @@ use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use std::collections::BTreeSet;
 
 use futures::channel::oneshot;
 use rand::{thread_rng, Rng};
@@ -42,33 +45,47 @@ enum AddressFamily {
     Ipv6,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThinNode {
     pub id: TorrentId,
     pub saddr: SocketAddr,
 }
 
+
 pub struct RecursionState {
     self_id: TorrentId,
     target_info_hash: TorrentId,
-    nodes: VecDeque<ThinNode>,
+    cached_nodes_max: usize,
+    search_eye: TorrentIdPrefix,
+    // anti-spamming measure.
+    visited_nodes: BTreeSet<SocketAddr>,
+    // sorted by distance from target?
+    pub nodes: BTreeMap<TorrentId, ThinNode>,
+    pub message_template: DhtMessage,
 }
 
 impl RecursionState {
-    pub fn new(target: TorrentId, bm: &BucketManager, env: &NodeEnvironment) -> RecursionState {
+    pub fn new(
+        target: TorrentId,
+        bm: &BucketManager,
+        env: &NodeEnvironment,
+        cached_nodes_max: usize,
+    ) -> Option<RecursionState> {
         type HeapEntry = TorrentIdHeapEntry<ThinNode>;
 
-        let mut heap = BinaryHeap::with_capacity(RECURSION_CACHED_NODE_COUNT);
+        let mut heap = BinaryHeap::with_capacity(cached_nodes_max);
 
+        let mut found_one = false;
         for b in &bm.buckets {
             for n in &b.nodes {
+                found_one = true;
                 if !n.quality(env).is_good() {
                     continue;
                 }
 
                 general_heap_entry_push_or_replace(
                     &mut heap,
-                    RECURSION_CACHED_NODE_COUNT,
+                    cached_nodes_max,
                     HeapEntry {
                         dist_key: !(n.peer_id ^ target),
                         value: ThinNode {
@@ -80,27 +97,79 @@ impl RecursionState {
             }
         }
 
-        RecursionState {
+        if !found_one {
+            return None;
+        }
+
+        Some(RecursionState {
             self_id: bm.self_peer_id,
             target_info_hash: target,
-            nodes: heap.into_iter().map(|e| e.value).collect(),
-        }
+            cached_nodes_max,
+            search_eye: TorrentIdPrefix::zero(),
+            nodes: heap.into_iter().map(|e| {
+                (e.dist_key, e.value)
+            }).collect(),
+            message_template: Into::into(DhtMessageQueryGetPeers {
+                id: bm.self_peer_id,
+                info_hash: target,
+            }),
+            visited_nodes: Default::default(),
+        })
+    }
+
+    pub fn has_work(&self) -> bool {
+        !self.nodes.is_empty()
     }
 
     pub fn get_work(&mut self) -> Option<(ThinNode, DhtMessage)> {
-        let node = self.nodes.pop_front()?;
-        let msg = DhtMessage {
-            transaction: Vec::new(),
-            data: DhtMessageData::Query(DhtMessageQuery::GetPeers(DhtMessageQueryGetPeers {
-                id: self.self_id,
-                info_hash: self.target_info_hash,
-            })),
-        };
-        Some((node, msg))
+        let e = self.nodes.first_entry()?;
+        return Some((e.remove(), self.message_template.clone()));
     }
 
-    pub fn add_candidate(&mut self, node: ThinNode) {
-        self.nodes.push_back(node);
+    pub fn search_eye(&self) -> TorrentIdPrefix {
+        TorrentIdPrefix::new(
+            self.target_info_hash,
+            self.search_eye.prefix_len)
+    }
+
+    pub fn add_candidate(&mut self, node: ThinNode) -> bool {
+        if self.visited_nodes.contains(&node.saddr) {
+            event!(Level::INFO, "node already visited");
+            return false;
+        }
+
+        let dist_val = self.target_info_hash ^ node.id;
+        if !self.search_eye.contains(&dist_val) {
+            return false;
+        }
+        if self.nodes.len() < self.cached_nodes_max {
+            self.nodes.insert(dist_val, node);
+            return true;
+        } else {
+            let e = self.nodes.last_entry().unwrap();
+            let ekey = *e.key();
+            let mut added = false;
+            if dist_val < ekey {
+                e.remove();
+                self.nodes.insert(dist_val, node);
+                added = true;
+
+                // we're at the `cached_nodes_max` limit, so see if we can reduce our
+                // eye.  If we need longer-lived/wider searches, the thing to tune is
+                // `cached_nodes_max`.
+                while let Some(longer) = self.search_eye.longer() {
+                    if longer.contains(&dist_val) {
+                        self.search_eye = longer;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                event!(Level::INFO, "node worse than worst node");
+            }
+            
+            return added;
+        }
     }
 }
 
@@ -258,17 +327,54 @@ pub struct BucketManager {
     pub tracker: Tracker,
 }
 
-pub struct TransactionState {
-    pub expiration: Instant,
-    pub query: wire::DhtMessage,
-    pub from_expected_peer: SocketAddr,
-    pub completion_port: oneshot::Sender<Box<TransactionCompletion>>,
+impl BucketManager {
+    pub fn format_buckets<'a>(&'a self) -> BucketFormatter<'a> {
+        BucketFormatter { bb: &self.buckets }
+    }
 }
 
-impl TransactionState {
-    fn is_expired(&self, now: &Instant) -> bool {
-        self.expiration <= *now
+pub struct BucketFormatter<'a> {
+    bb: &'a [Bucket],
+}
+
+impl<'a> fmt::Display for BucketFormatter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let nenv = NodeEnvironment {
+            now: Instant::now(),
+            is_reply: false,
+        };
+        write!(f, "buckets count={}\n", self.bb.len());
+        for bucket in self.bb {
+            write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
+                bucket.prefix.base.hex(),
+                bucket.prefix.prefix_len,
+                nenv.now - bucket.last_touched_time,
+                bucket.nodes.len(),
+            )?;
+            for node in &bucket.nodes {
+                let quality = match node.quality(&nenv) {
+                    NodeQuality::Good => "🙂",
+                    NodeQuality::Questionable => "🙁",
+                    NodeQuality::Bad => "🤢",
+                };
+                
+                write!(f, "        {} {} {:21} age={:?}\n",
+                    quality,
+                    node.peer_id.hex(),
+                    node.peer_addr,
+                    nenv.now - node.last_message_time,
+                )?;
+            }
+        }
+        Ok(())
     }
+}
+
+pub struct TransactionState {
+    pub saddr: SocketAddr,
+    pub queried_peer_id: Option<TorrentId>,
+    pub query: wire::DhtMessage,
+    pub completion_port: oneshot::Sender<Box<TransactionCompletion>>,
 }
 
 impl std::fmt::Debug for TransactionState {
@@ -283,7 +389,7 @@ impl std::fmt::Debug for TransactionState {
 
         f.debug_struct("TransactionState")
             .field("query", &self.query)
-            .field("from_expected_peer", &self.from_expected_peer)
+            .field("from_expected_peer", &self.saddr)
             .field("completion_port", &Ellipses)
             .finish()
     }
@@ -291,9 +397,20 @@ impl std::fmt::Debug for TransactionState {
 
 #[derive(Debug)]
 pub struct TransactionCompletion {
-    pub peer_saddr: SocketAddr,
+    pub queried_node: SocketAddr,
+    pub queried_peer_id: Option<TorrentId>,
     pub query: wire::DhtMessage,
     pub response: Result<wire::DhtMessageResponse, ()>,
+}
+
+impl TransactionCompletion {
+    pub fn queried_thin_node(&self) -> Option<ThinNode> {
+        let id = self.queried_peer_id?;
+        Some(ThinNode {
+            saddr: self.queried_node,
+            id,
+        })
+    }
 }
 
 impl BucketManager {
@@ -402,7 +519,7 @@ impl BucketManager {
                     &mut heap,
                     limit,
                     HeapEntry {
-                        // max-heap so get the bitwise not of the xor-distance
+                        // max-heap so get the reversed value of the bitwise xor
                         dist_key: !(n.peer_id ^ *target),
                         value: n,
                     },
@@ -452,7 +569,6 @@ impl BucketManager {
     }
 
     pub fn node_seen(&mut self, node: &ThinNode, env: &NodeEnvironment) {
-        event!(Level::TRACE, "BucketManager::node_seen(..., {:?}, {:?})", node, env);
         let self_peer_id = self.self_peer_id;
         let b = self.find_bucket_mut_for_insertion_by_id(&node.id, env);
 
@@ -474,32 +590,11 @@ impl BucketManager {
         }
     }
 
-    pub fn clean_expired_transactions(&mut self, now: &Instant) {
-        let mut remove_keys: SmallVec<[u64; 20]> = Default::default();
-        for (k, v) in &self.transactions {
-            if v.is_expired(now) {
-                remove_keys.push(*k);
-            }
-        }
-        for k in &remove_keys {
-            if let Some(tx) = self.transactions.remove(k) {
-                let res = tx.completion_port.send(Box::new(TransactionCompletion {
-                    peer_saddr: tx.from_expected_peer,
-                    query: tx.query,
-                    response: Err(()),
-                }));
-                if let Err(err) = res {
-                    event!(Level::INFO, "failed to send on completion port: {:?}", err);
-                }
-            }
-        }
-        remove_keys.clear();
-    }
-
     pub fn clean_expired_transaction(&mut self, txid: u64) {
         if let Some(tx) = self.transactions.remove(&txid) {
             let res = tx.completion_port.send(Box::new(TransactionCompletion {
-                peer_saddr: tx.from_expected_peer,
+                queried_node: tx.saddr,
+                queried_peer_id: tx.queried_peer_id,
                 query: tx.query,
                 response: Err(()),
             }));
@@ -526,15 +621,23 @@ impl BucketManager {
         let txid = u64::from_be_bytes(buf);
 
         if let Some(tx) = self.transactions.remove(&txid) {
-            if from != tx.from_expected_peer {
+            if from != tx.saddr {
                 eprintln!(
                     "TX-{:016x} peer invalid: {} != {}",
-                    txid, tx.from_expected_peer, from
+                    txid, tx.saddr, from
                 );
             }
-
+            if let Some(peer_id) = tx.queried_peer_id {
+                if resp.data.id != peer_id {
+                    eprintln!(
+                        "TX-{:016x} peer invalid: {} != {}",
+                        txid, resp.data.id.hex(), peer_id.hex(),
+                    );
+                }
+            }
             let res = tx.completion_port.send(Box::new(TransactionCompletion {
-                peer_saddr: tx.from_expected_peer,
+                queried_node: tx.saddr,
+                queried_peer_id: Some(resp.data.id),
                 query: tx.query,
                 response: Ok(resp.clone()),
             }));
@@ -580,13 +683,14 @@ impl<'a> TransactionSlot<'a> {
         message: &mut wire::DhtMessage,
         to: SocketAddr,
         now: &Instant,
+        queried_peer_id: Option<TorrentId>,
     ) -> oneshot::Receiver<Box<TransactionCompletion>> {
         let (tx, rx) = oneshot::channel();
         message.transaction = self.entry.key().to_be_bytes().to_vec();
         self.entry.insert(Box::new(TransactionState {
-            expiration: *now + Duration::new(60, 0),
             query: message.clone(),
-            from_expected_peer: to,
+            queried_peer_id,
+            saddr: to,
             completion_port: tx,
         }));
 
@@ -637,26 +741,48 @@ fn foobar() {
 }
 
 #[test]
-fn split_foo() {
-    let move_zig = TorrentIdPrefix { base: TorrentId(*b"\xe8D\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), prefix_len: 14 };
-    let move_zig_ch_left = TorrentIdPrefix { base: TorrentId(*b"\xe8D\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), prefix_len: 15 };
-    let move_zig_ch_right = TorrentIdPrefix { base: TorrentId(*b"\xe8F\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), prefix_len: 15 };
-    let test = TorrentId(*b"\xe8F4T\x1e\x98Q\xbduF$d\0\0\0\0\0\0\0\0");
-    assert!(!move_zig_ch_left.contains(&test));
-    assert!(move_zig_ch_right.contains(&test));
+fn foobar2() {
+    let t0 = TorrentIdPrefix::new(TorrentId::max_value(), 1);
+    assert_eq!(t0.base, "8000000000000000000000000000000000000000".parse().unwrap());
+    
+    let t1 = TorrentIdPrefix::new(TorrentId::max_value(), 2);
+    assert_eq!(t1.longer().unwrap(), "8000000000000000000000000000000000000000".parse().unwrap());
+}
+
+impl fmt::Display for TorrentIdPrefix {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}/{}", self.base.hex(), self.prefix_len)
+    }
 }
 
 impl TorrentIdPrefix {
-    fn contains(&self, id: &TorrentId) -> bool {
-        self.prefix_len <= (self.base ^ *id).leading_zeros()
+    fn zero() -> TorrentIdPrefix {
+        TorrentIdPrefix {
+            base: TorrentId::zero(),
+            prefix_len: 0,
+        }
     }
 
-    fn is_proper_subset_of(&self, other: &TorrentIdPrefix) -> bool {
-        if other.prefix_len <= self.prefix_len {
-            return false;
+    pub fn new(tid: TorrentId, prefix_len: u32) -> TorrentIdPrefix {
+        TorrentIdPrefix {
+            base: tid & TorrentId::with_high_bits(prefix_len),
+            prefix_len,
         }
+    }
 
-        unimplemented!();
+    fn longer(&self) -> Option<TorrentIdPrefix> {
+        if 160 <= self.prefix_len {
+            return None;
+        }
+        let base = self.base & TorrentId::with_high_bits(self.prefix_len + 1);
+        Some(TorrentIdPrefix {
+            base,
+            prefix_len: self.prefix_len + 1,
+        })
+    }
+
+    fn contains(&self, id: &TorrentId) -> bool {
+        self.prefix_len <= (self.base ^ *id).leading_zeros()
     }
 
     fn split(&self) -> (TorrentIdPrefix, TorrentIdPrefix) {
@@ -686,18 +812,6 @@ impl TorrentIdPrefix {
             (right, left)
         }
     }
-
-    // fn split(&mut self) -> TorrentIdPrefix {
-    //     let (bytes, bits) = (self.prefix_len / 8, self.prefix_len % 8);
-    //     self.prefix_len += 1;
-    //     let mut new_base = self.base;
-    //     let slice = new_base.as_mut_bytes();
-    //     slice[bytes as usize] |= 0x80 >> bits;
-    //     TorrentIdPrefix {
-    //         base: new_base,
-    //         prefix_len: self.prefix_len,
-    //     }
-    // }
 }
 
 impl Bucket {
@@ -730,7 +844,6 @@ impl Bucket {
         peer_self_id: &TorrentId,
         seen_node: &ThinNode,
         env: &NodeEnvironment,
-        // is Some if this is our home bucket.
         new_bucket: &mut Vec<Bucket>,
     ) {
         let mut nn = Node {
@@ -768,9 +881,8 @@ impl Bucket {
             self.nodes = new_self_nodes;
 
             if other_prefix.contains(&seen_node.id) {
-                // other_prefix is definitely full of good nodes otherwise we wouldn't
-                // have been trying to split, so we can just discard the node if we are
-                // full.
+                // other_prefix is full of good nodes (otherwise we wouldn't have
+                // been trying to split), so we can just discard the node.
                 if other_bucket_nodes.len() < 8 {
                     other_bucket_nodes.push(nn);
                 }
@@ -852,45 +964,6 @@ impl Bucket {
             }
         }
     }
-}
-
-#[derive(Clone, Copy)]
-pub enum ConfirmLevel {
-    /// Haven't had any response
-    Empty,
-
-    /// Got a message from the node
-    GotMessage,
-
-    /// The node responded to one of our requests
-    Responding,
-}
-
-impl ConfirmLevel {
-    fn is_empty(self) -> bool {
-        match self {
-            ConfirmLevel::Empty => true,
-            ConfirmLevel::GotMessage => false,
-            ConfirmLevel::Responding => false,
-        }
-    }
-
-    fn is_responding(self) -> bool {
-        match self {
-            ConfirmLevel::Empty => false,
-            ConfirmLevel::GotMessage => false,
-            ConfirmLevel::Responding => true,
-        }
-    }
-}
-
-pub struct DhtCommandAddPeer {
-    pub addr: std::net::SocketAddrV4,
-}
-
-pub enum DhtCommand {
-    AddPeer(DhtCommandAddPeer),
-    GetPeers(),
 }
 
 struct GeneralHeapEntry<K, T>

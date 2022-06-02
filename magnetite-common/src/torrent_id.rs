@@ -24,9 +24,27 @@ impl TorrentId {
         TorrentId([0; TORRENT_ID_LENGTH])
     }
 
-    /// Returns a TorrentId with all bits set to zero.
+    /// Returns a TorrentId with all bits set to one.
     pub fn max_value() -> TorrentId {
         TorrentId([0xFF; TORRENT_ID_LENGTH])
+    }
+
+    /// Returns a TorrentId with `bit_count` bits set to zero.
+    pub fn with_high_bits(mut bit_count: u32) -> TorrentId {
+        assert!(bit_count <= 160);
+        let mut buf = [0; TORRENT_ID_LENGTH];
+
+        let mut byiter = buf.iter_mut();
+        while 8 <= bit_count {
+            bit_count -= 8;
+            if let Some(by) = byiter.next() {
+                *by = 0xFF;
+            }
+        }
+        if let Some(by) = byiter.next() {
+            *by = u8::max_value() ^ (u8::max_value() >> bit_count);
+        }
+        TorrentId(buf)
     }
 
     /// Checks if all bits are set to zero, useful for the results of bitwise
@@ -272,4 +290,13 @@ fn dehex_fixed_size<'a>(val: &str, into: &'a mut [u8]) -> Result<&'a [u8], ()> {
         copied_bytes += 1;
     }
     Ok(&into[..copied_bytes])
+}
+
+#[test]
+fn with_high_bits() {
+    assert_eq!(TorrentId::with_high_bits(0), TorrentId::zero());
+    assert_eq!(TorrentId::with_high_bits(1), "8000000000000000000000000000000000000000".parse::<TorrentId>().unwrap());
+
+    assert_eq!(TorrentId::with_high_bits(159), "fffffffffffffffffffffffffffffffffffffffe".parse::<TorrentId>().unwrap());
+    assert_eq!(TorrentId::with_high_bits(160), "ffffffffffffffffffffffffffffffffffffffff".parse::<TorrentId>().unwrap());
 }
