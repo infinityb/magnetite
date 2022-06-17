@@ -12,5 +12,10 @@ callPackage ./Cargo.nix {
       LD_RUN_PATH = "${pkgs.libpcap}/lib";
       buildInputs = [pkgs.libpcap];
     };
+    "dht-traffic-stats" = attrs: {
+      LD_LIBRARY_PATH = "${pkgs.libpcap}/lib";
+      LD_RUN_PATH = "${pkgs.libpcap}/lib";
+      buildInputs = [pkgs.libpcap];
+    };
   };
 }

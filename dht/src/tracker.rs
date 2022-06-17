@@ -191,6 +191,27 @@ impl Tracker {
         &self.torrent_peers
     }
 
+    pub fn get_torrent_peers_display(&self, nenv: &Instant) -> String {
+        use std::io::{Cursor, Write};
+
+        let mut out = Cursor::new(Vec::new());
+        write!(&mut out, "tracked peers: {}\n", self.torrent_peers.len()).unwrap();
+
+        let mut last_torrent_id = TorrentId::max_value();
+        for (k, v) in &self.torrent_peers {
+            if v.is_expired(nenv) {
+                continue;
+            }
+            if k.info_hash != last_torrent_id {
+                last_torrent_id = k.info_hash;
+                write!(&mut out, "    torrent: {}\n", last_torrent_id.hex()).unwrap();
+            }
+            write!(&mut out, "        {} ttl={:?}\n", k.address, v.expiration).unwrap();
+        }
+
+        String::from_utf8(out.into_inner()).unwrap()
+    }
+
     pub fn get_peers_by_torrent(&self) -> BTreeMap<TorrentId, Vec<SocketAddr>> {
         let mut out = BTreeMap::new();
         for (tpk, tpv) in &self.torrent_peers {
@@ -276,7 +297,7 @@ impl Tracker {
         let mut tick_cleanup_node_traversal_limit = self.tick_cleanup_node_traversal_limit;
 
         let mut looped_around = false;
-        let mut first_visited_key: TrackerKey = self.tick_cleanup_resume_key;
+        let first_visited_key: TrackerKey = self.tick_cleanup_resume_key;
         let mut last_visited_key: TrackerKey = self.tick_cleanup_resume_key;
         let mut expirations: SmallVec<[TrackerKey; EXPIRATION_TMP_LIMIT_STACK]> = SmallVec::new();
 

@@ -1,0 +1,16 @@
+[package]
+name = "dht-traffic-stats"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# external
+packet = "0.1.4"
+pcap = "0.9.2"
+
+
+# internal
+dht = { path = ".." }
+bencode = { path = "../../bencode" }

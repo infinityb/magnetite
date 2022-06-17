@@ -52,9 +52,12 @@ pub enum DhtMessageData {
 
 #[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "q", content = "a")]
+// TODO: https://wiki.theory.org/BitTorrentDraftDHTProtocol#forward_compatibility
+// we don't have a graceful way to fall back to find_node when we don't understand
+// the qt yet.
 pub enum DhtMessageQuery {
     #[serde(rename = "ping")]
-    Ping { id: TorrentId },
+    Ping(DhtMessageQueryPing),
     #[serde(rename = "find_node")]
     FindNode(DhtMessageQueryFindNode),
     #[serde(rename = "get_peers")]
@@ -65,6 +68,20 @@ pub enum DhtMessageQuery {
     SampleInfohashes(DhtMessageQuerySampleInfohashes),
     #[serde(rename = "vote")]
     Vote(DhtMessageQueryVote),
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize, Clone)]
+pub struct DhtMessageQueryPing {
+    pub id: TorrentId,
+}
+
+impl Into<DhtMessage> for DhtMessageQueryPing {
+    fn into(self) -> DhtMessage {
+        DhtMessage {
+            transaction: Vec::new(),
+            data: DhtMessageData::Query(DhtMessageQuery::Ping(self)),
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Serialize, Deserialize, Clone)]
@@ -171,17 +188,17 @@ pub struct DhtMessageResponse {
 }
 
 #[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
-pub struct DhtMessageResponseData {
-    // /// includes "ping" and "announce_peer" responses with nodes and nodes6
-    // /// being empty.
-    // FindNode(DhtMessageResponseFindNode),
-    // GetPeers(DhtMessageResponseGetPeers),
+pub struct DhtNodeSave {
+    #[serde(
+        default,
+        with = "serde_vec_socket_addr_v4",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub nodes: Vec<(TorrentId, SocketAddrV4)>,
+}
 
-    // // GeneralId {
-    // //     id: TorrentId,
-    // //     // #[serde(default, rename="t", skip_serializing_if = "SmallVec::is_empty")]
-    // //     // txid: SmallVec<[u8; 8]>,
-    // // },
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
+pub struct DhtMessageResponseData {
     pub id: TorrentId,
     #[serde(default, with = "serde_bytes")]
     pub token: Vec<u8>,
@@ -201,58 +218,6 @@ pub struct DhtMessageResponseData {
     pub nodes6: Vec<SocketAddrV6>,
 }
 
-// impl Serialize for DhtMessageResponseData {
-//     //
-// }
-
-// impl<'de> Deserialize<'de> for DhtMessageResponseData {
-//     //
-// }
-
-// struct CompactV4(SocketAddrV4);
-
-// #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-// pub struct DhtMessageResponseFindNode {
-
-// }
-
-// #[derive(Eq, PartialEq, Serialize, Deserialize)]
-// pub struct DhtMessageResponseGetPeers {
-//     pub id: TorrentId,
-//     /// the write token - used for subsequent `announce_peer`
-//     #[serde(with = "serde_bytes")]
-//     pub token: Vec<u8>,
-//     #[serde(flatten)]
-//     pub data: DhtMessageResponseGetPeersData,
-// }
-
-// impl std::fmt::Debug for DhtMessageResponseGetPeers {
-//     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-//         f.debug_struct("DhtMessageResponseGetPeers")
-//             .field("id", &self.id)
-//             .field("token", &BinStr(&self.token))
-//             .field("data", &self.data)
-//             .finish()
-//     }
-// }
-
-// #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-// #[serde(untagged)]
-// pub enum DhtMessageResponseGetPeersData {
-//     Peers {
-//         // #[serde(with = "<T as AddressFamily>::")]
-//         // was Vec<serde_bytes::ByteBuf>
-//         #[serde(with = "serde_vec_socket_addr")]
-//         values: Vec<SocketAddr>,
-//     },
-//     CloseNodes {
-//         #[serde(default, with = "serde_vec_socket_addr_v4")]
-//         nodes: Vec<SocketAddrV4>,
-//         #[serde(default, with = "serde_vec_socket_addr_v6")]
-//         nodes6: Vec<SocketAddrV6>,
-//     },
-// }
-
 mod serde_vec_socket_addr {
     use std::net::SocketAddr;
 
@@ -262,7 +227,7 @@ mod serde_vec_socket_addr {
 
     use crate::wire::{
         deserialize_sock_addr_v4, deserialize_sock_addr_v6, serialize_sock_addr_v4,
-        serialize_sock_addr_v6,
+        serialize_sock_addr_v6, deserialize_sock_addr,
     };
 
     struct AddressListVisitor;
@@ -284,19 +249,10 @@ mod serde_vec_socket_addr {
             }
 
             while let Some(v) = seq.next_element::<&serde_bytes::Bytes>()? {
-                match v.len() {
-                    6 => {
-                        let mut buf: [u8; 6] = [0; 6];
-                        buf.copy_from_slice(v);
-                        out.push(SocketAddr::V4(deserialize_sock_addr_v4(&buf)));
-                    }
-                    18 => {
-                        let mut buf: [u8; 18] = [0; 18];
-                        buf.copy_from_slice(v);
-                        out.push(SocketAddr::V6(deserialize_sock_addr_v6(&buf)));
-                    }
-                    _ => return Err(serde::de::Error::custom(format!("bad length: {}", v.len()))),
-                }
+                out.push(match deserialize_sock_addr(&v[..]) {
+                    Some(v) => v,
+                    None => return Err(serde::de::Error::custom(format!("bad length: {}", v.len()))),
+                });
             }
 
             Ok(out)
@@ -483,15 +439,6 @@ fn deserialize_sock_addr_v6(from: &[u8; 18]) -> SocketAddrV6 {
     ip_octets.copy_from_slice(&from[..16]);
     let port = (u16::from(from[16]) << 8) + u16::from(from[17]);
     SocketAddrV6::new(ip_octets.into(), port, 0, 0)
-}
-
-fn serialize_sock_addr(into: &mut [u8; 18], v6: &SocketAddrV6) {
-    // let mut tmp_buf = [0; 18];
-    let port = v6.port();
-    let octets = v6.ip().octets();
-    into[0..16].copy_from_slice(&octets[..]);
-    into[16] = (port >> 8) as u8;
-    into[17] = (port & 0xFF) as u8;
 }
 
 fn deserialize_sock_addr(from: &[u8]) -> Option<SocketAddr> {

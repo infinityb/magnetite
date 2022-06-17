@@ -7,4 +7,5 @@ members = [
 	"dht",
 	"dht/dht-example",
 	"dht/dht-traffic-stealer",
+	"dht/dht-traffic-stats",
 ]

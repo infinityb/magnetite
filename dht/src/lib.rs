@@ -1,8 +1,6 @@
-#![feature(map_first_last)]
-
 use std::fmt;
 use std::cmp::Ordering;
-use std::collections::btree_map::{Entry, VacantEntry};
+use std::collections::btree_map::{self, Entry, VacantEntry};
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::hash::{BuildHasher, Hasher};
@@ -35,7 +33,8 @@ pub const TRANSACTION_SIZE_BYTES: usize = 8;
 
 const BUCKET_EXCLUSION_COUNT: usize = 2;
 
-const MAX_UNRESPONDED_QUERIES: i32 = 5;
+const MAX_UNRESPONDED_QUERIES_BAD: i32 = 5;
+const MAX_UNRESPONDED_QUERIES_QUESTIONABLE: i32 = 5;
 
 const QUESTIONABLE_THRESH: Duration = Duration::from_secs(15 * 60);
 
@@ -45,7 +44,7 @@ enum AddressFamily {
     Ipv6,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
 pub struct ThinNode {
     pub id: TorrentId,
     pub saddr: SocketAddr,
@@ -53,22 +52,20 @@ pub struct ThinNode {
 
 
 pub struct RecursionState {
-    self_id: TorrentId,
     target_info_hash: TorrentId,
     cached_nodes_max: usize,
     search_eye: TorrentIdPrefix,
     // anti-spamming measure.
     visited_nodes: BTreeSet<SocketAddr>,
-    // sorted by distance from target?
+    // sorted by distance from target
     pub nodes: BTreeMap<TorrentId, ThinNode>,
-    pub message_template: DhtMessage,
 }
 
 impl RecursionState {
     pub fn new(
         target: TorrentId,
         bm: &BucketManager,
-        env: &NodeEnvironment,
+        env: &GeneralEnvironment,
         cached_nodes_max: usize,
     ) -> Option<RecursionState> {
         type HeapEntry = TorrentIdHeapEntry<ThinNode>;
@@ -87,10 +84,10 @@ impl RecursionState {
                     &mut heap,
                     cached_nodes_max,
                     HeapEntry {
-                        dist_key: !(n.peer_id ^ target),
+                        dist_key: !(n.thin.id ^ target),
                         value: ThinNode {
-                            id: n.peer_id,
-                            saddr: n.peer_addr,
+                            id: n.thin.id,
+                            saddr: n.thin.saddr,
                         },
                     },
                 );
@@ -102,17 +99,12 @@ impl RecursionState {
         }
 
         Some(RecursionState {
-            self_id: bm.self_peer_id,
             target_info_hash: target,
             cached_nodes_max,
             search_eye: TorrentIdPrefix::zero(),
             nodes: heap.into_iter().map(|e| {
                 (e.dist_key, e.value)
             }).collect(),
-            message_template: Into::into(DhtMessageQueryGetPeers {
-                id: bm.self_peer_id,
-                info_hash: target,
-            }),
             visited_nodes: Default::default(),
         })
     }
@@ -121,9 +113,11 @@ impl RecursionState {
         !self.nodes.is_empty()
     }
 
-    pub fn get_work(&mut self) -> Option<(ThinNode, DhtMessage)> {
-        let e = self.nodes.first_entry()?;
-        return Some((e.remove(), self.message_template.clone()));
+    pub fn get_work(&mut self) -> Option<ThinNode> {
+        let (k, _) = self.nodes.range(..).next()?;
+        let k2 = k.clone();
+        drop(k);
+        self.nodes.remove(&k2)
     }
 
     pub fn search_eye(&self) -> TorrentIdPrefix {
@@ -133,6 +127,7 @@ impl RecursionState {
     }
 
     pub fn add_candidate(&mut self, node: ThinNode) -> bool {
+        assert!(self.cached_nodes_max > 0);
         if self.visited_nodes.contains(&node.saddr) {
             event!(Level::INFO, "node already visited");
             return false;
@@ -146,7 +141,17 @@ impl RecursionState {
             self.nodes.insert(dist_val, node);
             return true;
         } else {
-            let e = self.nodes.last_entry().unwrap();
+            let (k, _) = self.nodes.range(..).rev().next().expect("unreachable unless self.cached_nodes_max is 0");
+            let k2 = k.clone();
+            drop(k);
+
+            let e;
+            if let btree_map::Entry::Occupied(e_tmp) = self.nodes.entry(k2) {
+                e = e_tmp;
+            } else {
+                unreachable!("key was fetched from btree but doesn't exist within it.");
+            }
+
             let ekey = *e.key();
             let mut added = false;
             if dist_val < ekey {
@@ -177,13 +182,15 @@ type TorrentIdHeapEntry<T> = GeneralHeapEntry<TorrentId, T>;
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    pub peer_id: TorrentId,
-    pub peer_addr: SocketAddr,
-
+    pub thin: ThinNode,
     // time of last valid message received
     pub last_message_time: Instant,
     // none if we've never queried this node.
     pub reply_stats: Option<NodeReplyStats>,
+    // how many times we've timed out
+    pub timeouts: i32,
+    // when we can send the next exploratory ping/find-nodes
+    pub next_allowed_ping: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -192,8 +199,6 @@ pub struct NodeReplyStats {
     pub last_request_sent_time: Instant,
     // time of last correct reply received
     pub last_correct_reply_time: Option<Instant>,
-    // how many requests we sent since last reply
-    pub pinged: i32,
 }
 
 pub enum NodeActivityCommand {
@@ -214,7 +219,8 @@ pub struct NodeDebug<'a> {
 
 impl<'a> std::fmt::Debug for NodeDebug<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}@{:?}", self.node.peer_id.hex(), self.node.peer_addr)
+        // TODO: belongs in NodeThin.
+        write!(f, "{}@{:?}", self.node.thin.id.hex(), self.node.thin.saddr)
     }
 }
 
@@ -248,29 +254,42 @@ impl NodeQuality {
     }
 }
 
+
 #[derive(Debug)]
-pub struct NodeEnvironment {
+pub struct GeneralEnvironment {
     pub now: Instant,
+}
+
+#[derive(Debug)]
+pub struct RequestEnvironment {
+    pub gen: GeneralEnvironment,
     pub is_reply: bool,
 }
 
 impl Node {
-    fn new(peer_id: TorrentId, peer_addr: SocketAddr, env: &NodeEnvironment) -> Node {
+    fn new(peer_id: TorrentId, peer_addr: SocketAddr, env: &GeneralEnvironment) -> Node {
         Node {
-            peer_id,
-            peer_addr,
+            thin: ThinNode {
+                id: peer_id,
+                saddr: peer_addr,
+            },
             last_message_time: env.now,
             reply_stats: None,
+            timeouts: 0,
+            next_allowed_ping: env.now,
         }
     }
 
-    pub fn quality(&self, env: &NodeEnvironment) -> NodeQuality {
+    pub fn quality(&self, genv: &GeneralEnvironment) -> NodeQuality {
+        if MAX_UNRESPONDED_QUERIES_BAD <= self.timeouts {
+            return NodeQuality::Bad;
+        }
+        if MAX_UNRESPONDED_QUERIES_QUESTIONABLE <= self.timeouts {
+            return NodeQuality::Questionable;
+        }
         if let Some(ref stats) = self.reply_stats {
-            if MAX_UNRESPONDED_QUERIES <= stats.pinged {
-                return NodeQuality::Bad;
-            }
             if let Some(lcrt) = stats.last_correct_reply_time {
-                if env.now - lcrt < QUESTIONABLE_THRESH {
+                if genv.now - lcrt < QUESTIONABLE_THRESH {
                     return NodeQuality::Good;
                 }
             }
@@ -278,28 +297,15 @@ impl Node {
         NodeQuality::Questionable
     }
 
-    pub fn apply_activity_send_request(&mut self, env: &NodeEnvironment) {
-        if self.reply_stats.is_none() {
-            self.reply_stats = Some(NodeReplyStats {
-                last_request_sent_time: env.now,
-                last_correct_reply_time: None,
-                pinged: 0,
-            });
-        }
-        let rs = self.reply_stats.as_mut().unwrap();
-        rs.last_request_sent_time = env.now;
-        rs.pinged += 1;
-    }
-
-    pub fn apply_activity_receive_request(&mut self, env: &NodeEnvironment) {
+    pub fn apply_activity_receive_request(&mut self, env: &GeneralEnvironment) {
         self.last_message_time = env.now;
     }
 
-    pub fn apply_activity_receive_response(&mut self, env: &NodeEnvironment) {
+    pub fn apply_activity_receive_response(&mut self, env: &GeneralEnvironment) {
+        self.timeouts = 0;
         self.last_message_time = env.now;
         if let Some(ref mut rs) = self.reply_stats {
             rs.last_correct_reply_time = Some(env.now);
-            rs.pinged = 0;
         } else {
             // received a valid response to an unknown node, so we fake the sent time.
             // this is needed because we don't have a node record before we do the initial
@@ -307,7 +313,6 @@ impl Node {
             self.reply_stats = Some(NodeReplyStats {
                 last_request_sent_time: env.now,
                 last_correct_reply_time: Some(env.now),
-                pinged: 0,
             });
         }
     }
@@ -318,6 +323,7 @@ pub struct BucketManager {
     pub self_peer_id: TorrentId,
     pub buckets: Vec<Bucket>,
     pub recent_dead_hosts: (),
+    pub bootstrap_hostnames: Vec<String>,
 
     pub token_rs_next_incr: Instant,
     pub token_rs_current: RandomState,
@@ -328,6 +334,48 @@ pub struct BucketManager {
 }
 
 impl BucketManager {
+    pub fn find_oldest_bucket<'a>(&'a self) -> &'a Bucket {
+        assert!(self.buckets.len() > 0);
+
+        let mut biter = self.buckets.iter();
+        let mut oldest_bucket = biter.next().expect("must have at least one bucket");
+        for b in biter {
+            if b.last_touched_time < oldest_bucket.last_touched_time {
+                oldest_bucket = b;
+            }
+        }
+        oldest_bucket
+    }
+
+    pub fn find_worst_bucket<'a>(&'a self, genv: &GeneralEnvironment) -> &'a Bucket {
+        assert!(self.buckets.len() > 0);
+        let mut lowest_node_bucket_node_score = usize::max_value();
+        let mut lowest_node_bucket = None;
+        for b in &self.buckets {
+            let mut score = 0;     
+            for node in &b.nodes {
+                score += match node.quality(genv) {
+                    NodeQuality::Good => 4,
+                    NodeQuality::Questionable => 2,
+                    NodeQuality::Bad => 1,
+                };
+            }
+            if score < lowest_node_bucket_node_score {
+                lowest_node_bucket_node_score = score;
+                lowest_node_bucket = Some(b);
+            }
+        }
+        lowest_node_bucket.unwrap()
+    }
+
+    pub fn node_count(&self) -> usize {
+        let mut acc = 0;
+        for b in &self.buckets {
+            acc += b.nodes.len()
+        }
+        acc
+    }
+
     pub fn format_buckets<'a>(&'a self) -> BucketFormatter<'a> {
         BucketFormatter { bb: &self.buckets }
     }
@@ -339,11 +387,10 @@ pub struct BucketFormatter<'a> {
 
 impl<'a> fmt::Display for BucketFormatter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let nenv = NodeEnvironment {
+        let nenv = GeneralEnvironment {
             now: Instant::now(),
-            is_reply: false,
         };
-        write!(f, "buckets count={}\n", self.bb.len());
+        write!(f, "buckets count={}\n", self.bb.len())?;
         for bucket in self.bb {
             write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
                 bucket.prefix.base.hex(),
@@ -358,11 +405,12 @@ impl<'a> fmt::Display for BucketFormatter<'a> {
                     NodeQuality::Bad => "🤢",
                 };
                 
-                write!(f, "        {} {} {:21} age={:?}\n",
+                write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
                     quality,
-                    node.peer_id.hex(),
-                    node.peer_addr,
+                    node.thin.id.hex(),
+                    node.thin.saddr,
                     nenv.now - node.last_message_time,
+                    node.timeouts,
                 )?;
             }
         }
@@ -375,6 +423,16 @@ pub struct TransactionState {
     pub queried_peer_id: Option<TorrentId>,
     pub query: wire::DhtMessage,
     pub completion_port: oneshot::Sender<Box<TransactionCompletion>>,
+}
+
+impl TransactionState {
+    pub fn queried_thin_node(&self) -> Option<ThinNode> {
+        let id = self.queried_peer_id?;
+        Some(ThinNode {
+            id,
+            saddr: self.saddr,
+        })
+    }
 }
 
 impl std::fmt::Debug for TransactionState {
@@ -407,8 +465,8 @@ impl TransactionCompletion {
     pub fn queried_thin_node(&self) -> Option<ThinNode> {
         let id = self.queried_peer_id?;
         Some(ThinNode {
-            saddr: self.queried_node,
             id,
+            saddr: self.queried_node,
         })
     }
 }
@@ -416,7 +474,7 @@ impl TransactionCompletion {
 impl BucketManager {
     pub fn new(self_peer_id: TorrentId) -> BucketManager {
         let mut buckets = Vec::new();
-        let mut now = Instant::now();
+        let now = Instant::now();
 
         buckets.push(Bucket {
             prefix: TorrentIdPrefix {
@@ -438,10 +496,11 @@ impl BucketManager {
             get_peers_search: RandomState::new(),
             transactions: BTreeMap::new(),
             tracker: Tracker::new(),
+            bootstrap_hostnames: Vec::new(),
         }
     }
 
-    pub fn tick(&mut self, env: &NodeEnvironment) {
+    pub fn tick(&mut self, env: &GeneralEnvironment) {
         if env.now < self.token_rs_next_incr {
             self.token_rs_previous = self.token_rs_current.clone();
             self.token_rs_current = RandomState::new();
@@ -504,7 +563,7 @@ impl BucketManager {
         &self,
         target: &TorrentId,
         limit: usize,
-        env: &NodeEnvironment,
+        env: &GeneralEnvironment,
     ) -> Vec<&Node> {
         type HeapEntry<'a> = TorrentIdHeapEntry<&'a Node>;
 
@@ -520,7 +579,7 @@ impl BucketManager {
                     limit,
                     HeapEntry {
                         // max-heap so get the reversed value of the bitwise xor
-                        dist_key: !(n.peer_id ^ *target),
+                        dist_key: !(n.thin.id ^ *target),
                         value: n,
                     },
                 );
@@ -535,10 +594,33 @@ impl BucketManager {
         out
     }
 
+    fn find_node_mut_by_id<'man>(
+        &'man mut self,
+        id: &TorrentId,
+    ) -> Option<&'man mut Node> {
+        let mut idx = 0;
+        let mut found = false;
+        for (i, b) in self.buckets.iter().enumerate() {
+            if b.prefix.contains(id) {
+                idx = i;
+                found = true;
+            }
+        }
+        if !found {
+            unreachable!("bucket manager not covering entire keyspace");
+        }
+        for n in &mut self.buckets[idx].nodes {
+            if n.thin.id == *id {
+                return Some(n);
+            }
+        }
+        None
+    }
+
     fn find_bucket_mut_for_insertion_by_id<'man>(
         &'man mut self,
         id: &TorrentId,
-        env: &NodeEnvironment,
+        env: &GeneralEnvironment,
     ) -> &'man mut Bucket {
         // because these are ordered by longest prefix first, we can find the best
         // match by finding the first match and then breaking, relooping for saturated
@@ -568,9 +650,12 @@ impl BucketManager {
         &mut self.buckets[idx]
     }
 
-    pub fn node_seen(&mut self, node: &ThinNode, env: &NodeEnvironment) {
+    pub fn node_seen(&mut self, node: &ThinNode, env: &RequestEnvironment) {
         let self_peer_id = self.self_peer_id;
-        let b = self.find_bucket_mut_for_insertion_by_id(&node.id, env);
+        if node.id == self_peer_id {
+            return;
+        }
+        let b = self.find_bucket_mut_for_insertion_by_id(&node.id, &env.gen);
 
         let mut new_buckets = Vec::new();
         let mut new_bucket_slot_ref = None;
@@ -582,29 +667,38 @@ impl BucketManager {
 
         if !new_buckets.is_empty() {
             self.buckets.extend(new_buckets.into_iter());
-
-            // ordered by base and then longest prefix (smallest interval) descending.
-            // this way, the first match is our best match.
-            self.buckets
-                .sort_by_key(|bm| (bm.prefix.base, !0 - bm.prefix.prefix_len));
+            self.buckets.sort_by_key(|bm| bm.prefix.base);
         }
     }
 
-    pub fn clean_expired_transaction(&mut self, txid: u64) {
+    pub fn clean_expired_transaction(&mut self, txid: u64, genv: &GeneralEnvironment) {
         if let Some(tx) = self.transactions.remove(&txid) {
+            let target_node = tx.queried_thin_node();
             let res = tx.completion_port.send(Box::new(TransactionCompletion {
                 queried_node: tx.saddr,
                 queried_peer_id: tx.queried_peer_id,
                 query: tx.query,
                 response: Err(()),
             }));
+            if let Some(tn) = target_node {
+                if let Some(node) = self.find_node_mut_by_id(&tn.id) {
+                    node.timeouts += 1;
+                    node.next_allowed_ping = genv.now + Duration::from_secs(120);
+                }
+            }
             if let Err(err) = res {
-                event!(Level::INFO, "failed to send on completion port: {:?}", err);
+                // these are fine - just means the message was fire-and-forget.
+                event!(Level::TRACE, "failed to send on completion port: {:?}", err);
             }
         }
     }
 
-    pub fn handle_incoming_packet(&mut self, message: &wire::DhtMessage, from: SocketAddr) -> bool {
+    pub fn handle_incoming_packet(
+        &mut self,
+        message: &wire::DhtMessage,
+        from: SocketAddr,
+        env: &GeneralEnvironment,
+    ) -> bool {
         if message.transaction.len() != 8 {
             return false;
         }
@@ -622,16 +716,22 @@ impl BucketManager {
 
         if let Some(tx) = self.transactions.remove(&txid) {
             if from != tx.saddr {
-                eprintln!(
-                    "TX-{:016x} peer invalid: {} != {}",
-                    txid, tx.saddr, from
+                event!(Level::INFO,
+                    kind="bad-peer-invalid-source",
+                    from=?from, from_expected=?tx.saddr,
+                    "TX-{:016x} peer invalid: bad response source",
+                    txid,
                 );
             }
             if let Some(peer_id) = tx.queried_peer_id {
                 if resp.data.id != peer_id {
-                    eprintln!(
-                        "TX-{:016x} peer invalid: {} != {}",
-                        txid, resp.data.id.hex(), peer_id.hex(),
+                    event!(Level::INFO,
+                        kind="bad-peer-invalid-id",
+                        from=?from,
+                        peer_id=%resp.data.id.hex(),
+                        peer_id_expected=%peer_id.hex(),
+                        "TX-{:016x} peer invalid: bad response peer-id",
+                        txid,
                     );
                 }
             }
@@ -643,7 +743,8 @@ impl BucketManager {
             }));
 
             if let Err(err) = res {
-                event!(Level::INFO, "failed to send on completion port: {:?}", err);
+                // these are fine - just means the message was fire-and-forget.
+                event!(Level::TRACE, "failed to send on completion port: {:?}", err);
             }
 
             true
@@ -717,7 +818,7 @@ impl fmt::Debug for Bucket {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TorrentIdPrefix {
     pub base: TorrentId,
     pub prefix_len: u32,
@@ -781,7 +882,7 @@ impl TorrentIdPrefix {
         })
     }
 
-    fn contains(&self, id: &TorrentId) -> bool {
+    pub fn contains(&self, id: &TorrentId) -> bool {
         self.prefix_len <= (self.base ^ *id).leading_zeros()
     }
 
@@ -812,10 +913,17 @@ impl TorrentIdPrefix {
             (right, left)
         }
     }
+
+    pub fn rand_within<R>(&self, rng: &mut R) -> TorrentId where R: Rng {
+        let mut randomized = TorrentId::zero();
+        rng.fill_bytes(randomized.as_mut_bytes());
+        let rand_mask = !TorrentId::with_high_bits(self.prefix_len);
+        self.base | (rand_mask & randomized)
+    }
 }
 
 impl Bucket {
-    fn touch(&mut self, env: &NodeEnvironment) {
+    fn touch(&mut self, env: &GeneralEnvironment) {
         self.last_touched_time = env.now;
     }
 
@@ -825,13 +933,13 @@ impl Bucket {
     }
 
     /// Iff we're full of good nodes, we're saturated.
-    fn is_saturated(&self, env: &NodeEnvironment) -> bool {
+    pub fn is_saturated(&self, env: &GeneralEnvironment) -> bool {
         if !self.is_full() {
             return false;
         }
 
         for n in &self.nodes {
-            if !n.quality(env).is_good() {
+            if !n.quality(&env).is_good() {
                 return false;
             }
         }
@@ -843,22 +951,23 @@ impl Bucket {
         &mut self,
         peer_self_id: &TorrentId,
         seen_node: &ThinNode,
-        env: &NodeEnvironment,
+        env: &RequestEnvironment,
         new_bucket: &mut Vec<Bucket>,
     ) {
         let mut nn = Node {
-            peer_id: seen_node.id,
-            peer_addr: seen_node.saddr,
-            last_message_time: env.now,
+            thin: *seen_node,
+            last_message_time: env.gen.now,
             reply_stats: None,
+            timeouts: 0,
+            next_allowed_ping: env.gen.now,
         };
         if env.is_reply {
-            nn.apply_activity_receive_response(env);
+            nn.apply_activity_receive_response(&env.gen);
         } else {
-            nn.apply_activity_receive_request(env);
+            nn.apply_activity_receive_request(&env.gen);
         }
 
-        while self.is_saturated(env) && self.prefix.contains(&seen_node.id) {
+        while self.is_saturated(&env.gen) && self.prefix.contains(&seen_node.id) {
             let (new_self_prefix, other_prefix) = self.prefix.split_swap(peer_self_id);
             // event!(Level::TRACE, "ITERATION -- {:?} => {:?} + {:?}", self.prefix, new_self_prefix, other_prefix);
             let mut new_self_nodes: SmallVec<[Node; BUCKET_SIZE]> = Default::default();
@@ -869,10 +978,10 @@ impl Bucket {
                 // event!(Level::TRACE, "        -? within {:?} :: {}", new_self_prefix, new_self_prefix.contains(&node.peer_id));
                 // event!(Level::TRACE, "        -? within {:?} :: {}", other_prefix, other_prefix.contains(&node.peer_id));
 
-                if new_self_prefix.contains(&node.peer_id) {
+                if new_self_prefix.contains(&node.thin.id) {
                     new_self_nodes.push(node);
                 } else {
-                    assert!(other_prefix.contains(&node.peer_id));
+                    assert!(other_prefix.contains(&node.thin.id));
                     other_bucket_nodes.push(node);
                 }
             }
@@ -903,7 +1012,7 @@ impl Bucket {
             }
         }
 
-        assert!(self.prefix.contains(&nn.peer_id));
+        assert!(self.prefix.contains(&nn.thin.id));
         self.nodes.push(nn);
     }
 
@@ -911,47 +1020,69 @@ impl Bucket {
         &mut self,
         peer_self_id: &TorrentId,
         seen_node: &ThinNode,
-        env: &NodeEnvironment,
+        env: &RequestEnvironment,
         // is Some if this is our home bucket.
         new_bucket: Option<&mut Vec<Bucket>>,
     ) {
         assert!(self.prefix.contains(&seen_node.id));
-        self.touch(env);
+        self.touch(&env.gen);
 
         for n in self.nodes.iter_mut() {
-            if n.peer_id == seen_node.id && n.peer_addr == seen_node.saddr {
+            if n.thin == *seen_node {
+                event!(Level::DEBUG,
+                    seen_node=?seen_node,
+                    old_age=?(env.gen.now -  n.last_message_time),
+                    "node-seen");
                 if env.is_reply {
-                    n.apply_activity_receive_response(env);
+                    n.apply_activity_receive_response(&env.gen);
                 } else {
-                    n.apply_activity_receive_request(env);
+                    n.apply_activity_receive_request(&env.gen);
                 }
                 return;
-            } else if n.peer_id == seen_node.id {
-                // FIXME: drop incorrect source address.
+            } else if n.thin.id == seen_node.id && env.is_reply {
+                event!(Level::DEBUG,
+                    seen_node=?seen_node,
+                    seen_node_exp=?n.thin,
+                    age=?(env.gen.now -  n.last_message_time),
+                    "node-seen-replaced-src-addr");
+                n.thin = *seen_node;
+            } else if n.thin.id == seen_node.id && !env.is_reply {
+                event!(Level::DEBUG,
+                    seen_node=?seen_node,
+                    seen_node_exp=?n.thin,
+                    age=?(env.gen.now -  n.last_message_time),
+                    "node-seen-invalid-src-addr");
+                // FIXME: drop incorrect source address???
                 return;
-            }
+            } 
         }
+        event!(Level::DEBUG,
+            seen_node=?seen_node,
+            "node-seen-new");
 
-        if self.is_saturated(env) && new_bucket.is_some() {
+        if self.is_saturated(&env.gen) && new_bucket.is_some() {
             let new_bucket = new_bucket.unwrap();
             self.split_bucket_and_add(peer_self_id, seen_node, env, new_bucket);
-        } else if !self.is_saturated(env) {
+        } else if !self.is_saturated(&env.gen) {
             // not saturated so we can replace a bad node or add.
             let mut nn = Node {
-                peer_id: seen_node.id,
-                peer_addr: seen_node.saddr,
-                last_message_time: env.now,
+                thin: *seen_node,
+                last_message_time: env.gen.now,
                 reply_stats: None,
+                timeouts: 0,
+                next_allowed_ping: env.gen.now,
             };
             if env.is_reply {
-                nn.apply_activity_receive_response(env);
+                nn.apply_activity_receive_response(&env.gen);
             } else {
-                nn.apply_activity_receive_request(env);
+                nn.apply_activity_receive_request(&env.gen);
             }
+
+            self.last_touched_time = env.gen.now;
             if self.is_full() {
                 let mut bad_node = None;
                 for n in self.nodes.iter_mut() {
-                    if n.quality(env).is_bad() {
+                    if n.quality(&env.gen).is_bad() {
                         bad_node = Some(n);
                         break;
                     }
@@ -963,6 +1094,13 @@ impl Bucket {
                 self.nodes.push(nn);
             }
         }
+    }
+
+    pub fn find_node_for_maintenance_ping<'a>(&'a self, env: &GeneralEnvironment) -> Option<&'a Node> {
+        self.nodes.iter()
+            .filter(|x| x.next_allowed_ping < env.now)
+            .filter(|x| !x.quality(env).is_bad())
+            .min_by_key(|x| x.last_message_time)
     }
 }
 

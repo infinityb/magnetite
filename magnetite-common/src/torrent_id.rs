@@ -1,5 +1,5 @@
 use std::fmt;
-use std::ops::{BitAnd, BitXor};
+use std::ops::{BitAnd, BitXor, BitOr};
 
 const TORRENT_ID_LENGTH: usize = 20;
 
@@ -170,6 +170,23 @@ impl BitXor for TorrentId {
 
         for (o, (a, b)) in out.as_mut_bytes().iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
             *o = *a ^ *b;
+        }
+
+        out
+    }
+}
+
+
+impl BitOr for TorrentId {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        let mut out = TorrentId::zero();
+        let lhs_bytes = self.as_bytes().iter();
+        let rhs_bytes = rhs.as_bytes().iter();
+
+        for (o, (a, b)) in out.as_mut_bytes().iter_mut().zip(lhs_bytes.zip(rhs_bytes)) {
+            *o = *a | *b;
         }
 
         out
