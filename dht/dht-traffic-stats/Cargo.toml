@@ -14,3 +14,4 @@ pcap = "0.9.2"
 # internal
 dht = { path = ".." }
 bencode = { path = "../../bencode" }
+magnetite-tracker-lib = { path = "../../magnetite-tracker/lib" }

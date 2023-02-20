@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
 use metrics::{counter, gauge};
-use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
-use salsa20::XSalsa20;
+// use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
+// use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -50,7 +50,7 @@ pub struct DiskCacheWrapper<P> {
 
     piece_cache: Arc<Mutex<PieceCacheInfo>>,
     cache_file: Arc<Mutex<TokioFile>>,
-    crypto: Option<Arc<Mutex<XSalsa20>>>,
+    crypto: Option<Arc<Mutex<()>>>, // was crypto: Option<Arc<Mutex<XSalsa20>>>,
 
     upstream: P,
 }
@@ -68,12 +68,12 @@ impl DiskCacheWrapper<()> {
 pub struct Builder {
     cache_alignment: u64,
     cache_size_max: u64,
-    crypto: Option<Arc<Mutex<XSalsa20>>>,
+    crypto: Option<Arc<Mutex<()>>>, // was Option<Arc<Mutex<XSalsa20>>>,
 }
 
 impl Builder {
-    pub fn set_crypto(&mut self, crypto: XSalsa20) {
-        self.crypto = Some(Arc::new(Mutex::new(crypto)));
+    pub fn set_crypto(&mut self, crypto: ()) { // was crypto: XSalsa20
+        // self.crypto = Some(Arc::new(Mutex::new(crypto)));
     }
 
     pub fn build<P>(self, file: TokioFile, upstream: P) -> DiskCacheWrapper<P>
@@ -106,7 +106,7 @@ struct FileSpan {
 
 async fn load_from_disk(
     file: Arc<Mutex<TokioFile>>,
-    crypto: Option<Arc<Mutex<XSalsa20>>>,
+    crypto: Option<Arc<Mutex<()>>>,
     piece_length: u32,
     piece_length_nopad: u32,
     file_position: u64,
@@ -120,8 +120,8 @@ async fn load_from_disk(
 
     if let Some(cr) = crypto {
         let mut crlocked = cr.lock().await;
-        crlocked.seek(file_position);
-        crlocked.apply_keystream(&mut piece_data[..]);
+        // crlocked.seek(file_position);
+        // crlocked.apply_keystream(&mut piece_data[..]);
     }
 
     piece_data.truncate(piece_length_nopad as usize);
@@ -370,8 +370,8 @@ where
 
                     if let Some(ref cr) = self_cloned.crypto {
                         let mut crlocked = cr.lock().await;
-                        crlocked.seek(position);
-                        crlocked.apply_keystream(&mut piece_padded[..]);
+                        // crlocked.seek(position);
+                        // crlocked.apply_keystream(&mut piece_padded[..]);
                     }
 
                     assert!(piece_padded.len() as u64 % self_cloned.cache_alignment == 0);

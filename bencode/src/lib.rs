@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::error::Error as StdError;
-use std::fmt::{self, Display, Write};
+use std::fmt::{self, Display};
 use std::io;
 use std::num::ParseIntError;
 use std::str::{self, FromStr, Utf8Error};
@@ -8,6 +8,8 @@ use std::str::{self, FromStr, Utf8Error};
 use serde::de::{self, IntoDeserializer, Unexpected, Visitor};
 
 use iresult::IResult;
+use bin_str::BinStr;
+
 mod ser;
 mod value;
 
@@ -972,6 +974,7 @@ impl<'de, 'a> de::VariantAccess<'de> for EnumExtended<'a, 'de> {
     }
 }
 
+
 #[cfg(test)]
 mod test {
     use super::{IResult, Node, Tokenizer};
@@ -979,7 +982,7 @@ mod test {
     use std::borrow::Cow;
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct TorrentMeta {
+    struct TorrentTestMeta {
         #[serde(default)]
         announce: String,
         #[serde(rename = "announce-list", default)]
@@ -990,12 +993,12 @@ mod test {
         created_by: String,
         #[serde(rename = "creation date", default)]
         creation_date: u64,
-        info: TorrentMetaInfo,
+        info: TorrentTestMetaInfo,
     }
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct TorrentMetaInfo {
-        files: Vec<TorrentMetaInfoFile>,
+    struct TorrentTestMetaInfo {
+        files: Vec<TorrentTestMetaInfoFile>,
         #[serde(rename = "piece length")]
         piece_length: u64,
         #[serde(with = "serde_bytes")]
@@ -1004,7 +1007,7 @@ mod test {
     }
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct TorrentMetaInfoFile {
+    struct TorrentTestMetaInfoFile {
         length: u64,
         path: Vec<String>,
     }
@@ -1044,7 +1047,7 @@ mod test {
             buf.extend(*piece);
         }
 
-        let err = crate::from_bytes::<TorrentMeta>(&buf[..]).unwrap_err();
+        let err = crate::from_bytes::<TorrentTestMeta>(&buf[..]).unwrap_err();
         assert_eq!(err.offset, 139);
     }
 
@@ -1098,7 +1101,7 @@ mod test {
             buf.extend(*piece);
         }
 
-        let tm: TorrentMeta = crate::from_bytes(&buf[..]).unwrap();
+        let tm: TorrentTestMeta = crate::from_bytes(&buf[..]).unwrap();
         println!("{:#?}", tm);
     }
 
@@ -1264,39 +1267,3 @@ mod test {
     }
 }
 
-pub struct BinStr<'a>(pub &'a [u8]);
-
-impl<'a> fmt::Debug for BinStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "b\"")?;
-        for &b in self.0 {
-            match b {
-                b'\0' => write!(f, "\\0")?,
-                b'\"' => write!(f, "\\\"")?,
-                b'\\' => write!(f, "\\\\")?,
-                b'\n' => write!(f, "\\n")?,
-                b'\r' => write!(f, "\\r")?,
-                b'\t' => write!(f, "\\t")?,
-                _ if 0x20 <= b && b < 0x7f => write!(f, "{}", b as char)?,
-                _ => write!(f, "\\x{:02x}", b)?,
-            }
-        }
-        write!(f, "\"")?;
-        Ok(())
-    }
-}
-
-pub struct HexStr<'a>(pub &'a [u8]);
-
-impl<'a> fmt::Debug for HexStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-        f.write_str("dehex(\"")?;
-        for c in self.0.iter() {
-            f.write_char(HEX_CHARS[usize::from(c >> 4)] as char)?;
-            f.write_char(HEX_CHARS[usize::from(c & 0xF)] as char)?;
-        }
-        f.write_str("\")")?;
-        Ok(())
-    }
-}

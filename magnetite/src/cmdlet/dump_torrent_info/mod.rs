@@ -52,6 +52,10 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     for file in tm.info.files {
         println!("  {} {}", file.length, file.path.display());
     }
+    println!("Pieces:");
+    for piece in tm.info.pieces {
+        println!("  {}", piece.hex());
+    }
     println!("");
 
     Ok(())

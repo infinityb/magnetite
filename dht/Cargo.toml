@@ -4,14 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.55"
+# internal
+bencode = { path = "../bencode" }
+bin-str = { path = "../bin-str" }
 magnetite-common = { path = "../magnetite-common" }
+magnetite-tracker-lib = { path = "../magnetite-tracker/lib" }
+heap-dist-key = { path = "../heap-dist-key" }
+
+# external
+anyhow = "1.0.55"
 rand = "0.8.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11.3"
 smallvec = { version = "1.0", features = ["serde"] }
 tokio = { version = "1.0", features = ["sync", "rt", "net"] }
-bencode = { path = "../bencode" }
 futures = "0.3"
 tracing = "0.1.29"
 tracing-subscriber = { version = "0.3.0", features = ["smallvec", "fmt", "ansi", "tracing-log", "std", "json"] }

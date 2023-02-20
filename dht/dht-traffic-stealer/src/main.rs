@@ -3,8 +3,9 @@ use std::time::{Instant, Duration};
 
 use pcap::{Device, Capture};
 use packet::Packet;
-use dht::tracker::{Tracker, AnnounceCtx};
+use magnetite_tracker_lib::{Tracker, AnnounceCtx};
 use dht::wire::{DhtMessageData, DhtMessageQuery, DhtMessage, DhtMessageQueryAnnouncePeer};
+use bin_str::BinStr;
 
 fn main() {
     let main_device = Device::lookup().unwrap();
@@ -25,9 +26,8 @@ fn main() {
             let before = Instant::now();
             let cleanup_stats = tracker.tick_cleanup(&now);
             println!("eviction ran in {:?} - {:?}", before.elapsed(), cleanup_stats);
-            println!("found {} elements: {:#?}",
-                tracker.get_torrent_peers_count(),
-                tracker.get_peers_by_torrent());
+            println!("found {} elements",
+                tracker.get_torrent_peers_count());
         }
 
         let pp;
@@ -83,9 +83,13 @@ fn handle_query_announce_peer(
     //     };
     // }
 
-    tracker.insert_announce(&m_ap.info_hash, client_addr, &AnnounceCtx {
-        now: Instant::now(),
-    });
+    tracker.insert_announce(
+        &m_ap.info_hash,
+        client_addr,
+        &AnnounceCtx {
+            now: Instant::now(),
+        },
+        None);
 
     // DhtMessage {
     //     transaction: message.transaction.clone(),
@@ -139,26 +143,3 @@ fn decode_udp_payload(packet_data: &[u8]) -> packet::Result<Udp> {
     })
 }
 
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-struct BinStr<'a>(pub &'a [u8]);
-
-impl std::fmt::Debug for BinStr<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "b\"")?;
-        for &b in self.0 {
-            match b {
-                b'\0' => write!(f, "\\0")?,
-                b'\n' => write!(f, "\\n")?,
-                b'\r' => write!(f, "\\r")?,
-                b'\t' => write!(f, "\\t")?,
-                b'\\' => write!(f, "\\\\")?,
-                b'"' => write!(f, "\\\"")?,
-                _ if 0x20 <= b && b < 0x7F => write!(f, "{}", b as char)?,
-                _ => write!(f, "\\x{:02x}", b)?,
-            }
-        }
-        write!(f, "\"")?;
-        Ok(())
-    }
-}

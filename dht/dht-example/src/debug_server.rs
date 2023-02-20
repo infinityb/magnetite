@@ -21,7 +21,7 @@ async fn handle_show_tracked(
     _addr: SocketAddr,
     _req: Request<Body>,
 ) -> Result<Response<Body>, hyper::http::Error> {
-    let bm_locked = context.bm.lock().await;
+    let bm_locked = context.bm.borrow();
     let buf = bm_locked.tracker.get_torrent_peers_display(&Instant::now());
     drop(bm_locked);
 
@@ -145,7 +145,7 @@ async fn handle(
     }
 
     if uri == "/show-buckets" {
-        let bm_locked = context.bm.lock().await;
+        let bm_locked = context.bm.borrow();
         let formatted = format!("self-id: {}\n{}",
             bm_locked.self_peer_id.hex(),
             bm_locked.format_buckets());

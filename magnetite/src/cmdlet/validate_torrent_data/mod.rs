@@ -49,11 +49,19 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     let torrent = TorrentMetaWrapped::from_bytes(&by)?;
 
     let mut reg_files = Vec::new();
-    for file in &torrent.meta.info.files {
+
+    if let Some(length) = torrent.meta.info.length {
         reg_files.push(multi_file::FileInfo {
-            file_size: file.length,
-            rel_path: file.path.clone(),
+            file_size: length,
+            rel_path: target_path.clone(),
         });
+    } else {
+        for file in &torrent.meta.info.files {
+            reg_files.push(multi_file::FileInfo {
+                file_size: file.length,
+                rel_path: file.path.clone(),
+            });
+        }
     }
 
     let mut mf_builder = multi_file::MultiFileStorageEngine::builder();
@@ -64,11 +72,12 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
             files: reg_files,
         },
     );
-
     let storage_engine = mf_builder.build();
 
     let mut detected_broken_piece = false;
-    for (idx, ps) in torrent.piece_shas.iter().enumerate() {
+    for (idx, ps) in torrent.meta.info.pieces.iter().enumerate() {
+        event!(Level::INFO, piece_index = idx, "start");
+
         let req = GetPieceRequest {
             content_key: torrent.info_hash,
             piece_sha: *ps,
@@ -76,7 +85,11 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
             total_length: torrent.total_length,
             piece_index: idx as u32,
         };
+
+        event!(Level::INFO, piece_index = req.piece_index, req=?req, "read-start");
         let piece = storage_engine.get_piece_dumb(&req).await?;
+        event!(Level::INFO, piece_index = req.piece_index, "read-ok");
+
         let mut hasher = Sha1::new();
         hasher.input(&piece[..]);
         let sha = hasher.result();
@@ -102,6 +115,8 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
             detected_broken_piece = true;
         }
     }
+
+    ::std::thread::sleep(::std::time::Duration::new(1, 0));
 
     if detected_broken_piece {
         return Err(StorageEngineCorruption.into());

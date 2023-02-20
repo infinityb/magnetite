@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 
 use pcap::{Device, Capture};
 use packet::Packet;
-use dht::tracker::{Tracker, AnnounceCtx};
+use magnetite_tracker_lib::{Tracker, AnnounceCtx};
 use dht::wire::{DhtMessageData, DhtMessageQuery, DhtMessage, DhtMessageQueryAnnouncePeer};
 
 fn main() -> io::Result<()> {
@@ -181,26 +181,3 @@ fn decode_udp_payload(packet_data: &[u8]) -> packet::Result<Udp> {
     })
 }
 
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-struct BinStr<'a>(pub &'a [u8]);
-
-impl std::fmt::Debug for BinStr<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "b\"")?;
-        for &b in self.0 {
-            match b {
-                b'\0' => write!(f, "\\0")?,
-                b'\n' => write!(f, "\\n")?,
-                b'\r' => write!(f, "\\r")?,
-                b'\t' => write!(f, "\\t")?,
-                b'\\' => write!(f, "\\\\")?,
-                b'"' => write!(f, "\\\"")?,
-                _ if 0x20 <= b && b < 0x7F => write!(f, "{}", b as char)?,
-                _ => write!(f, "\\x{:02x}", b)?,
-            }
-        }
-        write!(f, "\"")?;
-        Ok(())
-    }
-}

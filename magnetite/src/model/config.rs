@@ -5,9 +5,9 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use salsa20::stream_cipher::generic_array::GenericArray;
-use salsa20::stream_cipher::NewStreamCipher;
-use salsa20::XSalsa20;
+// use salsa20::stream_cipher::generic_array::GenericArray;
+// use salsa20::stream_cipher::NewStreamCipher;
+// use salsa20::XSalsa20;
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 
@@ -175,16 +175,17 @@ fn build_torrent_map(
     Ok(path_to_torrent)
 }
 
-pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentId) -> Option<XSalsa20> {
-    if !crypto_secret.is_empty() {
-        let mut nonce_data = [0; 24];
-        nonce_data[4..].copy_from_slice(info_hash.as_bytes());
-        let nonce = GenericArray::from_slice(&nonce_data[..]);
-        let key = GenericArray::from_slice(crypto_secret.as_bytes());
-        Some(XSalsa20::new(&key, &nonce))
-    } else {
-        None
-    }
+pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentId) -> Option<()> { // was Option<XSalsa20>
+    None
+    // if !crypto_secret.is_empty() {
+    //     let mut nonce_data = [0; 24];
+    //     nonce_data[4..].copy_from_slice(info_hash.as_bytes());
+    //     let nonce = GenericArray::from_slice(&nonce_data[..]);
+    //     let key = GenericArray::from_slice(crypto_secret.as_bytes());
+    //     Some(XSalsa20::new(&key, &nonce))
+    // } else {
+    //     None
+    // }
 }
 
 fn multi_file(
@@ -248,7 +249,7 @@ fn piece_file(
         pf_builder.register_info_hash(
             &metainfo.info_hash,
             piece_file::Registration {
-                piece_count: metainfo.piece_shas.len() as u32,
+                piece_count: metainfo.meta.info.pieces.len() as u32,
                 crypto,
                 piece_file: pf.into(),
             },
@@ -389,7 +390,7 @@ pub fn build_storage_engine(
             state_wrapper::Registration {
                 total_length: metainfo.total_length,
                 piece_length: metainfo.meta.info.piece_length,
-                piece_shas: metainfo.piece_shas.clone(),
+                piece_shas: metainfo.meta.info.pieces.clone(),
             },
         );
     }
@@ -424,7 +425,7 @@ pub fn build_storage_engine_states(config: &Config) -> Result<BuiltStates, failu
             state_wrapper::Registration {
                 total_length: metainfo.total_length,
                 piece_length: metainfo.meta.info.piece_length,
-                piece_shas: metainfo.piece_shas.clone(),
+                piece_shas: metainfo.meta.info.pieces.clone(),
             },
         );
     }

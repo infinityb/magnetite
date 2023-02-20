@@ -218,6 +218,7 @@ impl SummingBitField {
 
     pub fn remove_bitfield(&mut self, bf: &BitField) {
         self.damage_counter = self.damage_counter.saturating_add(1);
+
         for (o, is_set) in self.data.iter_mut().zip(bf.iter()) {
             if is_set {
                 *o = sub_one_clamping_lob_u8(*o);
@@ -226,17 +227,18 @@ impl SummingBitField {
     }
 }
 
-pub trait SchedulerPolicy {
-    fn should_regenerate(&self, bf: &SummingBitField) -> bool;
-}
+// pub trait SchedulerPolicy {
+//     /// Reb
+//     fn should_regenerate(&self, bf: &SummingBitField) -> bool;
+// }
 
-pub struct DefaultSchedulerPolicy;
+// pub struct DefaultSchedulerPolicy;
 
-impl SchedulerPolicy for DefaultSchedulerPolicy {
-    fn should_regenerate(&self, bf: &SummingBitField) -> bool {
-        bf.damage_counter > 256
-    }
-}
+// impl SchedulerPolicy for DefaultSchedulerPolicy {
+//     fn should_regenerate(&self, bf: &SummingBitField) -> bool {
+//         bf.damage_counter > 256
+//     }
+// }
 
 struct DefaultPieceSelectionStrategy {
     piece_length: u64,
@@ -270,8 +272,8 @@ impl DefaultPieceSelectionStrategy {
         A: Array<Item = (TorrentId, u32, u32)>,
     {
         // find the 100 rarest pieces which are of high priority. if we don't
-        // yet have 100 pieces, continue the same logic but with normal
-        // priority pieces.
+        // yet have 100 pieces of high priority work, continue the same logic
+        // but with normal priority pieces, then to low.
         let _submitted_bytes = 0;
         let _high_p = self.high_priority.iter();
         let _normal_p = self.normal_priority.iter();
@@ -296,7 +298,7 @@ struct SlidingWindowRate {
 }
 
 impl SlidingWindowRate {
-    pub fn add_data(&mut self, when: Instant, value: u64) {
+    pub fn add_data_point(&mut self, when: Instant, value: u64) {
         if SLIDING_WINDOW_RATE_SLOTS <= self.data.len() {
             let d = self.data.iter_mut().min_by_key(|d| d.0).unwrap();
             *d = (when, value);
@@ -326,16 +328,15 @@ struct PeerState {
     piece_count: u32,
     peer_bitfield: BitField,
     exposed_bitfield: BitField,
-    // 4MB worth in-place for 256kB pieces. 128MB for 16MB pieces.
-    // Will probably need to allocate for high-bandwidth peers on low-piece-size torrents.
     downloading_current_pieces: SmallVec<[u32; 16]>,
+    
     // how many bytes we have outstanding from this peer (download).
     outstanding_bytes: u64,
-    // // TODO:
-    // // * peers get credit when they send us pieces that pass torrent validation.  Peers with
-    // //   higher amounts of credit might be treated preferrentially.  Credit is reduced when
-    // //   a peer downloads some data, based on a global resource utilization factor.
-    // peer_credit: u64,
+
+    // TODO: peers get credit when they send us pieces that pass torrent validation.
+    // This may be inspected by the scheduler / unchoking logic.
+    peer_credit: u64,
+
     peer_downloaded: u64,
     peer_download_rate: SlidingWindowRate,
     peer_estimated_download_rate: SlidingWindowRate,
@@ -351,19 +352,19 @@ struct PeerState {
     peer_choked: bool,
     peer_interested: bool,
 
-    //
+    // which extensions this peer has enabled
     extensions: HashSet<ProtocolExtension>,
 }
 
 impl PeerState {
     pub fn add_download_bytes(&mut self, bytes: u64) {
         self.peer_downloaded += bytes;
-        self.peer_download_rate.add_data(Instant::now(), bytes);
+        self.peer_download_rate.add_data_point(Instant::now(), bytes);
     }
 
     pub fn add_upload_rate(&mut self, bytes: u64) {
         self.peer_uploaded += bytes;
-        self.peer_upload_rate.add_data(Instant::now(), bytes);
+        self.peer_upload_rate.add_data_point(Instant::now(), bytes);
     }
 
     pub fn apply_message_bulk(&mut self, messages: &[Message]) {
@@ -377,6 +378,7 @@ impl PeerState {
                 Message::Interested => self.peer_interested = true,
                 Message::Uninterested => self.peer_interested = false,
                 Message::Have { piece_id } => {
+                    // suppresses duplicates, dunno if this really happens.
                     if self.peer_bitfield.set(*piece_id, true) {
                         have_acc += self.piece_length;
                     }
@@ -395,11 +397,11 @@ impl PeerState {
         }
         if have_acc > 0 {
             self.peer_estimated_download_rate
-                .add_data(Instant::now(), have_acc);
+                .add_data_point(Instant::now(), have_acc);
         }
         if download_acc > 0 {
             self.peer_download_rate
-                .add_data(Instant::now(), download_acc);
+                .add_data_point(Instant::now(), download_acc);
         }
     }
 }

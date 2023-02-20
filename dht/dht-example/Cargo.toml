@@ -17,10 +17,12 @@ tracing = "0.1.29"
 tracing-subscriber = { version = "0.3.0", features = ["smallvec", "fmt", "ansi", "tracing-log", "std", "json"] }
 failure = "0.1"
 futures = "0.3.21"
-hyper = { version = "0.14.19", features = ["full"] }
+hyper = { git = "https://github.com/hyperium/hyper", rev="9f47576cab1b5db0a51416a4859df522c26fac35", features = ["full"] }
 rand = "0.8.5"
 
 # interal
 dht = { path = ".." }
 bencode = { path = "../../bencode" }
 magnetite-common = { path = "../../magnetite-common" }
+bin-str = { path = "../../bin-str" }
+magnetite-tracker-lib = { path = "../../magnetite-tracker/lib" }

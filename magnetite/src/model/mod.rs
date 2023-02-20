@@ -248,12 +248,69 @@ pub struct TorrentMeta {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TorrentMetaInfo {
     #[serde(default)]
+    pub length: Option<u64>,
+    #[serde(default)]
     pub files: Vec<TorrentMetaInfoFile>,
     #[serde(rename = "piece length")]
     pub piece_length: u32,
-    #[serde(with = "serde_bytes")]
-    pub pieces: Vec<u8>,
+    #[serde(with = "torrent_info_pieces")]
+    pub pieces: Vec<TorrentId>,
     pub name: String,
+}
+
+mod torrent_info_pieces {
+    use magnetite_common::TorrentId;
+
+    use serde::{Deserializer, Serializer};
+
+    struct TorrentPieceVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TorrentPieceVisitor {
+        type Value = Vec<TorrentId>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an byte-aray where the length is a multiple of 20")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if value.len() % 20 != 0 {
+                return Err(E::custom(format!("bad length: {}", value.len())));
+            }
+
+            let mut out = Vec::new();
+            for ch in value.chunks(20) {
+                let mut buf: [u8; 20] = [0; 20];
+                buf.copy_from_slice(&ch[..20]);
+                out.push(TorrentId(buf));
+            }
+
+            Ok(out)
+        }
+    }
+
+    pub fn serialize<S>(
+        addrs: &Vec<TorrentId>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut out = Vec::with_capacity(addrs.len() * 20);
+        for a in addrs {
+            out.extend(a.as_bytes());
+        }
+        serializer.serialize_bytes(&out)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<TorrentId>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(TorrentPieceVisitor)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -335,7 +392,6 @@ pub struct TorrentMetaWrapped {
     pub meta: TorrentMeta,
     pub total_length: u64,
     pub info_hash: TorrentId,
-    pub piece_shas: Vec<TorrentId>,
 }
 
 impl TorrentMetaWrapped {
@@ -354,23 +410,21 @@ impl TorrentMetaWrapped {
             return Err(failure::format_err!("invalid torrent: missing info"));
         }
 
-        let mut total_length = 0;
-        for file in &meta.info.files {
-            total_length += file.length;
-        }
-
-        let mut piece_shas = Vec::new();
-        for c in meta.info.pieces.chunks(20) {
-            let mut tid = TorrentId::zero();
-            tid.as_mut_bytes().copy_from_slice(c);
-            piece_shas.push(tid);
-        }
+        
+        let total_length = if let Some(length) = meta.info.length {
+            length
+        } else {
+            let mut total_length = 0;
+            for file in &meta.info.files {
+                total_length += file.length;
+            }
+            total_length
+        };
 
         Ok(TorrentMetaWrapped {
             meta,
             total_length,
             info_hash,
-            piece_shas,
         })
     }
 }

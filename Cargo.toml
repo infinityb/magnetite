@@ -2,10 +2,14 @@
 members = [
 	"bencode",
 	"iresult",
-	# "magnetite",
+	"magnetite",
 	"magnetite-common",
+	"magnetite-tracker",
+	"magnetite-tracker/lib",
 	"dht",
 	"dht/dht-example",
 	"dht/dht-traffic-stealer",
 	"dht/dht-traffic-stats",
+	"heap-dist-key",
+	"bin-str",
 ]

@@ -62,23 +62,19 @@ pub trait PieceStorageEngineDumb {
 //         data: Bytes,
 //     ) -> Pin<Box<dyn std::future::Future<Output = Result<WriteChunkResponse, MagnetiteError>> + Send>>;
 // }
-
 // pub struct CompletionEvent {
 //     info_hash: TorrentId,
 //     piece_id: u32,
 // }
-
 // pub struct WriteChunkResponse {
 //     piece_completed: bool,
 //     piece_failed_validation: bool,
 //     completion: broadcast::Receiver<Result<CompletionEvent, MagnetiteError>>,
 // }
-
 // impl WriteChunkResponse {
 //     pub fn write_completed_piece(&self) -> bool {
 //         self.piece_completed
 //     }
-
 //     pub fn piece_failed_validation(&self) -> bool {
 //         self.piece_failed_validation
 //     }

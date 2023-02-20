@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
+use bin_str::BinStr;
 
 use crate::bittorrent::peer_state::{
     merge_global_payload_stats, GlobalState, PeerState, Session, Stats,
@@ -392,7 +393,7 @@ where
                 name = "bad-handshake",
                 addr = ?addr,
                 handshake_error = ?hs_err,
-                data = ?bencode::BinStr(&rbuf[..]),
+                data = ?BinStr(&rbuf[..]),
                 "bad handshake: {}",
                 err);
 

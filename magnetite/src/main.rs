@@ -16,6 +16,7 @@ mod storage;
 mod tracker;
 mod utils;
 mod vfs;
+mod clients;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -32,7 +33,7 @@ fn main() -> Result<(), failure::Error> {
 
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
-    let app = App::new(CARGO_PKG_NAME)
+    let mut app = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
         .about("Demonstration Torrent Seeder")
@@ -51,11 +52,17 @@ fn main() -> Result<(), failure::Error> {
                 .takes_value(true),
         )
         .subcommand(cmdlet::seed::get_subcommand())
+        .subcommand(cmdlet::daemon::get_subcommand());
+
+    #[cfg(feature = "with-mse")]
+    let app = app
+            .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
+            .subcommand(cmdlet::validate_mse_tome::get_subcommand())
+            .subcommand(cmdlet::host::get_subcommand())
+            .subcommand(cmdlet::webserver::get_subcommand());
+        
+    let app = app
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
-        .subcommand(cmdlet::assemble_mse_tome::get_subcommand())
-        .subcommand(cmdlet::validate_mse_tome::get_subcommand())
-        .subcommand(cmdlet::host::get_subcommand())
-        .subcommand(cmdlet::webserver::get_subcommand())
         .subcommand(cmdlet::validate_torrent_data::get_subcommand());
 
     #[cfg(feature = "with-fuse")]
@@ -99,12 +106,19 @@ fn main() -> Result<(), failure::Error> {
     let main_future = match sub_name {
         cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(args).boxed(),
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main(args).boxed(),
+
+        #[cfg(feature = "with-mse")]
+        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(args).boxed(),
+        #[cfg(feature = "with-mse")]
+        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(args).boxed(),
+        #[cfg(feature = "with-mse")]
         cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main(args).boxed(),
+        #[cfg(feature = "with-mse")]
         cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main(args).boxed(),
         #[cfg(feature = "with-fuse")]
         cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main(args).boxed(),
-        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(args).boxed(),
-        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(args).boxed(),
+
+        cmdlet::daemon::SUBCOMMAND_NAME => cmdlet::daemon::main(args).boxed(),
         cmdlet::validate_torrent_data::SUBCOMMAND_NAME => {
             cmdlet::validate_torrent_data::main(args).boxed()
         }

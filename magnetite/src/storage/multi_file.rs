@@ -42,6 +42,7 @@ pub struct Registration {
     pub files: Vec<FileInfo>,
 }
 
+#[derive(Debug)]
 pub struct FileInfo {
     pub rel_path: PathBuf,
     pub file_size: u64,
@@ -94,7 +95,6 @@ impl PieceStorageEngineDumb for MultiFileStorageEngine {
         async move {
             let ts: Arc<TorrentState> = {
                 let torrents = self_cloned.torrents.lock().await;
-
                 let torrent_state = torrents
                     .get(&req.content_key)
                     .ok_or_else(|| ProtocolViolation)?;
@@ -104,10 +104,10 @@ impl PieceStorageEngineDumb for MultiFileStorageEngine {
 
             let (mut piece_offset_start, piece_offset_end) =
                 super::utils::compute_offset(req.piece_index, req.piece_length, req.total_length);
-
             let mut piece_size_acc = piece_offset_end - piece_offset_start;
             let piece_size = piece_size_acc as usize;
             let mut chonker = BytesMut::with_capacity(piece_size);
+
             while 0 < piece_size_acc {
                 let (offset, file_info) = ts
                     .piece_file_paths
@@ -157,7 +157,7 @@ async fn open_helper(m: &MultiFileStorageEngine, path: &Path) -> io::Result<Arc<
     Ok(file_arc)
 }
 
-async fn file_read_buf<R: AsyncRead>(mut file: R, out: &mut BytesMut) -> io::Result<()> {
+async fn file_read_buf<R: AsyncRead + Unpin>(mut file: R, out: &mut BytesMut) -> io::Result<()> {
     loop {
         let bytes_read = file.read_buf(out).await?;
         if bytes_read == 0 {

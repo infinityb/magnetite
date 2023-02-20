@@ -9,14 +9,13 @@ use std::time::{Duration, Instant};
 use smallvec::SmallVec;
 
 use magnetite_common::TorrentId;
+use heap_dist_key::{general_heap_entry_push_or_replace, GeneralHeapEntry};
 
-use crate::{general_heap_entry_push_or_replace, GeneralHeapEntry};
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
-enum AddressFamily {
-    AddrV4,
-    AddrV6,
-}
+// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
+// enum AddressFamily {
+//     AddrV4,
+//     AddrV6,
+// }
 
 fn socket_addr_zero() -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([0; 4]), 0))
@@ -79,14 +78,6 @@ impl TrackerKey {
             info_hash: TorrentId::zero(),
             cookie: 0,
             address: socket_addr_zero(),
-        }
-    }
-
-    pub fn max_value() -> TrackerKey {
-        TrackerKey {
-            info_hash: TorrentId::max_value(),
-            cookie: u64::max_value(),
-            address: socket_addr_max(),
         }
     }
 
@@ -164,7 +155,6 @@ pub struct TrackerCleanupStats {
     pub visited_nodes: usize,
     pub evicted_nodes: usize,
     pub search_inits: usize,
-    tick_cleanup_resume_key_start: TrackerKey,
     tick_cleanup_resume_key_final: TrackerKey,
 }
 
@@ -206,19 +196,46 @@ impl Tracker {
                 last_torrent_id = k.info_hash;
                 write!(&mut out, "    torrent: {}\n", last_torrent_id.hex()).unwrap();
             }
-            write!(&mut out, "        {} ttl={:?}\n", k.address, v.expiration).unwrap();
+            write!(&mut out, "        {} ttl={:?}\n", k.address, v.expiration - *nenv).unwrap();
         }
 
         String::from_utf8(out.into_inner()).unwrap()
     }
 
-    pub fn get_peers_by_torrent(&self) -> BTreeMap<TorrentId, Vec<SocketAddr>> {
+    pub fn get_peers_by_torrent(&self, ctx: &AnnounceCtx) -> BTreeMap<TorrentId, Vec<SocketAddr>> {
         let mut out = BTreeMap::new();
         for (tpk, tpv) in &self.torrent_peers {
             let vv = out.entry(tpk.info_hash).or_insert_with(Vec::new);
-            vv.push(tpk.address);
+            if !tpv.is_expired(&ctx.now) {
+                vv.push(tpk.address);
+            }
         }
         out
+    }
+
+    pub fn remove_announce(
+        &mut self,
+        info_hash: &TorrentId,
+        address: &SocketAddr,
+        ctx: &AnnounceCtx,
+        peer_id: Option<TorrentId>,
+    ) {
+        use std::collections::btree_map::Entry;
+
+        let mut hasher = self.token_order_hash.build_hasher();
+        Hash::hash(address, &mut hasher);
+        let cookie = hasher.finish();
+        let key = TrackerKey {
+            info_hash: info_hash.clone(),
+            cookie,
+            address: address.clone(),
+        };
+        if let Entry::Occupied(mut occ) = self.torrent_peers.entry(key) {
+            if occ.get().peer_id == peer_id {
+                // both none or both same.
+                occ.remove_entry();
+            }
+        }
     }
 
     pub fn insert_announce(
@@ -226,6 +243,7 @@ impl Tracker {
         info_hash: &TorrentId,
         address: &SocketAddr,
         ctx: &AnnounceCtx,
+        peer_id: Option<TorrentId>,
     ) {
         let expiration = ctx.now + self.peer_announce_duration;
         let mut hasher = self.token_order_hash.build_hasher();
@@ -238,7 +256,7 @@ impl Tracker {
                 address: address.clone(),
             },
             TrackerValue {
-                peer_id: None,
+                peer_id: peer_id,
                 expiration,
             },
         );
@@ -291,7 +309,6 @@ impl Tracker {
             visited_nodes: 0,
             evicted_nodes: 0,
             search_inits: 0,
-            tick_cleanup_resume_key_start: self.tick_cleanup_resume_key,
             tick_cleanup_resume_key_final: self.tick_cleanup_resume_key,
         };
         let mut tick_cleanup_node_traversal_limit = self.tick_cleanup_node_traversal_limit;
@@ -382,6 +399,17 @@ mod test {
     {
         s.parse::<F>().unwrap()
     }
+
+    impl TrackerKey {
+        pub fn max_value() -> TrackerKey {
+            TrackerKey {
+                info_hash: TorrentId::max_value(),
+                cookie: u64::max_value(),
+                address: socket_addr_max(),
+            }
+        }
+    }
+
 
     #[test]
     fn TrackerKey_incr_simple() {
@@ -545,6 +573,7 @@ mod test {
             &AnnounceCtx {
                 now: Instant::now() - Duration::new(30 * 60 + 1, 0),
             },
+            None,
         );
 
         tracker.insert_announce(
@@ -553,6 +582,7 @@ mod test {
             &AnnounceCtx {
                 now: Instant::now(),
             },
+            None,
         );
         tracker.insert_announce(
             &p("c34bf4b88cb74cab053e70490e04be120a1a469e"),
@@ -560,6 +590,7 @@ mod test {
             &AnnounceCtx {
                 now: Instant::now(),
             },
+            None,
         );
         tracker.insert_announce(
             &p("ff4bf4b88cb74cab053e70490e04be120a1a469e"),
@@ -567,6 +598,7 @@ mod test {
             &AnnounceCtx {
                 now: Instant::now(),
             },
+            None,
         );
 
         tracker

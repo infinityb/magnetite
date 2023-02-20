@@ -1,19 +1,20 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use std::fmt;
 
-use futures::StreamExt;
 use failure::Fail;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use smallvec::SmallVec;
 use tokio::sync::mpsc;
-use futures::stream::FuturesUnordered;
+use tokio::task;
 
-use magnetite_common::TorrentId;
 use dht::wire::{DhtMessageQueryFindNode, DhtMessageQueryGetPeers};
-use dht::{RecursionState, GeneralEnvironment, TorrentIdPrefix, ThinNode, TransactionCompletion};
+use dht::{GeneralEnvironment, RecursionState, ThinNode, TorrentIdPrefix, TransactionCompletion};
+use magnetite_common::TorrentId;
 
-use crate::{DhtContext, send_to_node, dht_query_apply_txid};
+use crate::{dht_query_apply_txid, send_to_node, DhtContext};
 
 pub enum SearchKind {
     FindNode,
@@ -53,20 +54,25 @@ pub struct SearchEventStatusUpdate {
     pub inflight: usize,
 }
 
-async fn sender_wrapper<T>(s: &tokio::sync::mpsc::Sender<T>, item: T) -> Result<(), failure::Error> {
+async fn sender_wrapper<T>(
+    s: &tokio::sync::mpsc::Sender<T>,
+    item: T,
+) -> Result<(), failure::Error> {
     s.send(item).await.map_err(|_e| Disconnected.into())
 }
 
-pub async fn start_search(
+pub fn start_search(
     context: DhtContext,
     target: TorrentId,
     search_kind: SearchKind,
     recursion_node_count: usize,
 ) -> Result<mpsc::Receiver<SearchEvent>, failure::Error> {
-    let nenv = GeneralEnvironment { now: Instant::now(), };
+    let nenv = GeneralEnvironment {
+        now: Instant::now(),
+    };
 
     let mut rs;
-    let bm_locked = context.bm.lock().await;
+    let bm_locked = context.bm.borrow_mut();
     if let Some(rs_tmp) = RecursionState::new(target, &bm_locked, &nenv, recursion_node_count) {
         rs = rs_tmp;
     } else {
@@ -81,8 +87,8 @@ pub async fn start_search(
     }
     drop(bm_locked);
 
-    let (sender, receiver) = mpsc::channel(32);
-    tokio::spawn(async move {
+    let (sender, receiver) = mpsc::channel(8);
+    task::spawn_local(async move {
         let mut seen_torrent_peers = BTreeSet::new();
         let mut inflight: FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
         let mut next_query = Instant::now();
@@ -92,11 +98,15 @@ pub async fn start_search(
         sender_wrapper(&sender, SearchEvent::Started).await?;
 
         while !inflight.is_empty() || rs.has_work() {
-            sender_wrapper(&sender, SearchEvent::StatusUpdate(SearchEventStatusUpdate {
-                search_eye: rs.search_eye(),
-                candidates: rs.nodes.len(),
-                inflight: inflight.len(),
-            })).await?;
+            sender_wrapper(
+                &sender,
+                SearchEvent::StatusUpdate(SearchEventStatusUpdate {
+                    search_eye: rs.search_eye(),
+                    candidates: rs.nodes.len(),
+                    inflight: inflight.len(),
+                }),
+            )
+            .await?;
 
             let mut completed: Option<Box<TransactionCompletion>> = None;
             tokio::select! {
@@ -141,7 +151,7 @@ pub async fn start_search(
                 }
                 continue;
             }
-                                
+
             let now = Instant::now();
             if let Some(wn) = rs.get_work() {
                 let mut msg = match search_kind {
@@ -156,8 +166,15 @@ pub async fn start_search(
                     }),
                 };
 
-                let mut bm_locked = context.bm.lock().await;
-                let future = dht_query_apply_txid(&mut bm_locked, &context.bm, &mut msg, wn.saddr, &now, Some(wn.id));
+                let mut bm_locked = context.bm.borrow_mut();
+                let future = dht_query_apply_txid(
+                    &mut bm_locked,
+                    &context.bm,
+                    &mut msg,
+                    wn.saddr,
+                    &now,
+                    Some(wn.id),
+                );
                 drop(bm_locked);
                 inflight.push(future);
                 send_to_node(&context.so, wn.saddr, &msg).await?;

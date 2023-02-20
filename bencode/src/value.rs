@@ -3,7 +3,7 @@ use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::BinStr;
+use bin_str::BinStr;
 
 #[derive(PartialEq, Eq, Clone)]
 pub enum Value {

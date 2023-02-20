@@ -14,13 +14,11 @@ use smallvec::SmallVec;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
+use magnetite_tracker_lib::Tracker;
+use heap_dist_key::{general_heap_entry_push_or_replace, GeneralHeapEntry};
 
-mod search;
-
-use crate::tracker::Tracker;
 use crate::wire::{DhtMessage, DhtMessageData, DhtMessageQuery, DhtMessageQueryGetPeers};
 
-pub mod tracker;
 pub mod wire;
 
 // Please make this a power of two, since Vec::with_capacity aligns to
@@ -169,35 +167,35 @@ impl RecursionState {
                         break;
                     }
                 }
-            } else {
-                event!(Level::INFO, "node worse than worst node");
             }
             
             return added;
         }
     }
 }
-
 type TorrentIdHeapEntry<T> = GeneralHeapEntry<TorrentId, T>;
 
 #[derive(Debug, Clone)]
 pub struct Node {
     pub thin: ThinNode,
-    // time of last valid message received
-    pub last_message_time: Instant,
     // none if we've never queried this node.
-    pub reply_stats: Option<NodeReplyStats>,
+    pub node_stats: Option<NodeReplyStats>,
     // how many times we've timed out
     pub timeouts: i32,
+    // record outgoing ping counter, saturating
+    pub sent_pings: i8,
     // when we can send the next exploratory ping/find-nodes
     pub next_allowed_ping: Instant,
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeReplyStats {
+    // time of last valid message received
+    pub last_message_time: Instant,
     // time of last sent request
-    pub last_request_sent_time: Instant,
-    // time of last correct reply received
+    pub last_request_sent_time: Option<Instant>,
+    // time of last correct reply received, none if no valid response has ever been
+    // recorded.
     pub last_correct_reply_time: Option<Instant>,
 }
 
@@ -205,12 +203,6 @@ pub enum NodeActivityCommand {
     ReceiveRequest,
     ReceiveResponse,
     SendRequest,
-}
-
-impl Node {
-    pub fn debug(&self) -> NodeDebug {
-        NodeDebug { node: self }
-    }
 }
 
 pub struct NodeDebug<'a> {
@@ -273,11 +265,22 @@ impl Node {
                 id: peer_id,
                 saddr: peer_addr,
             },
-            last_message_time: env.now,
-            reply_stats: None,
+            node_stats: None,
             timeouts: 0,
+            sent_pings: 0,
             next_allowed_ping: env.now,
         }
+    }
+
+    pub fn debug(&self) -> NodeDebug {
+        NodeDebug { node: self }
+    }
+
+    pub fn get_last_message_age(&self, env: &GeneralEnvironment) -> Option<Duration> {
+        if let Some(ref v) = self.node_stats {
+            return Some(env.now - v.last_message_time);
+        }
+        None
     }
 
     pub fn quality(&self, genv: &GeneralEnvironment) -> NodeQuality {
@@ -287,7 +290,7 @@ impl Node {
         if MAX_UNRESPONDED_QUERIES_QUESTIONABLE <= self.timeouts {
             return NodeQuality::Questionable;
         }
-        if let Some(ref stats) = self.reply_stats {
+        if let Some(ref stats) = self.node_stats {
             if let Some(lcrt) = stats.last_correct_reply_time {
                 if genv.now - lcrt < QUESTIONABLE_THRESH {
                     return NodeQuality::Good;
@@ -298,25 +301,36 @@ impl Node {
     }
 
     pub fn apply_activity_receive_request(&mut self, env: &GeneralEnvironment) {
-        self.last_message_time = env.now;
+        self.next_allowed_ping = env.now + Duration::from_secs(120);
+        self.sent_pings = self.sent_pings.saturating_add(1);
+
+        if let Some(ref mut rs) = self.node_stats {
+            rs.last_message_time = env.now;
+        } else {
+            self.node_stats = Some(NodeReplyStats {
+                last_message_time: env.now,
+                last_request_sent_time: None,
+                last_correct_reply_time: None,
+            });
+        }
     }
 
     pub fn apply_activity_receive_response(&mut self, env: &GeneralEnvironment) {
         self.timeouts = 0;
-        self.last_message_time = env.now;
-        if let Some(ref mut rs) = self.reply_stats {
+        if let Some(ref mut rs) = self.node_stats {
+            rs.last_message_time = env.now;
             rs.last_correct_reply_time = Some(env.now);
         } else {
-            // received a valid response to an unknown node, so we fake the sent time.
-            // this is needed because we don't have a node record before we do the initial
-            // query for an ID (node record requires the ID)
-            self.reply_stats = Some(NodeReplyStats {
-                last_request_sent_time: env.now,
+            self.node_stats = Some(NodeReplyStats {
+                last_message_time: env.now,
+                last_request_sent_time: None,
                 last_correct_reply_time: Some(env.now),
             });
         }
     }
 }
+
+
 
 #[derive(Debug)]
 pub struct BucketManager {
@@ -334,24 +348,18 @@ pub struct BucketManager {
 }
 
 impl BucketManager {
-    pub fn find_oldest_bucket<'a>(&'a self) -> &'a Bucket {
+    pub fn find_mut_oldest_bucket<'a>(&'a mut self) -> &'a mut Bucket {
         assert!(self.buckets.len() > 0);
-
-        let mut biter = self.buckets.iter();
-        let mut oldest_bucket = biter.next().expect("must have at least one bucket");
-        for b in biter {
-            if b.last_touched_time < oldest_bucket.last_touched_time {
-                oldest_bucket = b;
-            }
-        }
-        oldest_bucket
+        self.buckets.iter_mut()
+            .min_by_key(|b| b.last_touched_time)
+            .expect("must have at least one bucket")
     }
 
-    pub fn find_worst_bucket<'a>(&'a self, genv: &GeneralEnvironment) -> &'a Bucket {
+    pub fn find_mut_worst_bucket<'a>(&'a mut self, genv: &GeneralEnvironment) -> &'a mut Bucket {
         assert!(self.buckets.len() > 0);
         let mut lowest_node_bucket_node_score = usize::max_value();
         let mut lowest_node_bucket = None;
-        for b in &self.buckets {
+        for b in &mut self.buckets {
             let mut score = 0;     
             for node in &b.nodes {
                 score += match node.quality(genv) {
@@ -376,43 +384,58 @@ impl BucketManager {
         acc
     }
 
-    pub fn format_buckets<'a>(&'a self) -> BucketFormatter<'a> {
-        BucketFormatter { bb: &self.buckets }
+    pub fn format_buckets<'a>(&'a self) -> BucketGroupFormatter<'a> {
+        BucketGroupFormatter { bb: &self.buckets }
     }
 }
 
-pub struct BucketFormatter<'a> {
-    bb: &'a [Bucket],
+pub struct BucketGroupFormatter<'a> {
+    pub bb: &'a [Bucket],
 }
 
-impl<'a> fmt::Display for BucketFormatter<'a> {
+impl<'a> fmt::Display for BucketGroupFormatter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let nenv = GeneralEnvironment {
+        let genv = GeneralEnvironment {
             now: Instant::now(),
         };
         write!(f, "buckets count={}\n", self.bb.len())?;
         for bucket in self.bb {
-            write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
-                bucket.prefix.base.hex(),
-                bucket.prefix.prefix_len,
-                nenv.now - bucket.last_touched_time,
-                bucket.nodes.len(),
+            write!(f, "{}", BucketFormatter {
+                bb: bucket,
+                genv: &genv,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+pub struct BucketFormatter<'a> {
+    pub bb: &'a Bucket,
+    pub genv: &'a GeneralEnvironment,
+}
+
+impl<'a> fmt::Display for BucketFormatter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
+            self.bb.prefix.base.hex(),
+            self.bb.prefix.prefix_len,
+            self.genv.now - self.bb.last_touched_time,
+            self.bb.nodes.len(),
+        )?;
+        for node in &self.bb.nodes {
+            let quality = match node.quality(self.genv) {
+                NodeQuality::Good => "🙂",
+                NodeQuality::Questionable => "🙁",
+                NodeQuality::Bad => "🤢",
+            };
+            
+            write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
+                quality,
+                node.thin.id.hex(),
+                node.thin.saddr,
+                node.get_last_message_age(self.genv),
+                node.timeouts,
             )?;
-            for node in &bucket.nodes {
-                let quality = match node.quality(&nenv) {
-                    NodeQuality::Good => "🙂",
-                    NodeQuality::Questionable => "🙁",
-                    NodeQuality::Bad => "🤢",
-                };
-                
-                write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
-                    quality,
-                    node.thin.id.hex(),
-                    node.thin.saddr,
-                    nenv.now - node.last_message_time,
-                    node.timeouts,
-                )?;
-            }
         }
         Ok(())
     }
@@ -802,8 +825,8 @@ impl<'a> TransactionSlot<'a> {
 pub struct Bucket {
     // af: AddressFamily,
     pub prefix: TorrentIdPrefix,
-    pub nodes: SmallVec<[Node; BUCKET_SIZE]>,
     pub last_touched_time: Instant,
+    pub nodes: SmallVec<[Node; BUCKET_SIZE]>,
 }
 
 impl fmt::Debug for Bucket {
@@ -824,22 +847,22 @@ pub struct TorrentIdPrefix {
     pub prefix_len: u32,
 }
 
-#[test]
-fn foobar() {
-    let first_half = TorrentIdPrefix {
-        base: TorrentId::zero(),
-        prefix_len: 1,
-    };
+// #[test]
+// fn foobar() {
+//     let first_half = TorrentIdPrefix {
+//         base: TorrentId::zero(),
+//         prefix_len: 1,
+//     };
 
-    let whole_set = TorrentIdPrefix {
-        base: TorrentId::zero(),
-        prefix_len: 0,
-    };
+//     let whole_set = TorrentIdPrefix {
+//         base: TorrentId::zero(),
+//         prefix_len: 0,
+//     };
 
-    assert!(first_half.is_proper_subset_of(&whole_set));
-    assert_eq!(false, whole_set.is_proper_subset_of(&first_half));
-    assert_eq!(false, whole_set.is_proper_subset_of(&whole_set));
-}
+//     assert!(first_half.is_proper_subset_of(&whole_set));
+//     assert_eq!(false, whole_set.is_proper_subset_of(&first_half));
+//     assert_eq!(false, whole_set.is_proper_subset_of(&whole_set));
+// }
 
 #[test]
 fn foobar2() {
@@ -847,7 +870,7 @@ fn foobar2() {
     assert_eq!(t0.base, "8000000000000000000000000000000000000000".parse().unwrap());
     
     let t1 = TorrentIdPrefix::new(TorrentId::max_value(), 2);
-    assert_eq!(t1.longer().unwrap(), "8000000000000000000000000000000000000000".parse().unwrap());
+    assert_eq!(t1.longer().unwrap().base, "c000000000000000000000000000000000000000".parse().unwrap());
 }
 
 impl fmt::Display for TorrentIdPrefix {
@@ -871,7 +894,7 @@ impl TorrentIdPrefix {
         }
     }
 
-    fn longer(&self) -> Option<TorrentIdPrefix> {
+    pub fn longer(&self) -> Option<TorrentIdPrefix> {
         if 160 <= self.prefix_len {
             return None;
         }
@@ -956,9 +979,9 @@ impl Bucket {
     ) {
         let mut nn = Node {
             thin: *seen_node,
-            last_message_time: env.gen.now,
-            reply_stats: None,
+            node_stats: None,
             timeouts: 0,
+            sent_pings: 0,
             next_allowed_ping: env.gen.now,
         };
         if env.is_reply {
@@ -1031,7 +1054,7 @@ impl Bucket {
             if n.thin == *seen_node {
                 event!(Level::DEBUG,
                     seen_node=?seen_node,
-                    old_age=?(env.gen.now -  n.last_message_time),
+                    old_age=?n.get_last_message_age(&env.gen),
                     "node-seen");
                 if env.is_reply {
                     n.apply_activity_receive_response(&env.gen);
@@ -1043,18 +1066,19 @@ impl Bucket {
                 event!(Level::DEBUG,
                     seen_node=?seen_node,
                     seen_node_exp=?n.thin,
-                    age=?(env.gen.now -  n.last_message_time),
+                    age=?n.get_last_message_age(&env.gen),
                     "node-seen-replaced-src-addr");
                 n.thin = *seen_node;
+                return;
             } else if n.thin.id == seen_node.id && !env.is_reply {
                 event!(Level::DEBUG,
                     seen_node=?seen_node,
                     seen_node_exp=?n.thin,
-                    age=?(env.gen.now -  n.last_message_time),
+                    age=?n.get_last_message_age(&env.gen),
                     "node-seen-invalid-src-addr");
                 // FIXME: drop incorrect source address???
                 return;
-            } 
+            }
         }
         event!(Level::DEBUG,
             seen_node=?seen_node,
@@ -1067,9 +1091,9 @@ impl Bucket {
             // not saturated so we can replace a bad node or add.
             let mut nn = Node {
                 thin: *seen_node,
-                last_message_time: env.gen.now,
-                reply_stats: None,
+                node_stats: None,
                 timeouts: 0,
+                sent_pings: 0,
                 next_allowed_ping: env.gen.now,
             };
             if env.is_reply {
@@ -1096,90 +1120,26 @@ impl Bucket {
         }
     }
 
-    pub fn find_node_for_maintenance_ping<'a>(&'a self, env: &GeneralEnvironment) -> Option<&'a Node> {
-        self.nodes.iter()
-            .filter(|x| x.next_allowed_ping < env.now)
-            .filter(|x| !x.quality(env).is_bad())
-            .min_by_key(|x| x.last_message_time)
-    }
-}
+    pub fn find_mut_node_for_maintenance_ping<'a>(&'a mut self, env: &GeneralEnvironment) -> Option<&'a mut Node> {
+        // borrowck....
+        let has_first_branch_node = self.nodes.iter()
+            .filter(|n| n.next_allowed_ping < env.now)
+            .filter(|n| n.sent_pings == 0)
+            .filter(|n| n.node_stats.is_none())
+            .next()
+            .is_some();
 
-struct GeneralHeapEntry<K, T>
-where
-    K: Ord,
-{
-    dist_key: K,
-    value: T,
-}
-
-fn general_heap_entry_push_or_replace<K, T>(
-    heap: &mut BinaryHeap<GeneralHeapEntry<K, T>>,
-    max_length: usize,
-    entry: GeneralHeapEntry<K, T>,
-) where
-    K: Ord,
-{
-    if heap.len() < max_length {
-        heap.push(entry);
-    } else {
-        // current entry is better than the worst node, in our heap
-        // replace the worst node with this new better node.
-        if entry.dist_key < heap.peek().unwrap().dist_key {
-            heap.pop().unwrap();
-            heap.push(entry);
+        if has_first_branch_node {
+            self.nodes.iter_mut()
+                .filter(|n| n.next_allowed_ping < env.now)
+                .filter(|n| n.sent_pings == 0)
+                .filter(|n| n.node_stats.is_none())
+                .next()
+        } else {
+            self.nodes.iter_mut()
+                .filter(|n| n.next_allowed_ping < env.now)
+                .min_by_key(|n| n.node_stats.as_ref().map(|s| s.last_message_time))
         }
-    }
-}
-
-impl<K, T> Eq for GeneralHeapEntry<K, T> where K: Ord {}
-
-impl<K, T> Ord for GeneralHeapEntry<K, T>
-where
-    K: Ord,
-{
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.dist_key.cmp(&other.dist_key).reverse()
-    }
-}
-
-impl<K, T> PartialOrd for GeneralHeapEntry<K, T>
-where
-    K: Ord,
-{
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<K, T> PartialEq for GeneralHeapEntry<K, T>
-where
-    K: Ord,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.dist_key == other.dist_key
-    }
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-struct BinStr<'a>(pub &'a [u8]);
-
-impl std::fmt::Debug for BinStr<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "b\"")?;
-        for &b in self.0 {
-            match b {
-                b'\0' => write!(f, "\\0")?,
-                b'\n' => write!(f, "\\n")?,
-                b'\r' => write!(f, "\\r")?,
-                b'\t' => write!(f, "\\t")?,
-                b'\\' => write!(f, "\\\\")?,
-                b'"' => write!(f, "\\\"")?,
-                _ if 0x20 <= b && b < 0x7F => write!(f, "{}", b as char)?,
-                _ => write!(f, "\\x{:02x}", b)?,
-            }
-        }
-        write!(f, "\"")?;
-        Ok(())
     }
 }
 

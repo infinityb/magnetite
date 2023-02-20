@@ -5,8 +5,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use futures::future::FutureExt;
-use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
-use salsa20::XSalsa20;
+//use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
+// use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
 use tokio::sync::Mutex;
 
@@ -27,7 +27,7 @@ pub struct InProgress {
 
 #[derive(Clone)]
 struct TorrentState {
-    crypto: Option<Arc<Mutex<XSalsa20>>>,
+    crypto: Option<Arc<Mutex<()>>>, // was crypto: Option<Arc<Mutex<XSalsa20>>>,
     piece_file: Arc<Mutex<TokioFile>>,
 }
 
@@ -42,7 +42,7 @@ pub struct Builder {
 
 pub struct Registration {
     pub piece_count: u32,
-    pub crypto: Option<XSalsa20>,
+    pub crypto: Option<()>, // was crypto: Option<XSalsa20>,
     pub piece_file: TokioFile,
 }
 
@@ -233,8 +233,8 @@ impl PieceStorageEngineDumb for PieceFileStorageEngine {
 
             if let Some(ref crypto) = ts.crypto {
                 let mut cr = crypto.lock().await;
-                cr.seek(piece_offset_start);
-                cr.apply_keystream(&mut chonker);
+                // cr.seek(piece_offset_start);
+                // cr.apply_keystream(&mut chonker);
             }
 
             Ok(Bytes::from(chonker))

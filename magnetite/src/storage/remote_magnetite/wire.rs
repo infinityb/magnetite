@@ -147,7 +147,7 @@ mod request {
 
         #[test]
         fn check_encode_decode_roundtrip() {
-            use bencode::BinStr;
+            use bin_str::BinStr;
 
             let mut wbuf = BytesMut::new();
             write_request_to_buffer(&mut wbuf, &MW_TEST0).unwrap();
@@ -285,7 +285,7 @@ mod response {
 
         #[test]
         fn check_encode_decode_roundtrip() {
-            use bencode::BinStr;
+            use bin_str::BinStr;
 
             let mw = MagnetiteWireResponse {
                 txid: 0x00AA_AAA9,
