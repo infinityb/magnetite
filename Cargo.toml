@@ -12,4 +12,5 @@ members = [
 	"dht/dht-traffic-stats",
 	"heap-dist-key",
 	"bin-str",
+	"scraper",
 ]

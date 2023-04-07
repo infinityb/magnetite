@@ -159,6 +159,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "scraper" = rec {
+      packageId = "scraper";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "scraper";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
   };
 
   # A derivation that joins the outputs of all workspace members together.
@@ -288,7 +298,7 @@ rec {
         ];
 
       };
-      "ansi_term 0.11.0" = rec {
+      "ansi_term" = rec {
         crateName = "ansi_term";
         version = "0.11.0";
         edition = "2015";
@@ -308,34 +318,11 @@ rec {
         ];
 
       };
-      "ansi_term 0.12.1" = rec {
-        crateName = "ansi_term";
-        version = "0.12.1";
-        edition = "2015";
-        sha256 = "1ljmkbilxgmhavxvxqa7qvm6f3fjggi7q2l3a72q9x0cxjvrnanm";
-        authors = [
-          "ogham@bsago.me"
-          "Ryan Scheel (Havvy) <ryan.havvy@gmail.com>"
-          "Josh Triplett <josh@joshtriplett.org>"
-        ];
-        dependencies = [
-          {
-            name = "winapi";
-            packageId = "winapi 0.3.9";
-            target = { target, features }: (target."os" == "windows");
-            features = [ "consoleapi" "errhandlingapi" "fileapi" "handleapi" "processenv" ];
-          }
-        ];
-        features = {
-          "derive_serde_style" = [ "serde" ];
-          "serde" = [ "dep:serde" ];
-        };
-      };
       "anyhow" = rec {
         crateName = "anyhow";
-        version = "1.0.69";
+        version = "1.0.70";
         edition = "2018";
-        sha256 = "007q0cw3zv8y5314c41vjyqznrqvim5ydv0306wy9mn34zbznji2";
+        sha256 = "1r1py8nk0xj6h21jgww8f0zazdvjimbnl1hiacj8i3cz1xgcxs3x";
         authors = [
           "David Tolnay <dtolnay@gmail.com>"
         ];
@@ -1057,24 +1044,8 @@ rec {
         ];
         dependencies = [
           {
-            name = "ansi_term";
-            packageId = "ansi_term 0.12.1";
-            optional = true;
-            target = { target, features }: (!(target."windows" or false));
-          }
-          {
-            name = "atty";
-            packageId = "atty";
-            optional = true;
-          }
-          {
             name = "bitflags";
             packageId = "bitflags";
-          }
-          {
-            name = "strsim";
-            packageId = "strsim";
-            optional = true;
           }
           {
             name = "textwrap";
@@ -1083,11 +1054,6 @@ rec {
           {
             name = "unicode-width";
             packageId = "unicode-width";
-          }
-          {
-            name = "vec_map";
-            packageId = "vec_map";
-            optional = true;
           }
         ];
         features = {
@@ -1105,7 +1071,6 @@ rec {
           "yaml" = [ "yaml-rust" ];
           "yaml-rust" = [ "dep:yaml-rust" ];
         };
-        resolvedDefaultFeatures = [ "ansi_term" "atty" "color" "default" "strsim" "suggestions" "vec_map" ];
       };
       "clap 3.2.23" = rec {
         crateName = "clap";
@@ -1114,6 +1079,11 @@ rec {
         crateBin = [];
         sha256 = "19bkwkj49ha7mlip0gxsqb9xmd3jpr7ghvcx1hkx6icqrd2mqrbi";
         dependencies = [
+          {
+            name = "atty";
+            packageId = "atty";
+            optional = true;
+          }
           {
             name = "bitflags";
             packageId = "bitflags";
@@ -1125,6 +1095,16 @@ rec {
           {
             name = "indexmap";
             packageId = "indexmap";
+          }
+          {
+            name = "strsim";
+            packageId = "strsim";
+            optional = true;
+          }
+          {
+            name = "termcolor";
+            packageId = "termcolor";
+            optional = true;
           }
           {
             name = "textwrap";
@@ -1157,7 +1137,7 @@ rec {
           "yaml" = [ "yaml-rust" ];
           "yaml-rust" = [ "dep:yaml-rust" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [ "atty" "color" "default" "std" "strsim" "suggestions" "termcolor" ];
       };
       "clap_lex" = rec {
         crateName = "clap_lex";
@@ -4330,6 +4310,10 @@ rec {
         ];
         dependencies = [
           {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
             name = "bencode";
             packageId = "bencode";
           }
@@ -4347,7 +4331,7 @@ rec {
           }
           {
             name = "clap";
-            packageId = "clap 2.34.0";
+            packageId = "clap 3.2.23";
           }
           {
             name = "env_logger";
@@ -4597,6 +4581,18 @@ rec {
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./magnetite-tracker/lib; };
         dependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
+            name = "byteorder";
+            packageId = "byteorder";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes 1.4.0";
+          }
           {
             name = "heap-dist-key";
             packageId = "heap-dist-key";
@@ -7403,6 +7399,34 @@ rec {
           "default" = [ "use_std" ];
         };
       };
+      "scraper" = rec {
+        crateName = "scraper";
+        version = "0.1.0";
+        edition = "2021";
+        crateBin = [
+          { name = "scraper"; path = "src/main.rs"; }
+        ];
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./scraper; };
+        dependencies = [
+          {
+            name = "bin-str";
+            packageId = "bin-str";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes 1.4.0";
+          }
+          {
+            name = "magnetite-common";
+            packageId = "magnetite-common";
+          }
+          {
+            name = "magnetite-tracker-lib";
+            packageId = "magnetite-tracker-lib";
+          }
+        ];
+
+      };
       "scratch" = rec {
         crateName = "scratch";
         version = "1.0.3";
@@ -7934,11 +7958,11 @@ rec {
       };
       "strsim" = rec {
         crateName = "strsim";
-        version = "0.8.0";
+        version = "0.10.0";
         edition = "2015";
-        sha256 = "0sjsm7hrvjdifz661pjxq5w4hf190hx53fra8dfvamacvff139cf";
+        sha256 = "08s69r4rcrahwnickvi0kq49z524ci50capybln83mg6b473qivk";
         authors = [
-          "Danny Guo <dannyguo91@gmail.com>"
+          "Danny Guo <danny@dannyguo.com>"
         ];
 
       };
@@ -9536,7 +9560,7 @@ rec {
         dependencies = [
           {
             name = "ansi_term";
-            packageId = "ansi_term 0.11.0";
+            packageId = "ansi_term";
             optional = true;
           }
           {
@@ -9825,44 +9849,6 @@ rec {
           "Jim McGrath <jimmc2@gmail.com>"
         ];
 
-      };
-      "vec_map" = rec {
-        crateName = "vec_map";
-        version = "0.8.2";
-        edition = "2015";
-        sha256 = "1481w9g1dw9rxp3l6snkdqihzyrd2f8vispzqmwjwsdyhw8xzggi";
-        authors = [
-          "Alex Crichton <alex@alexcrichton.com>"
-          "Jorge Aparicio <japaricious@gmail.com>"
-          "Alexis Beingessner <a.beingessner@gmail.com>"
-          "Brian Anderson <>"
-          "tbu- <>"
-          "Manish Goregaokar <>"
-          "Aaron Turon <aturon@mozilla.com>"
-          "Adolfo Ochagavía <>"
-          "Niko Matsakis <>"
-          "Steven Fackler <>"
-          "Chase Southwood <csouth3@illinois.edu>"
-          "Eduard Burtescu <>"
-          "Florian Wilkens <>"
-          "Félix Raimundo <>"
-          "Tibor Benke <>"
-          "Markus Siemens <markus@m-siemens.de>"
-          "Josh Branchaud <jbranchaud@gmail.com>"
-          "Huon Wilson <dbau.pp@gmail.com>"
-          "Corey Farwell <coref@rwell.org>"
-          "Aaron Liblong <>"
-          "Nick Cameron <nrc@ncameron.org>"
-          "Patrick Walton <pcwalton@mimiga.net>"
-          "Felix S Klock II <>"
-          "Andrew Paseltiner <apaseltiner@gmail.com>"
-          "Sean McArthur <sean.monstar@gmail.com>"
-          "Vadim Petrochenkov <>"
-        ];
-        features = {
-          "eders" = [ "serde" ];
-          "serde" = [ "dep:serde" ];
-        };
       };
       "version_check" = rec {
         crateName = "version_check";

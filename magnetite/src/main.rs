@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use clap::{App, AppSettings, Arg};
+use clap::{App, AppSettings, Arg, ArgAction, value_parser};
 use futures::future::FutureExt;
 use metrics_runtime::Receiver;
 use tokio::runtime::Runtime;
@@ -40,8 +40,9 @@ fn main() -> Result<(), failure::Error> {
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .arg(
             Arg::with_name("v")
-                .short("v")
-                .multiple(true)
+                .short('v')
+                .action(ArgAction::Count)
+                .value_parser(value_parser!(u8).range(..5))
                 .help("Sets the level of verbosity"),
         )
         .arg(
@@ -100,9 +101,7 @@ fn main() -> Result<(), failure::Error> {
         });
     }
 
-    let (sub_name, args) = matches.subcommand();
-    let args = args.expect("subcommand args");
-
+    let (sub_name, args) = matches.subcommand().unwrap();
     let main_future = match sub_name {
         cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(args).boxed(),
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main(args).boxed(),

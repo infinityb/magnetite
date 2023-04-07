@@ -35,7 +35,7 @@ use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "seed";
 
-pub fn get_subcommand() -> App<'static, 'static> {
+pub fn get_subcommand() -> App<'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
         .about("Seed a torrent")
@@ -304,7 +304,7 @@ fn apply_work_state(
     }
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
     let mut cfg_by = Vec::new();
@@ -453,6 +453,7 @@ where
         peer_id = ?handshake.peer_id,
         "configured");
 
+    let now = Instant::now();
     gsl.sessions.insert(
         session_id,
         Session {
@@ -460,7 +461,7 @@ where
             addr,
             handshake,
             target,
-            state: PeerState::new(bf_length),
+            state: PeerState::new(bf_length, now),
         },
     );
 
@@ -470,7 +471,7 @@ where
 
     let mut request_queue_rx = client_stream_reader(rbuf, srh);
     let handler = async {
-        let mut state = PeerState::new(bf_length);
+        let mut state = PeerState::new(bf_length, Instant::now());
         let mut msg_buf = vec![0; 64 * 1024];
         let mut requests = Vec::<PieceSlice>::new();
         let piece_count = torrent_meta.meta.info.pieces.chunks(20).count() as u32;

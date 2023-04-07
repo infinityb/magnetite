@@ -14,7 +14,7 @@ use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "validate-torrent-data";
 
-pub fn get_subcommand() -> App<'static, 'static> {
+pub fn get_subcommand() -> App<'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
         .about("Validate a directory or file against a torrent")
@@ -36,7 +36,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 

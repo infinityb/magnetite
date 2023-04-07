@@ -12,21 +12,61 @@ use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
 
-pub fn get_subcommand() -> App<'static, 'static> {
+pub fn get_subcommand() -> App<'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
         .about("dump torrent metadata")
         .arg(
             Arg::with_name("torrent-file")
+                .allow_invalid_utf8(true)
                 .long("torrent-file")
                 .value_name("FILE")
                 .help("The torrent file to serve")
                 .required(true)
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("file-paths")
+                .long("file-paths")
+                .action(clap::ArgAction::SetTrue)
+                .help("Only dump file paths")
+        )
+        .arg(
+            Arg::with_name("zero")
+                .long("zero")
+                .action(clap::ArgAction::SetTrue)
+                .help("Use null as delimiter")
+        )
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+#[cfg(unix)]
+mod imp {
+    use std::path::Path;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    pub fn print_path_w_newline(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), failure::Error> {
+        let s: &OsStr = p.as_ref();
+        let b = s.as_bytes();
+        if b.iter().any(|x| *x == b'\n') {
+            return Err(failure::format_err!("file-name contains newline but we are delimiting by newlines."));
+        }
+        wri.write_all(b)?;
+        wri.write_all(b"\n")?;
+        Ok(())
+    }
+
+
+    pub fn print_path_w_zero(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), failure::Error> {
+        let s: &OsStr = p.as_ref();
+        let b = s.as_bytes();
+        wri.write_all(b)?;
+        wri.write_all(&[0])?;
+        Ok(())
+    }
+}
+
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
@@ -35,6 +75,33 @@ pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> 
     file.read_to_end(&mut by).unwrap();
 
     let tm: bencode::Value = bencode::from_bytes(&by[..]).unwrap();
+    let zero = matches.contains_id("zero");
+    if matches.contains_id("file-paths") {
+        if cfg!(windows) {
+            eprintln!("I dunno how to delimit paths properly on this chaotic OS - aborting");
+
+            return Err(failure::format_err!("bad argument combination"));
+        }
+
+        let mut writer: fn(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), failure::Error> = imp::print_path_w_newline;
+        if zero {
+           writer = imp::print_path_w_zero;
+        }
+
+        let mut stdout = std::io::stdout();
+        let tm: TorrentMeta = bencode::from_bytes(&by[..]).unwrap();
+        for file in tm.info.files {
+            writer(&mut stdout, &file.path)?;
+        } 
+
+        return Ok(());
+    }
+
+    if zero {
+        eprintln!("--zero only supported when dumping file-paths for now");
+
+        return Err(failure::format_err!("bad argument combination"));
+    }
 
     let mut infohash = TorrentId::zero();
     if let bencode::Value::Dict(ref d) = tm {

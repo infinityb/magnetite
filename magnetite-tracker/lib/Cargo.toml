@@ -13,3 +13,6 @@ heap-dist-key = { path = "../../heap-dist-key" }
 # external
 smallvec = "1.0"
 rand = "0.8.5"
+anyhow = "1.0.70"
+byteorder = "1.4.3"
+bytes = "1.4.0"

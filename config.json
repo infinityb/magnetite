@@ -1,0 +1,1 @@
+{"data_bind_address": ["ipv6@[::]:8888"], "mgmt_bind_address": ["unix@/tmp/mag"]}

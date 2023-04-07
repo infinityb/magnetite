@@ -119,19 +119,6 @@ impl PieceSet {
             ps: self.pieces.iter(),
         }
     }
-
-    // pub fn random<R: rand::Rng>(&self, r: &mut R, amount: usize) -> PieceSetRandom {
-    //     let length = self.pieces.values().sum();
-    //     let indices = rand::seq::index::sample(rng, length as usize, amount);
-    //     for (k, v) in &self.pieces {
-    //         //
-    //     }
-
-    //     PieceSetRandom::new {
-    //         piece_set: self,
-    //         indices: indices.into_iter(),
-    //     }
-    // }
 }
 
 struct PieceSetIter<'a> {
@@ -162,19 +149,6 @@ impl<'a> Iterator for PieceSetIter<'a> {
     }
 }
 
-// struct PieceSetRandom<'a> {
-//     piece_set: &'a PieceSet,
-//     indices: rand::seq::index::IndexVecIntoIter,
-// }
-
-// impl Iterator for PieceSetRandom {
-//     type Item = u32;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-
-//         self.indices
-//     }
-// }
 
 pub struct SummingBitField {
     damage_counter: u16,
@@ -271,9 +245,9 @@ impl DefaultPieceSelectionStrategy {
     where
         A: Array<Item = (TorrentId, u32, u32)>,
     {
-        // find the 100 rarest pieces which are of high priority. if we don't
-        // yet have 100 pieces of high priority work, continue the same logic
-        // but with normal priority pieces, then to low.
+        // find the into.capacity() rarest pieces which are of high priority.
+        // if we don't yet have into.capacity() pieces of high priority work,
+        // continue the same logic but with normal priority pieces, then to low.
         let _submitted_bytes = 0;
         let _high_p = self.high_priority.iter();
         let _normal_p = self.normal_priority.iter();
@@ -326,8 +300,8 @@ impl SlidingWindowRate {
 struct PeerState {
     piece_length: u64,
     piece_count: u32,
-    peer_bitfield: BitField,
-    exposed_bitfield: BitField,
+    peer_bitfield: BitField, // the peer told us they have these pieces
+    exposed_bitfield: BitField, // we told the peer we have these pieces
     downloading_current_pieces: SmallVec<[u32; 16]>,
     
     // how many bytes we have outstanding from this peer (download).
@@ -387,6 +361,8 @@ impl PeerState {
                     // FIXME: validate incoming bitfield length and kill client if invalid
                     if self.peer_bitfield.data.len() == field_data.as_slice().len() {
                         self.peer_bitfield.data = field_data.as_slice().to_vec().into_boxed_slice();
+                    } else {
+                        unimplemented!("kill");
                     }
                 }
                 Message::Piece { data, .. } => {

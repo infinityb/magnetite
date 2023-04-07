@@ -64,8 +64,7 @@ pub struct PeerState {
 }
 
 impl PeerState {
-    pub fn new(bf_length: u32) -> PeerState {
-        let now = Instant::now();
+    pub fn new(bf_length: u32, now: Instant) -> PeerState {
         PeerState {
             last_read: now,
             next_keepalive: now,

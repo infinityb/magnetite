@@ -1,42 +1,131 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::fs::File;
-use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
+use std::io::{Read, Seek, SeekFrom};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::fmt::Debug;
 
+use tokio::sync::Mutex;
+use smallvec::SmallVec;
+use bytes::{Bytes, BytesMut};
 use futures::Future;
 
-use crate::storage::{GetDataVec, GetDataRequest, GetDataResponsePending, GetDataResponse};
+// use crate::storage::{GetDataVec, GetDataRequest, GetDataResponsePending, GetDataResponse};
 use crate::model::{InternalError, MagnetiteError, TorrentMetaWrapped};
+
+const COMMAND_BUFFER_MAX_OPEN_FILES: usize = 16;
+
+enum VoidUnimplemented {}
+
+pub struct FileIndex(u8);
+
+impl FileIndex {
+    fn as_offset(&self) -> usize {
+        usize::from(self.0)
+    }
+}
+
+pub struct BufferId(u64);
+
+pub struct StorageCgeCopyFileDataToBuffer {
+    pub file_index: FileIndex,
+    pub offset: u64,
+    pub length: u32,
+}
+
+pub struct StorageCgeCopyToBuffer {
+    pub data: Bytes,
+}
+
+pub struct StorageCgeEncrypt {
+    unimplemented: VoidUnimplemented,
+}
+
+pub struct StorageCgeDecrypt {
+    unimplemented: VoidUnimplemented,
+}
+
+pub struct StorageCgeBindFile {
+    pub file: Arc<Mutex<File>>,
+}
+
+pub struct StorageCgeUnbindFile {
+    pub index: FileIndex,
+}
+
+pub struct StorageCgeSequence {
+    unimplemented: VoidUnimplemented,
+    pub elements: SmallVec::<[usize; 4]>,
+}
+
+/// Storage Command Graph Element - but not really yet.
+pub enum StorageCge {
+    Sequence(StorageCgeSequence),
+    BindFile(StorageCgeBindFile),
+    UnbindFile(StorageCgeUnbindFile),
+    CopyToBuffer(StorageCgeCopyToBuffer),
+    CopyFileDataToBuffer(StorageCgeCopyFileDataToBuffer),
+    Decrypt(StorageCgeDecrypt),
+    Encrypt(StorageCgeEncrypt),
+}
+
+pub async fn execute_command_buffer(commands: &[StorageCge]) -> Result<(), MagnetiteError> {
+    let mut bound_files: [Option<Arc<Mutex<File>>>; COMMAND_BUFFER_MAX_OPEN_FILES] = std::array::from_fn(|_| None);
+    
+    let mut buffer = BytesMut::new();
+    for c in commands {
+        match c {
+            StorageCge::Sequence(_vv) => {
+                unimplemented!("unconstructable value passed");
+            }
+            StorageCge::BindFile(vv) => {
+                let mut added = false;
+                for bf in &mut bound_files {
+                    if bf.is_none() {
+                        *bf = Some(Arc::clone(&vv.file));
+                        added = false;
+                        break;
+                    }
+                }
+                if !added {
+                    return Err(unimplemented!("too many files bound"));
+                }
+            }
+            StorageCge::UnbindFile(vv) => {
+                let cell = &mut bound_files[vv.index.as_offset()];
+                if cell.is_none() {
+                    return Err(unimplemented!("double-unbind"));
+                }
+                *cell = None;
+            }
+            StorageCge::CopyToBuffer(vv) => {
+                buffer.extend(&vv.data[..]);
+            }
+            StorageCge::CopyFileDataToBuffer(vv) => {
+                let file = &mut bound_files[vv.file_index.as_offset()];
+                if file.is_none() {
+                    //
+                }
+            }
+            StorageCge::Encrypt(_vv) => {
+                unimplemented!("unconstructable value passed");
+            }
+            StorageCge::Decrypt(_vv) => {
+                unimplemented!("unconstructable value passed");
+            }
+        }
+    }
+
+    Ok(())
+}
 
 pub struct FileSpan<'a> {
     pub fully_qualified_path: Cow<'a, Path>,
     pub offset: u64,
     pub length: u32,
-}
-
-struct FileSpanUnpacked<'a> {
-    span: FileSpan<'a>,
-}
-
-impl<'a> Iterator for FileSpanUnpacked<'a> {
-    type Item = FileSpan<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        unimplemented!()
-    }
-}
-
-
-#[derive(Debug)]
-pub struct BackingStoreTome {
-    pub file_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -53,30 +142,6 @@ pub struct FileInfo {
 
 trait FileSpanAware {
     fn put_piece_file_spans_into<'a>(&'a self, global_offset: u64, request_length: u32, out: &mut Vec<FileSpan<'a>>) -> Result<(), MagnetiteError>;
-}
-
-impl BackingStoreTome {
-    pub fn from_file_path(file_path: &Path) -> BackingStoreTome {
-        BackingStoreTome {
-            file_path: PathBuf::from(file_path),
-        }
-    }
-}
-
-impl FileSpanAware for BackingStoreTome {
-    fn put_piece_file_spans_into<'a>(
-        &'a self,
-        offset: u64,
-        length: u32,
-        out: &mut Vec<FileSpan<'a>>,
-    ) -> Result<(), MagnetiteError> {
-        out.push(FileSpan {
-            fully_qualified_path: Cow::Borrowed(&self.file_path),
-            offset,
-            length,
-        });
-        Ok(())
-    }
 }
 
 impl BackingStoreMultiFile {
@@ -160,141 +225,147 @@ struct LastSentPieceSource<'a> {
     open_file: File,
 }
 
-pub trait PieceStorageEngineDumb: Debug {
-    fn get_piece_dumb<'a>(
-        &'a self,
-        req: &GetDataRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<GetDataResponse>, MagnetiteError>> + Send + 'a>>;
-}
 
-// impl<T> PieceStorageEngineDumb for Box<T>
-// where
-//     T: PieceStorageEngineDumb + ?Sized,
-// {
-//     fn get_piece_dumb(
-//         &self,
-//         req: &GetDataRequest,
-//     ) -> Pin<Box<dyn Future<Output = Result<Box<GetDataResponse>, MagnetiteError>> + Send>> {
-//         PieceStorageEngineDumb::get_piece_dumb(&**self, req)
+// mod attic {
+//     pub trait PieceStorageEngineDumb: Debug {
+//         fn get_piece_dumb<'a>(
+//             &'a self,
+//             req: &GetDataRequest,
+//         ) -> Pin<Box<dyn Future<Output = Result<Box<GetDataResponse>, MagnetiteError>> + Send + 'a>>;
+//     }
+
+//     impl<T> PieceStorageEngineDumb for T where T: FileSpanAware + Debug {
+//         fn get_piece_dumb<'a>(
+//             &'a self,
+//             req: &GetDataRequest,
+//         ) -> Pin<Box<dyn Future<Output = Result<Box<GetDataResponse>, MagnetiteError>> + Send + 'a>> {
+//             let mut spans: Vec<FileSpan> = Vec::new();
+//             let req: GetDataRequest = req.clone();
+
+//             let global_offset = fma_u32_to_u64(req.piece_locator.piece_index, req.piece_locator.piece_length, req.piece_rel_byte_offset);
+//             if let Err(err) = self.put_piece_file_spans_into(global_offset, req.length, &mut spans) {
+//                 return Box::pin(async { Err(err) });
+//             }
+
+//             // FIXME: we can use iovecs here.
+//             Box::pin(async {
+//                 // 
+//                 // let request_length = mul_u32_to_u64(req.block_fetch_count, req.piece_length);
+//                 // let mut last_file = None;
+//                 let mut offset_cache: Option<LastSentPieceSource> = None;
+
+//                 let pending = GetDataResponsePending::from(req);
+//                 // assert_eq!(
+//                 //     pending.individual_remaining().map(|x| x.piece_length as u64).sum(),
+//                 //     spans.iter().map(|x| x.length as u64).sum());
+                
+//                 if pending.is_complete() {
+//                     // nothing requested  - the remaining iterator returned no values, so we're in the
+//                     // complete state.
+//                     return Ok(Box::new(pending.finalize()))
+//                 }
+
+//                 let mut to_fill = pending.remaining_span_iter();
+
+//                 let mut current_data_req;
+//                 let mut current_piece_buffer;
+//                 let mut current_piece_buffer_offset;
+//                 if let Some(v) = to_fill.next() {
+//                     current_data_req = v;
+//                     current_piece_buffer = vec![0; v.length as usize];
+//                     current_piece_buffer_offset = 0;
+//                 } else {
+//                     unreachable!("ensured that the iterator is non-empty");
+//                 }
+
+//                 for span in &spans {
+//                     let span_length = u64::from(span.length);
+//                     if current_piece_buffer[current_piece_buffer_offset..].is_empty() {
+//                         let mut blocks: GetDataVec<Arc<[u8]>> = Default::default();
+//                         blocks.push(mem::replace(&mut current_piece_buffer, Vec::new()).into_boxed_slice().into());
+//                         pending.merge(&GetDataResponse {
+//                             request: current_data_req,
+//                             blocks,
+//                         });
+
+//                         if let Some(v) = to_fill.next() {
+//                             current_data_req = v;
+//                             current_piece_buffer_offset = 0;
+//                         } else {
+//                             unreachable!("shouldn't get here if spans and to-fill are the same length");
+//                         }
+//                     }
+
+//                     let mut reuse_open_file: Option<File> = None;
+//                     let mut suppress_seek = false;
+//                     if let Some(oc) = offset_cache.take() {
+//                         if oc.file_path == span.fully_qualified_path {
+//                             reuse_open_file = Some(oc.open_file);
+//                             if oc.file_offset == span.offset {
+//                                 suppress_seek = true;
+//                             }
+//                         } else if span.offset == 0 {
+//                             suppress_seek = true;
+//                         }
+//                     }
+
+//                     let mut file = if let Some(of) = reuse_open_file {
+//                         of
+//                     } else {
+//                         File::open(&span.fully_qualified_path)?
+//                     };
+//                     if !suppress_seek {
+//                         file.seek(SeekFrom::Start(span.offset))?;
+//                     }
+
+//                     loop {
+//                         let piece_remaining = &mut current_piece_buffer[current_piece_buffer_offset..];
+//                         let got = file.read(piece_remaining)?;
+//                         current_piece_buffer_offset += got;
+//                         if piece_remaining.is_empty() || got == 0 {
+//                             break;
+//                         }
+//                     }
+
+//                     offset_cache = Some(LastSentPieceSource {
+//                         file_path: &span.fully_qualified_path,
+//                         file_offset: span.offset + span_length,
+//                         open_file: file,
+//                     });
+//                 }
+
+//                 return Ok(Box::new(pending.finalize()))
+//             })
+//         }
+//     }
+//     use super::{Cow, PathBuf, Path, FileSpan, MagnetiteError, FileSpanAware};
+
+//     #[derive(Debug)]
+//     pub struct BackingStoreTome {
+//         pub file_path: PathBuf,
+//     }
+
+//     impl BackingStoreTome {
+//         pub fn from_file_path(file_path: &Path) -> BackingStoreTome {
+//             BackingStoreTome {
+//                 file_path: PathBuf::from(file_path),
+//             }
+//         }
+//     }
+
+//     impl FileSpanAware for BackingStoreTome {
+//         fn put_piece_file_spans_into<'a>(
+//             &'a self,
+//             offset: u64,
+//             length: u32,
+//             out: &mut Vec<FileSpan<'a>>,
+//         ) -> Result<(), MagnetiteError> {
+//             out.push(FileSpan {
+//                 fully_qualified_path: Cow::Borrowed(&self.file_path),
+//                 offset,
+//                 length,
+//             });
+//             Ok(())
+//         }
 //     }
 // }
-
-// impl<T> PieceStorageEngineDumb for Arc<T>
-// where
-//     T: PieceStorageEngineDumb + ?Sized,
-// {
-//     fn get_piece_dumb(
-//         &self,
-//         req: &GetDataRequest,
-//     ) -> Pin<Box<dyn Future<Output = Result<Box<GetDataResponse>, MagnetiteError>> + Send>> {
-//         PieceStorageEngineDumb::get_piece_dumb(&**self, req)
-//     }
-// }
-
-impl<T> PieceStorageEngineDumb for T where T: FileSpanAware + Debug {
-    fn get_piece_dumb<'a>(
-        &'a self,
-        req: &GetDataRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<GetDataResponse>, MagnetiteError>> + Send + 'a>> {
-        let mut spans: Vec<FileSpan> = Vec::new();
-        let req: GetDataRequest = req.clone();
-
-        let global_offset = fma_u32_to_u64(req.piece_locator.piece_index, req.piece_locator.piece_length, req.piece_rel_byte_offset);
-        if let Err(err) = self.put_piece_file_spans_into(global_offset, req.length, &mut spans) {
-            return Box::pin(async { Err(err) });
-        }
-
-        // FIXME: we can use iovecs here.
-        Box::pin(async {
-            // 
-            // let request_length = mul_u32_to_u64(req.block_fetch_count, req.piece_length);
-            //
-            let mut offset_cache: Option<LastSentPieceSource> = None;
-            // let mut last_file = None;
-
-            let pending = GetDataResponsePending::from(req);
-            
-            // assert_eq!(
-            //     pending.individual_remaining().map(|x| x.piece_length as u64).sum(),
-            //     spans.iter().map(|x| x.length as u64).sum());
-            
-            if pending.is_complete() {
-                // nothing requested  - the remaining iterator returned no values, so we're in the
-                // complete state.
-                return Ok(Box::new(pending.finalize()))
-            }
-
-            // let mut piece_buffers = Vec::new();
-            let mut to_fill = pending.remaining_span_iter();
-
-            let mut current_data_req;
-            let mut current_piece_buffer;
-            let mut current_piece_buffer_offset;
-            if let Some(v) = to_fill.next() {
-                current_data_req = v;
-                current_piece_buffer = vec![0; v.length as usize];
-                current_piece_buffer_offset = 0;
-            } else {
-                unreachable!("ensured that the iterator is non-empty");
-            }
-
-            for span in &spans {
-                let span_length = u64::from(span.length);
-                if current_piece_buffer[current_piece_buffer_offset..].is_empty() {
-                    let mut blocks: GetDataVec<Arc<[u8]>> = Default::default();
-                    blocks.push(mem::replace(&mut current_piece_buffer, Vec::new()).into_boxed_slice().into());
-                    pending.merge(&GetDataResponse {
-                        request: current_data_req,
-                        blocks,
-                    });
-
-                    if let Some(v) = to_fill.next() {
-                        current_data_req = v;
-                        current_piece_buffer_offset = 0;
-                    } else {
-                        unreachable!("shouldn't get here if spans and to-fill are the same length");
-                    }
-                }
-
-                let mut reuse_open_file: Option<File> = None;
-                let mut suppress_seek = false;
-                if let Some(oc) = offset_cache.take() {
-                    if oc.file_path == span.fully_qualified_path {
-                        reuse_open_file = Some(oc.open_file);
-                        if oc.file_offset == span.offset {
-                            suppress_seek = true;
-                        }
-                    } else if span.offset == 0 {
-                        suppress_seek = true;
-                    }
-                }
-
-                let mut file = if let Some(of) = reuse_open_file {
-                    of
-                } else {
-                    File::open(&span.fully_qualified_path)?
-                };
-                if !suppress_seek {
-                    file.seek(SeekFrom::Start(span.offset))?;
-                }
-
-                loop {
-                    let piece_remaining = &mut current_piece_buffer[current_piece_buffer_offset..];
-                    let got = file.read(piece_remaining)?;
-                    current_piece_buffer_offset += got;
-                    if piece_remaining.is_empty() || got == 0 {
-                        break;
-                    }
-                }
-
-                offset_cache = Some(LastSentPieceSource {
-                    file_path: &span.fully_qualified_path,
-                    file_offset: span.offset + span_length,
-                    open_file: file,
-                });
-            }
-
-            return Ok(Box::new(pending.finalize()))
-        })
-    }
-}

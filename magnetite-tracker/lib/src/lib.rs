@@ -11,6 +11,8 @@ use smallvec::SmallVec;
 use magnetite_common::TorrentId;
 use heap_dist_key::{general_heap_entry_push_or_replace, GeneralHeapEntry};
 
+pub mod udp;
+
 // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
 // enum AddressFamily {
 //     AddrV4,

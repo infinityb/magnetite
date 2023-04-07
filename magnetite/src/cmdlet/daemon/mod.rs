@@ -16,7 +16,7 @@ use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "daemon";
 
-pub fn get_subcommand() -> App<'static, 'static> {
+pub fn get_subcommand() -> App<'static> {
     SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
         .about("run magnetite daemon")
@@ -50,7 +50,7 @@ struct Config {
     mgmt_bind_address: Vec<BindAddress>,
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let config_file = matches.value_of_os("config").unwrap();
     let config_file = Path::new(config_file).to_owned();
 

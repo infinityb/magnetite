@@ -1,0 +1,12 @@
+[package]
+name = "scraper"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+magnetite-tracker-lib = { path = "../magnetite-tracker/lib" }
+magnetite-common = { path = "../magnetite-common" }
+bin-str = { path = "../bin-str" }
+bytes = "1.4.0"
