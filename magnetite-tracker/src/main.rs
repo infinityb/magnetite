@@ -308,9 +308,8 @@ async fn handle_root(
                 _ => {
                     eprintln!("unknown event {:?}", value);
                     None
-                },
+                }
             }
-
         } else {
             event = Some(RouteAnnounceEvent::Update);
         }
@@ -405,7 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let matches = app.get_matches();
-    let allow_all = matches.contains_id("allow-all");
+    let allow_all = matches.get_flag("allow-all");
     let verbosity = matches.get_count("verbose");
     let should_print_test_logging = 4 < verbosity;
 
@@ -423,6 +422,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if should_print_test_logging {
         print_test_logging();
+    }
+
+    if !allow_all {
+        eprintln!("--allow-all is currently required since we don't have a mechanism to specify an allow-list");
+        std::process::exit(1);
     }
 
     let rt = Runtime::new()?;

@@ -7,4 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = "1.0"
+byteorder = { version = "1.5.0", features = ["i128"] }
+bytes = { version = "1.5.0", features = ["serde"] }
+serde = "1.0.196"
+thiserror = "1.0.56"

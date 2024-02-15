@@ -117,14 +117,15 @@ impl TorrentId {
 }
 
 impl std::str::FromStr for TorrentId {
-    type Err = ();
+    type Err = TorrentIdError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut buf: [u8; 20] = [0; 20];
-        let dehexed = dehex_fixed_size(s, &mut buf[..])?;
+        let dehexed = dehex_fixed_size(s, &mut buf[..])
+            .map_err(|()| TorrentIdError)?;
         match TorrentId::from_slice(dehexed) {
             Ok(v) => Ok(v),
-            Err(..) => Err(()),
+            Err(..) => Err(TorrentIdError),
         }
     }
 }
@@ -259,7 +260,7 @@ impl<'de> serde::de::Visitor<'de> for TorrentIdVisitor {
         }
         match s.parse() {
             Ok(v) => Ok(v),
-            Err(()) => Err(serde::de::Error::invalid_value(
+            Err(..) => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(s),
                 &self,
             )),

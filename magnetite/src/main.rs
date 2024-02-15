@@ -103,19 +103,20 @@ fn main() -> Result<(), failure::Error> {
 
     let (sub_name, args) = matches.subcommand().unwrap();
     let main_future = match sub_name {
+        cmdlet::download::SUBCOMMAND_NAME => cmdlet::download::main(args).boxed(),
         cmdlet::seed::SUBCOMMAND_NAME => cmdlet::seed::main(args).boxed(),
         cmdlet::dump_torrent_info::SUBCOMMAND_NAME => cmdlet::dump_torrent_info::main(args).boxed(),
 
-        #[cfg(feature = "with-mse")]
-        cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(args).boxed(),
-        #[cfg(feature = "with-mse")]
-        cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(args).boxed(),
-        #[cfg(feature = "with-mse")]
-        cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main(args).boxed(),
-        #[cfg(feature = "with-mse")]
-        cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main(args).boxed(),
-        #[cfg(feature = "with-fuse")]
-        cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main(args).boxed(),
+        // #[cfg(feature = "with-mse")]
+        // cmdlet::host::SUBCOMMAND_NAME => cmdlet::host::main(args).boxed(),
+        // #[cfg(feature = "with-mse")]
+        // cmdlet::webserver::SUBCOMMAND_NAME => cmdlet::webserver::main(args).boxed(),
+        // #[cfg(feature = "with-mse")]
+        // cmdlet::assemble_mse_tome::SUBCOMMAND_NAME => cmdlet::assemble_mse_tome::main(args).boxed(),
+        // #[cfg(feature = "with-mse")]
+        // cmdlet::validate_mse_tome::SUBCOMMAND_NAME => cmdlet::validate_mse_tome::main(args).boxed(),
+        // #[cfg(feature = "with-fuse")]
+        // cmdlet::fuse_mount::SUBCOMMAND_NAME => cmdlet::fuse_mount::main(args).boxed(),
 
         cmdlet::daemon::SUBCOMMAND_NAME => cmdlet::daemon::main(args).boxed(),
         cmdlet::validate_torrent_data::SUBCOMMAND_NAME => {

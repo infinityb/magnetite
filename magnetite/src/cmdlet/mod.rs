@@ -15,3 +15,4 @@ pub mod dump_torrent_info;
 pub mod seed;
 pub mod validate_torrent_data;
 pub mod daemon;
+pub mod download;

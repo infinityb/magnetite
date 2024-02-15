@@ -24,6 +24,19 @@ in import ./Cargo.nix {
       buildInputs = iconvOptional ++ [pkgs.protobuf];
       PROTOC = "${pkgs.protobuf}/bin/protoc";
     };
+
+    "magnetite-single" = attrs: {
+      buildInputs = iconvOptional ++ [pkgs.protobuf];
+      PROTOC = "${pkgs.protobuf}/bin/protoc";
+    };
+    "magnetite-single-api" = attrs: {
+      buildInputs = iconvOptional ++ [pkgs.protobuf];
+      PROTOC = "${pkgs.protobuf}/bin/protoc";
+    };
+    "magnetite-single-aggregator" = attrs: {
+      buildInputs = iconvOptional ++ [pkgs.protobuf];
+      PROTOC = "${pkgs.protobuf}/bin/protoc";
+    };
     "prost-build" = attrs: {
       buildInputs = iconvOptional ++ [pkgs.protobuf];
       PROTOC = "${pkgs.protobuf}/bin/protoc";

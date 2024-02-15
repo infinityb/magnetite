@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package magnetite.single;
+
+message IntList {
+    repeated uint32 value = 1;
+}
+
+message TorrentSessionStartRequest {
+    string info_hash = 1;
+}
+
+message TorrentSessionStartItemInit {
+    string session_id = 1;
+    bytes replace_bitfield = 2;
+    string peer_id = 3;
+}
+
+message TorrentSessionStartItem {
+    oneof item {
+        uint64 set_seed_permit_bytes = 1;
+        bytes replace_bitfield = 2;
+        bytes add_bitfield = 3;
+        IntList request_pieces = 4;
+        IntList update_held_bitfield = 5;
+        TorrentSessionStartItemInit init = 6;
+    } 
+}
+
+message FinalizePieceRequest {
+    string info_hash = 1;
+    uint32 piece_num = 2;
+    bool check_validated = 3;
+}
+
+message FinalizePieceResponse {
+
+}
+
+message SessionStatisticsUpdateRequest {
+    uint64 sent_data_bytes = 1;
+    uint64 received_data_bytes = 2;
+}
+
+message SessionStatisticsUpdateResponse {
+
+}
+
+message AddTorrentRequest {
+    string info_hash = 1;
+    bytes torrent_data = 2;
+}
+
+message AddTorrentResponse {
+
+}
+
+message ChangeTorrentStatusRequest {
+    string info_hash = 1;
+    bool set_active = 2;
+}
+
+message ChangeTorrentStatusResponse {
+
+}
+
+
+service Magnetite {
+    rpc StartSession(TorrentSessionStartRequest) returns (stream TorrentSessionStartItem);
+
+    rpc NotifyFinalizePiece(FinalizePieceRequest) returns (FinalizePieceResponse);
+
+    rpc UpdateSessionStatistics(SessionStatisticsUpdateRequest) returns (SessionStatisticsUpdateResponse);
+
+    rpc AddTorrent(AddTorrentRequest) returns (AddTorrentResponse);
+
+    rpc ChangeTorrentStatus(ChangeTorrentStatusRequest) returns (ChangeTorrentStatusResponse);
+}

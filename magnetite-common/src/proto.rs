@@ -20,14 +20,10 @@ impl<E> From<E> for IErr<E> {
     }
 }
 
-// plan:
-//
-// Try to use `Suggest Piece` from http://bittorrent.org/beps/bep_0006.html to
-// increase cloud cache hits, so we don't have to hit the backend storage
-// system as hard.
+// Use `Suggest Piece` later to optimize storage access?
 
 // https://wiki.theory.org/BitTorrentSpecification#request:_.3Clen.3D0013.3E.3Cid.3D6.3E.3Cindex.3E.3Cbegin.3E.3Clength.3E
-pub const DEFAULT_BLOCK_SIZE: u32 = 1 << 14; // 16KiB - 13.1ms @ 10Mbps
+pub const DEFAULT_BLOCK_SIZE: u32 = 1 << 14;  // 16KiB - 13.1ms @ 10Mbps
 
 const RESERVED_SIZE: usize = 8;
 
@@ -141,11 +137,26 @@ impl std::error::Error for BadHandshake {}
 
 // --
 
+pub struct PieceSliceFormatSmall<'a>(&'a PieceSlice);
+
+impl<'a> fmt::Display for PieceSliceFormatSmall<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "data[{}*sz+{}..][..{}]", self.0.index, self.0.begin, self.0.length)
+    }
+}
+
+
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct PieceSlice {
     pub index: u32,
     pub begin: u32,
     pub length: u32,
+}
+
+impl PieceSlice {
+    pub fn fmt_small(&self) -> PieceSliceFormatSmall {
+        PieceSliceFormatSmall(self)
+    }
 }
 
 #[derive(Debug)]
@@ -173,7 +184,47 @@ pub enum Message<'a> {
     },
 }
 
+pub struct MessageDebugSmall<'b, 'a>(&'b Message<'a>);
+
+impl<'a, 'b> fmt::Debug for MessageDebugSmall<'a, 'b> where 'a: 'b {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.0 {
+            Message::Keepalive
+            | Message::Choke
+            | Message::Unchoke
+            | Message::Interested
+            | Message::Uninterested
+            | Message::Have { .. }
+            | Message::Piece { .. }
+            | Message::Port { .. } => {
+                write!(f, "{:?}", self.0)
+            }
+            Message::Request(ref ps) => {
+                write!(f, "Request({})", ps.fmt_small())
+            }
+            Message::Cancel(ref ps) => {
+                write!(f, "Cancel({})", ps.fmt_small())
+            }
+            Message::Bitfield { .. } => {
+                f.debug_struct("Bitfield")
+                    .field("field_data", &(..))
+                    .finish()
+            }
+        }
+    }
+}
+
 impl<'a> Message<'a> {
+    pub fn bitfield(bf: &'a [u8]) -> Self {
+        Message::Bitfield {
+            field_data: BytesCow::Borrowed(bf),
+        }
+    } 
+
+    pub fn debug_small<'b>(&'b self) -> MessageDebugSmall<'b, 'a> where 'a: 'b {
+        MessageDebugSmall(self)
+    }
+
     pub fn into_owned(self) -> Message<'static> {
         match self {
             Message::Keepalive => Message::Keepalive,
@@ -309,6 +360,17 @@ pub fn deserialize_pop(from: &mut BytesMut) -> IResult<Message<'static>, WirePro
     let v = v.into_owned();
     from.advance(sz);
     Ok((sz, v))
+}
+
+pub fn deserialize_pop_opt(from: &mut BytesMut) -> Result<Option<Message<'static>>, WireProtocolViolation> {
+    let (sz, v) = match deserialize_peek(&from[..]) {
+        Ok((sz, v)) => (sz, v),
+        Err(IErr::Incomplete(..)) => return Ok(None),
+        Err(IErr::Error(e)) => return Err(e),
+    };
+    let v = v.into_owned();
+    from.advance(sz);
+    Ok(Some(v))
 }
 
 pub fn serialize(wbuf: &mut BytesMut, msg: &Message) {

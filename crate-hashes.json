@@ -1,8 +1,1 @@
-{
-  "fuse 0.4.0-dev (git+https://github.com/zargony/fuse-rs#39fde4a5c47ce370d228ac190f950bd835db7f47)": "06bb2s86q9f7nxa581h8vpgnadlgjg7zg846cmxzx8wj9rd1y6zs",
-  "fuse-abi 0.4.0-dev (git+https://github.com/zargony/fuse-rs#39fde4a5c47ce370d228ac190f950bd835db7f47)": "06bb2s86q9f7nxa581h8vpgnadlgjg7zg846cmxzx8wj9rd1y6zs",
-  "fuse-sys 0.4.0-dev (git+https://github.com/zargony/fuse-rs#39fde4a5c47ce370d228ac190f950bd835db7f47)": "06bb2s86q9f7nxa581h8vpgnadlgjg7zg846cmxzx8wj9rd1y6zs",
-  "hyper 1.0.0-rc.1 (git+https://github.com/hyperium/hyper?rev=9f47576cab1b5db0a51416a4859df522c26fac35#9f47576cab1b5db0a51416a4859df522c26fac35)": "1598vij8wpb7la8j7rl8v3jdpbwvgiqd7vyafjzwmsasigr15k0q",
-  "tonic 0.8.3 (git+https://github.com/hyperium/tonic.git#9f716d841184b8521720c6ed941af137ca2ee6a0)": "16ak6ax1ijdflcln78nxvcmpskz7wwxj2i0pvz397mx6nslj63nx",
-  "tonic-build 0.8.4 (git+https://github.com/hyperium/tonic.git#9f716d841184b8521720c6ed941af137ca2ee6a0)": "16ak6ax1ijdflcln78nxvcmpskz7wwxj2i0pvz397mx6nslj63nx"
-}
+{}

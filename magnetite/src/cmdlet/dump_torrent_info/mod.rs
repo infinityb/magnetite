@@ -32,6 +32,18 @@ pub fn get_subcommand() -> App<'static> {
                 .help("Only dump file paths")
         )
         .arg(
+            Arg::with_name("name")
+                .long("name")
+                .action(clap::ArgAction::SetTrue)
+                .help("Only dump the name")
+        )
+        .arg(
+            Arg::with_name("info-hash")
+                .long("info-hash")
+                .action(clap::ArgAction::SetTrue)
+                .help("Only dump the info-hash")
+        )
+        .arg(
             Arg::with_name("zero")
                 .long("zero")
                 .action(clap::ArgAction::SetTrue)
@@ -75,8 +87,8 @@ pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     file.read_to_end(&mut by).unwrap();
 
     let tm: bencode::Value = bencode::from_bytes(&by[..]).unwrap();
-    let zero = matches.contains_id("zero");
-    if matches.contains_id("file-paths") {
+    let zero = matches.get_flag("zero");
+    if matches.get_flag("file-paths") {
         if cfg!(windows) {
             eprintln!("I dunno how to delimit paths properly on this chaotic OS - aborting");
 
@@ -96,6 +108,7 @@ pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
         return Ok(());
     }
+    
 
     if zero {
         eprintln!("--zero only supported when dumping file-paths for now");
@@ -109,11 +122,23 @@ pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let info = bencode::to_bytes(d.get(&b"info"[..]).unwrap()).unwrap();
         hasher.input(&info[..]);
         let infohash_data = hasher.result();
-        println!("Info hash: {:x}", infohash_data);
         infohash.as_mut_bytes().copy_from_slice(&infohash_data[..]);
+    } else {
+        return Err(failure::format_err!("bad torrent file"));
     }
 
     let tm: TorrentMeta = bencode::from_bytes(&by[..]).unwrap();
+    
+    if matches.get_flag("info-hash") {
+        println!("{}", infohash.hex());
+        return Ok(())
+    }
+    if matches.get_flag("name") {
+        println!("{}", tm.info.name);
+        return Ok(())
+    }
+
+    println!("Info hash: {}", infohash.hex());
     println!("Name: {}", tm.info.name);
     println!("Files:");
     for file in tm.info.files {
