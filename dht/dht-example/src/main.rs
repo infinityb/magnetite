@@ -398,7 +398,7 @@ async fn main() -> Result<(), failure::Error> {
             starter_tasks.push(task::spawn_local(async move {
                 let mut rx = ReceiverStream::new(rx);
                 while let Some(v) = rx.next().await {
-                    
+
                 }
                 Ok(())
             }));
@@ -649,7 +649,7 @@ async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
         want: SmallVec::new(),
     });
     let mut addresses = Vec::new();
-    addresses.extend(net::lookup_host("router.utorrent.com:6881").await?);
+    addresses.extend(net::lookup_host("1.20.172.236:6881").await?);
     addresses.extend(net::lookup_host("router.bittorrent.com:6881").await?);
     addresses.extend(net::lookup_host("dht.transmissionbt.com:6881").await?);
 
