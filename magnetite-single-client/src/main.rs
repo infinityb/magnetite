@@ -8,6 +8,7 @@ use tracing::{span, event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
 use magnetite_single_api::{futures, tokio};
+use magnetite_single_api::proto::ChangeTorrentStatusRequest;
 use magnetite_model::TorrentMetaWrapped;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -31,9 +32,18 @@ fn main() -> Result<(), failure::Error> {
         )
         .arg(
             Arg::new("torrent-file")
+                .long("torrent-file")
                 .required(true)
                 .action(ArgAction::Set)
                 .value_parser(value_parser!(PathBuf))
+                .help("read this file"),
+        )
+        .arg(
+            Arg::new("data-file")
+                .long("data-file")
+                .required(true)
+                .action(ArgAction::Set)
+                // .value_parser(value_parser!(PathBuf))
                 .help("read this file"),
         );
 
@@ -84,6 +94,12 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let x = client.add_torrent(AddTorrentRequest {
         info_hash: xx.info_hash.hex().to_string(),
         torrent_data: buf,
+        file_path: matches.get_one::<String>("data-file").unwrap().clone(),
+    }).await?;
+
+    let x = client.change_torrent_status(ChangeTorrentStatusRequest {
+        info_hash: xx.info_hash.hex().to_string(),
+        set_active: true,
     }).await?;
 
     Ok(())

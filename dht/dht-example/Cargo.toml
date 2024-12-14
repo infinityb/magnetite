@@ -14,10 +14,17 @@ smallvec = { version = "1.0", features = ["serde"] }
 tokio = { version = "1.19.1", features = ["full"] }
 tokio-stream = "0.1.9"
 tracing = "0.1.29"
-tracing-subscriber = { version = "0.3.0", features = ["smallvec", "fmt", "ansi", "tracing-log", "std", "json"] }
+tracing-subscriber = { version = "0.3.0", features = [
+    "smallvec",
+    "fmt",
+    "ansi",
+    "tracing-log",
+    "std",
+    "json",
+] }
 failure = "0.1"
-futures = "0.3.21"
-hyper = { git = "https://github.com/hyperium/hyper", rev="9f47576cab1b5db0a51416a4859df522c26fac35", features = ["full"] }
+futures = "0.3.31"
+hyper = "1.5.1"
 rand = "0.8.5"
 
 # interal

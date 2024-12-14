@@ -1,45 +1,35 @@
-{ stdenv, pkgs, callPackage }:
+{
+    system ? builtins.currentSystem,
+}:
 let
-  lib = pkgs.lib;
-  iconvOptional = lib.optionals stdenv.isDarwin [pkgs.libiconv];
-in import ./Cargo.nix {
-  inherit pkgs;
-  defaultCrateOverrides = pkgs.defaultCrateOverrides // {
-    "pcap" = attrs: {
-      LD_LIBRARY_PATH = "${pkgs.libpcap}/lib";
-      LD_RUN_PATH = "${pkgs.libpcap}/lib";
-      buildInputs = [pkgs.libpcap];
-    };
-    "dht-traffic-stealer" = attrs: {
-      LD_LIBRARY_PATH = "${pkgs.libpcap}/lib";
-      LD_RUN_PATH = "${pkgs.libpcap}/lib";
-      buildInputs = [pkgs.libpcap];
-    };
-    "dht-traffic-stats" = attrs: {
-      LD_LIBRARY_PATH = "${pkgs.libpcap}/lib";
-      LD_RUN_PATH = "${pkgs.libpcap}/lib";
-      buildInputs = [pkgs.libpcap];
-    };
-    "magnetite" = attrs: {
-      buildInputs = iconvOptional ++ [pkgs.protobuf];
-      PROTOC = "${pkgs.protobuf}/bin/protoc";
-    };
-
-    "magnetite-single" = attrs: {
-      buildInputs = iconvOptional ++ [pkgs.protobuf];
-      PROTOC = "${pkgs.protobuf}/bin/protoc";
-    };
-    "magnetite-single-api" = attrs: {
-      buildInputs = iconvOptional ++ [pkgs.protobuf];
-      PROTOC = "${pkgs.protobuf}/bin/protoc";
-    };
-    "magnetite-single-aggregator" = attrs: {
-      buildInputs = iconvOptional ++ [pkgs.protobuf];
-      PROTOC = "${pkgs.protobuf}/bin/protoc";
-    };
-    "prost-build" = attrs: {
-      buildInputs = iconvOptional ++ [pkgs.protobuf];
-      PROTOC = "${pkgs.protobuf}/bin/protoc";
-    };
+  nixpkgsSrc = (builtins.fetchTarball {
+      # nix-prefetch-url --unpack "<URL>"
+      url = "https://github.com/NixOS/nixpkgs/archive/aaf58368e3748e22c1bb826fbdb907030f58a767.tar.gz";
+      sha256 = "01w6qj7ciz00nbdky963jzcf1901vri7hck79nn7fpq07mkgndi9";
+  });
+  nixpkgs = import nixpkgsSrc {
+    inherit system;
   };
+
+  magnetite = nixpkgs.pkgs.callPackage ./default.nix {};
+  ourPackages = {
+  	inherit magnetite nixpkgsSrc;
+  };
+	combinedPkgs = nixpkgs.pkgs // {
+		callPackage = nixpkgs.lib.callPackageWith (combinedPkgs // ourPackages);
+	};
+
+	integrationTests = combinedPkgs.callPackage ./integration-tests {};
+	interactiveTesting = nixpkgs.pkgs.symlinkJoin {
+		name = "magentite-interactive";
+		paths = [
+			magnetite.workspaceMembers.magnetite-single.build
+			magnetite.workspaceMembers.magnetite-single-wrapper.build
+			magnetite.workspaceMembers.magnetite-single-aggregator.build
+			magnetite.workspaceMembers.magnetite-tracker.build
+		];
+	};
+in magnetite // {
+	inherit integrationTests;
+	inherit interactiveTesting;
 }

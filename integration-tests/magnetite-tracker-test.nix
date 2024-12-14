@@ -130,7 +130,7 @@ import "${nixpkgsSrc}/nixos/tests/make-test-python.nix" (
 
           downloader2.succeed("transmission-remote --add ${served_file_torrent} --no-portmap --no-dht --download-dir ${download-dir}/data")
           downloader2.wait_for_file("${download-dir}/data/example.tar")
-          downloader2.succeed("cmp ${download-dir}/data/example.tar ${served_file}")
+          downloader2.succeed("cmp ${download-dir}/data/example.tar ${served_file}")___
         '';
     }
   )

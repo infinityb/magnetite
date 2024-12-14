@@ -141,8 +141,9 @@ import "${nixpkgsSrc}/nixos/tests/make-test-python.nix" (
           # critical services
           tracker.wait_for_unit("magnetite-tracker")
           tracker.wait_for_open_port(6969)
-          seeder.wait_for_unit("magnetite-daemon")
-          seeder.wait_for_open_port(6881)
+          seeder.wait_for_unit("magnetite-aggregator")
+          seeder.wait_for_unit("magnetite-datapath")
+          seeder.wait_for_open_port(51409)
           for s in [downloader1, downloader2]:
               s.wait_for_unit("transmission")
 
@@ -153,7 +154,8 @@ import "${nixpkgsSrc}/nixos/tests/make-test-python.nix" (
           downloader1.succeed("transmission-remote --add ${served_file_torrent} --no-portmap --no-dht --download-dir ${download-dir}/data")
           downloader1.wait_for_file("${download-dir}/data/example.tar")
           downloader1.succeed("cmp ${download-dir}/data/example.tar ${served_file}")
-          seeder.stop_job("transmission")
+          seeder.stop_job("magnetite-aggregator")
+          seeder.stop_job("magnetite-datapath")
 
           downloader2.succeed("transmission-remote --add ${served_file_torrent} --no-portmap --no-dht --download-dir ${download-dir}/data")
           downloader2.wait_for_file("${download-dir}/data/example.tar")

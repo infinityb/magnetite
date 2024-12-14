@@ -22,7 +22,7 @@ use magnetite_single_api::{tokio, tonic, TorrentSessionStartItem, proto::Torrent
 use magnetite_single_api::tokio::io::{AsyncReadExt, AsyncWriteExt};
 use magnetite_single_api::tokio::net::TcpStream;
 use magnetite_single_api::tokio::runtime;
-use magnetite_single_api::tokio::time::{self, timeout, timeout_at, Duration};
+use magnetite_single_api::tokio::time::{self, timeout, Duration};
 
 
 const KEEPALIVE_INTERVAL: Duration = Duration::new(120, 0);
@@ -133,48 +133,6 @@ fn main() -> Result<(), failure::Error> {
     })
 }
 
-async fn open_torrent_meta_file(info_hash: &TorrentId) -> Result<File, failure::Error> {
-    let span = span!(Level::INFO, "open_torrent_meta_file");
-    let _guard = span.enter();
-
-    let filename = format!("/storage/users/sell/ceph-transmission-backup/torrent-hive/torrents/{}.torrent", info_hash.hex());
-    if let Ok(file) = File::open(&filename) {
-        return Ok(file);
-    }
-
-    let filename = format!("/mnt/media/torrents/{}.torrent", info_hash.hex());
-    let file = File::open(&filename).with_context(|_| {
-        format!("opening {:?}", filename)
-    })?;
-
-    event!(Level::WARN,
-        info_hash = %info_hash.hex(),
-        "open_torrent_meta_file.fallback");
-
-    Ok(file)
-}
-
-async fn load_torrent_meta_file(info_hash: &TorrentId) -> Result<TorrentMetaWrapped, failure::Error> {
-    let mut file = open_torrent_meta_file(info_hash).await.with_context(|_| {
-        UnknownInfoHash(*info_hash)
-    })?;
-    
-    let mut by = Vec::new();
-    file.read_to_end(&mut by)?;
-
-    let torrent = TorrentMetaWrapped::from_bytes(&by)?;
-    event!(Level::ERROR,
-        name = torrent.meta.info.name,
-        piece_count = torrent.meta.info.pieces.len(),
-        "load_torrent_meta");
-
-    if !torrent.meta.info.files.is_empty() {
-        failure::bail!("multi-torrent not yet supported");
-    }
-
-    Ok(torrent)
-}
-
 async fn open_torrent_data_file(info_hash: &TorrentId) -> Result<File, failure::Error> {
     let span = span!(Level::INFO, "open_torrent_data_file");
     let _guard = span.enter();
@@ -269,7 +227,7 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mut wbuf = BytesMut::new();
     
     let mut sent_handshake = false;
-    let mut self_pid = TorrentId::zero();
+    let mut self_pid;
     if let Some(info_hash) = matches.get_one::<TorrentId>("info-hash") {
         sent_handshake = true;
         self_pid = matches.get_one::<TorrentId>("peer-id").cloned().ok_or_else(|| {
@@ -302,8 +260,6 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mut choking_peer = true;
     let mut sent_data_bytes = 0;
     let mut send_data_permit_bytes = 0;
-    let torrent = load_torrent_meta_file(&handshake.info_hash).await?;
-
     let mut req = tonic::Request::new(TorrentSessionStartRequest {
         info_hash: format!("{}", handshake.info_hash.hex()),
     });
@@ -313,17 +269,22 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
     let mut session_resp = client.start_session(req).await?;
     event!(Level::INFO, metadata=?session_resp.metadata(), "session_init");
 
-    let mut bitfield = BitField::none(torrent.meta.info.pieces.len() as u32);
-    let mut session_id = String::new();
-    let mut peer_id = TorrentId::zero();
+    let torrent;
+    let bitfield;
+    let session_id;
+    let peer_id: TorrentId;
     if let Some(next_message) = session_resp.get_mut().message().await? {
         use magnetite_single_api::proto::torrent_session_start_item::Item;
 
         match next_message.item {
             Some(Item::Init(ref init)) => {
+                torrent = TorrentMetaWrapped::from_bytes(&init.torrent_data)?;
                 session_id = init.session_id.clone();
                 self_pid = init.peer_id.parse()?;
-                bitfield.copy_from_slice(&init.replace_bitfield);
+
+                let mut bf = BitField::none(torrent.meta.info.pieces.len() as u32);
+                bf.copy_from_slice(&init.replace_bitfield);
+                bitfield = bf;
             },
             _ => {
                 failure::bail!("no starting bitfield - got {:?}", next_message.item);
