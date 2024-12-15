@@ -1,5 +1,6 @@
 use std::fmt;
 use std::cmp::Ordering;
+use std::collections::hash_map::HashMap;
 use std::collections::btree_map::{self, Entry, VacantEntry};
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -168,11 +169,12 @@ impl RecursionState {
                     }
                 }
             }
-            
+
             return added;
         }
     }
 }
+
 type TorrentIdHeapEntry<T> = GeneralHeapEntry<TorrentId, T>;
 
 #[derive(Debug, Clone)]
@@ -246,8 +248,7 @@ impl NodeQuality {
     }
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct GeneralEnvironment {
     pub now: Instant,
 }
@@ -256,6 +257,7 @@ pub struct GeneralEnvironment {
 pub struct RequestEnvironment {
     pub gen: GeneralEnvironment,
     pub is_reply: bool,
+    pub addr: SocketAddr,
 }
 
 impl Node {
@@ -338,6 +340,7 @@ pub struct BucketManager {
     pub buckets: Vec<Bucket>,
     pub recent_dead_hosts: (),
     pub bootstrap_hostnames: Vec<String>,
+    pub host_remove_dups: HashMap<SocketAddr, TorrentId>,
 
     pub token_rs_next_incr: Instant,
     pub token_rs_current: RandomState,
@@ -360,15 +363,12 @@ impl BucketManager {
         let mut lowest_node_bucket_node_score = usize::max_value();
         let mut lowest_node_bucket = None;
         for b in &mut self.buckets {
-            let mut score = 0;     
-            for node in &b.nodes {
-                score += match node.quality(genv) {
-                    NodeQuality::Good => 4,
-                    NodeQuality::Questionable => 2,
-                    NodeQuality::Bad => 1,
-                };
-            }
-            if score < lowest_node_bucket_node_score {
+            let score = b.nodes.iter().map(|n| match n.quality(genv) {
+                NodeQuality::Good => 4,
+                NodeQuality::Questionable => 2,
+                NodeQuality::Bad => 1,
+            }).sum();
+            if score < lowest_node_bucket_node_score && !b.nodes.is_empty() {
                 lowest_node_bucket_node_score = score;
                 lowest_node_bucket = Some(b);
             }
@@ -428,7 +428,7 @@ impl<'a> fmt::Display for BucketFormatter<'a> {
                 NodeQuality::Questionable => "🙁",
                 NodeQuality::Bad => "🤢",
             };
-            
+
             write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
                 quality,
                 node.thin.id.hex(),
@@ -513,6 +513,7 @@ impl BucketManager {
             self_peer_id,
             buckets,
             recent_dead_hosts: (),
+            host_remove_dups: HashMap::new(),
             token_rs_next_incr: now + Duration::new(300, 0),
             token_rs_current: rs.clone(),
             token_rs_previous: rs,
@@ -868,7 +869,7 @@ pub struct TorrentIdPrefix {
 fn foobar2() {
     let t0 = TorrentIdPrefix::new(TorrentId::max_value(), 1);
     assert_eq!(t0.base, "8000000000000000000000000000000000000000".parse().unwrap());
-    
+
     let t1 = TorrentIdPrefix::new(TorrentId::max_value(), 2);
     assert_eq!(t1.longer().unwrap().base, "c000000000000000000000000000000000000000".parse().unwrap());
 }

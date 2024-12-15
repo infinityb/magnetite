@@ -5,9 +5,9 @@ use std::str::FromStr;
 use std::io::Write;
 
 use tracing::{event, Level};
-use hyper::{Body, Request, Response, Server, StatusCode};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::server::conn::AddrStream;
+use hyper::{Request, Response, Server, StatusCode};
+use hyper::service::service_fn;
+use hyper::body::Body;
 use tokio_stream::StreamExt as TokioStreamExt;
 
 use magnetite_common::TorrentId;
@@ -39,7 +39,7 @@ async fn handle_search(
     target: TorrentId,
     search_kind: search::SearchKind,
 ) -> Result<Response<Body>, hyper::http::Error> {
-    let mut search = match search::start_search(context, target, search_kind, 32).await {
+    let mut search = match search::start_search(context, target, search_kind, 32) {
         Ok(s) => tokio_stream::wrappers::ReceiverStream::new(s),
         Err(err) => {
             if let Some(uerr) = err.downcast_ref::<search::Unavailable>() {
@@ -102,7 +102,7 @@ async fn handle_search(
                     sender.send_data(s.into()).await?;
                 }
             };
-            
+
         }
 
         sender.send_data(" ------------ End-of-stream ------------\n".into()).await?;

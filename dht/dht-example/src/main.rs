@@ -44,6 +44,7 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 mod search;
+// mod debug_server;
 
 struct DedupVecDeque<T> {
     queue: VecDeque<T>,
@@ -89,6 +90,8 @@ fn handle_query_ping(bm: &BucketManager, message: &DhtMessage) -> DhtMessage {
         }),
     }
 }
+
+
 
 fn handle_query_find_node(
     bm: &BucketManager,
@@ -391,14 +394,14 @@ async fn main() -> Result<(), failure::Error> {
             let bm_tmp = Rc::clone(&bm);
             let sock_tmp = Rc::clone(&sock);
 
-            let context = DhtContext {
-                bm: Rc::clone(&bm),
-                so: Rc::clone(&sock),
-            };
+            // let context = DhtContext {
+            //     bm: Rc::clone(&bm),
+            //     so: Rc::clone(&sock),
+            // };
             starter_tasks.push(task::spawn_local(async move {
                 let mut rx = ReceiverStream::new(rx);
                 while let Some(v) = rx.next().await {
-
+                    //
                 }
                 Ok(())
             }));
@@ -523,6 +526,7 @@ async fn response_engine(context: DhtContext) -> Result<(), failure::Error> {
         let env = RequestEnvironment {
             gen: genv,
             is_reply,
+            addr,
         };
 
         let mut peer_id = None;
@@ -653,15 +657,18 @@ async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
     addresses.extend(net::lookup_host("router.bittorrent.com:6881").await?);
     addresses.extend(net::lookup_host("dht.transmissionbt.com:6881").await?);
 
-    let mut nenv = RequestEnvironment {
-        gen: GeneralEnvironment {
-            now: Instant::now() - Duration::from_secs(900),
-        },
-        is_reply: false,
-    };
+
     let mut to_send_msgs = Vec::new();
     let mut bm_locked = context.bm.borrow_mut();
+    let gen = GeneralEnvironment {
+        now: Instant::now() - Duration::from_secs(900),
+    };
     for addr in addresses {
+        let nenv = RequestEnvironment {
+            gen,
+            is_reply: false,
+            addr,
+        };
         if rate_limit_check_and_incr(&mut recent_peers_queried, addr, &nenv) {
             let mut node_msg = msg.clone();
             dht_query_apply_txid(
@@ -707,16 +714,17 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
         ff.read_to_end(&mut bytes)?;
         drop(ff);
 
-        let decoded: DhtNodeSave = bencode::from_bytes(&bytes[..])?;
-        let nenv = RequestEnvironment {
-            gen: GeneralEnvironment {
-                now: Instant::now() - Duration::from_secs(900),
-            },
-            is_reply: false,
+        let gen = GeneralEnvironment {
+            now: Instant::now() - Duration::from_secs(900),
         };
-
+        let decoded: DhtNodeSave = bencode::from_bytes(&bytes[..])?;
         let mut bm_locked = context.bm.borrow_mut();
         for node in &decoded.nodes {
+            let nenv = RequestEnvironment {
+                gen,
+                is_reply: false,
+                addr: SocketAddr::V4(node.1),
+            };
             let saddr = SocketAddr::V4(node.1);
             bm_locked.node_seen(&ThinNode { id: node.0, saddr }, &nenv);
         }
@@ -769,24 +777,21 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
             line = line!(),
             "maintenance-blocker exit"
         );
-        let mut nenv = RequestEnvironment {
-            gen: GeneralEnvironment {
-                now: Instant::now(),
-            },
-            is_reply: false,
+        let mut ngen = GeneralEnvironment {
+            now: Instant::now(),
         };
         let bm_locked = context.bm.borrow();
         if should_bootstrap(&bm_locked) {
             drop(bm_locked);
-            next_request = nenv.gen.now + Duration::from_secs(1);
+            next_request = ngen.now + Duration::from_secs(1);
             timer.as_mut().reset(next_request.into());
         } else {
             drop(bm_locked);
-            next_request = nenv.gen.now + Duration::from_secs(6);
+            next_request = ngen.now + Duration::from_secs(6);
             timer.as_mut().reset(next_request.into());
         }
 
-        nenv.gen.now = Instant::now();
+        ngen.now = Instant::now();
 
         let bucket;
         let mut want_nodes = false;
@@ -795,12 +800,12 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
         if find_worst_bucket {
             find_worst_bucket = false;
             want_nodes = false;
-            bucket = bm_locked.find_mut_worst_bucket(&nenv.gen);
+            bucket = bm_locked.find_mut_worst_bucket(&ngen);
             eprintln!(
                 "worst_bucket: {}",
                 BucketFormatter {
                     bb: bucket,
-                    genv: &nenv.gen,
+                    genv: &ngen,
                 }
             );
             // event!(Level::INFO, worst_bucket=, "maintenance-find-bucket");
@@ -811,17 +816,17 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                 "oldest_bucket: {}",
                 BucketFormatter {
                     bb: bucket,
-                    genv: &nenv.gen,
+                    genv: &ngen,
                 }
             );
             // event!(Level::INFO, oldest_bucket=BucketFormatter { bb: bucket }, "maintenance-find-bucket");
         }
-        want_nodes |= !bucket.is_saturated(&nenv.gen);
+        want_nodes |= !bucket.is_saturated(&ngen);
         want_nodes |= bucket.prefix.contains(&self_peer_id);
-        let bucket_is_saturated = bucket.is_saturated(&nenv.gen);
+        let bucket_is_saturated = bucket.is_saturated(&ngen);
         let search_target = bucket.prefix.rand_within(&mut rng);
 
-        if let Some(node) = bucket.find_mut_node_for_maintenance_ping(&nenv.gen) {
+        if let Some(node) = bucket.find_mut_node_for_maintenance_ping(&ngen) {
             let mut msg = if want_nodes {
                 Into::into(DhtMessageQueryFindNode {
                     id: self_peer_id,
@@ -832,7 +837,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                 Into::into(DhtMessageQueryPing { id: self_peer_id })
             };
 
-            node.apply_activity_receive_request(&nenv.gen);
+            node.apply_activity_receive_request(&ngen);
             let node_thin = node.thin;
 
             drop(node);
@@ -842,7 +847,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                 &context.bm,
                 &mut msg,
                 node_thin.saddr,
-                &nenv.gen.now,
+                &ngen.now,
                 Some(node_thin.id),
             );
             drop(bm_locked);
@@ -909,16 +914,20 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                 want: Default::default(),
             });
 
-            nenv.gen.now = Instant::now();
+            ngen.now = Instant::now();
             event!(
                 Level::INFO,
                 file = file!(),
                 line = line!(),
                 "maintenance-blocker enter"
             );
+            let mut nenv = RequestEnvironment {
+                gen: ngen,
+                is_reply: false,
+                addr: saddr,
+            };
             if rate_limit_check_and_incr(&mut recent_peers_queried, saddr, &nenv) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-
                 nenv.gen.now = Instant::now();
                 let mut bm_locked = context.bm.borrow_mut();
                 dht_query_apply_txid(
@@ -926,7 +935,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                     &context.bm,
                     &mut msg,
                     saddr,
-                    &nenv.gen.now,
+                    &ngen.now,
                     Some(tid),
                 );
                 drop(bm_locked);
