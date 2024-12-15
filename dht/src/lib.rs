@@ -9,6 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use std::collections::BTreeSet;
 
+use anyhow::anyhow;
 use futures::channel::oneshot;
 use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
@@ -333,7 +334,6 @@ impl Node {
 }
 
 
-
 #[derive(Debug)]
 pub struct BucketManager {
     pub self_peer_id: TorrentId,
@@ -364,8 +364,8 @@ impl BucketManager {
         let mut lowest_node_bucket = None;
         for b in &mut self.buckets {
             let score = b.nodes.iter().map(|n| match n.quality(genv) {
-                NodeQuality::Good => 4,
-                NodeQuality::Questionable => 2,
+                NodeQuality::Good => 16,
+                NodeQuality::Questionable => 4,
                 NodeQuality::Bad => 1,
             }).sum();
             if score < lowest_node_bucket_node_score && !b.nodes.is_empty() {
@@ -1193,4 +1193,176 @@ mod tests {
             ])
         );
     }
+}
+
+///////////// -----
+
+#[derive(Copy, Clone, Debug)]
+pub struct BucketInfo {
+    pub prefix: TorrentIdPrefix,
+    pub last_touched_time: Instant,
+}
+
+#[derive(Debug)]
+pub struct BucketManager2 {
+    pub self_peer_id: TorrentId,
+    pub buckets: BTreeMap<TorrentId, BucketInfo>,
+    // for node in nodes: host_ip_to_node_bind[node.thin.id] == node.thing.addr
+    // for (addr, id) in host_ip_to_node_bind: nodes[id].thin.addr == ip
+    // drop packet if either constraint violated.
+    pub host_ip_to_node_bind: HashMap<IpAddr, TorrentId>,
+    pub nodes: BTreeMap<TorrentId, Node2>,
+}
+
+#[cfg(test)]
+mod tests_BucketManager2 {
+    use rand::{thread_rng, Rng, RngCore};
+
+    use super::{TorrentId, TorrentIdPrefix, BucketManager2};
+
+    #[test]
+    fn test_find_bucket_key() -> anyhow::Result<()> {
+        let mut rng = thread_rng();
+
+        let mut self_id = TorrentId::zero();
+        rng.fill_bytes(&mut self_id.0[..]);
+        let mut bm = BucketManager2::new(&self_id);
+
+        assert_eq!(bm.find_bucket_key(&TorrentId::zero()), TorrentId::zero());
+        for i in 0..1024 {
+            let mut id = TorrentId::zero();
+            rng.fill_bytes(&mut id.0[..]);
+            assert_eq!(bm.find_bucket_key(&id), TorrentId::zero());
+        }
+        // println!("{:#?}", bm);
+        // panic!();
+        Ok(())
+    }
+
+    #[test]
+    fn test_split_buckets() -> anyhow::Result<()> {
+        let mut rng = thread_rng();
+
+        let mut self_id = TorrentId::zero();
+        rng.fill_bytes(&mut self_id.0[..]);
+        let mut bm = BucketManager2::new(&self_id);
+
+        assert_eq!(bm.find_bucket_key(&TorrentId::zero()), TorrentId::zero());
+
+        for i in 0..1024 {
+            let mut id = TorrentId::zero();
+            rng.fill_bytes(&mut id.0[..]);
+            if bm.deepest_bucket_prefix().contains(&id) {
+                bm.split_bucket(&id)?;
+            }
+
+            // must be able to find again, ensuring the entire keyspace
+            // is covered.
+            bm.find_bucket_key(&id);
+        }
+        // println!("{:#?}", bm);
+        // panic!();
+        Ok(())
+    }
+}
+
+impl BucketManager2 {
+    fn new(tid: &TorrentId) -> BucketManager2 {
+        let mut buckets = BTreeMap::new();
+        buckets.insert(TorrentId::zero(), BucketInfo {
+            prefix: TorrentIdPrefix::zero(),
+            last_touched_time: Instant::now() - Duration::from_secs(900),
+        });
+
+        BucketManager2 {
+            self_peer_id: *tid,
+            buckets,
+            host_ip_to_node_bind: HashMap::new(),
+            nodes: BTreeMap::new(),
+        }
+    }
+
+    fn find_bucket_key(&self, id: &TorrentId) -> TorrentId {
+        let (k, v) = self.buckets.range(..=id).next_back().unwrap();
+        assert!(v.prefix.contains(id));
+        *k
+    }
+
+    fn deepest_bucket_prefix(&self) -> TorrentIdPrefix {
+        let k = self.find_bucket_key(&self.self_peer_id);
+        let x = self.buckets.get(&k).expect("must exist");
+        x.prefix
+    }
+
+    fn split_bucket(&mut self, id: &TorrentId) -> anyhow::Result<()> {
+        let base = self.find_bucket_key(id);
+        let bucket: &mut BucketInfo = self.buckets.get_mut(&base).unwrap();
+
+        if 128 < bucket.prefix.prefix_len {
+            return Err(anyhow!("excessively partitioned"));
+        }
+
+        let mut bucket_copy = *bucket;
+        let (self_new, other_new) = bucket.prefix.split();
+        bucket.prefix = self_new;
+        bucket_copy.prefix = other_new;
+        self.buckets.insert(other_new.base, bucket_copy);
+        Ok(())
+    }
+
+    pub fn find_mut_oldest_bucket<'a>(&'a mut self) -> &'a mut BucketInfo {
+        assert!(self.buckets.len() > 0);
+        let (_, b) = self.buckets.iter_mut()
+            .min_by_key(|(_, b)| b.last_touched_time)
+            .expect("must have at least one bucket");
+
+        b
+    }
+
+    pub fn find_mut_worst_bucket<'a>(&'a mut self, genv: &GeneralEnvironment) -> &'a mut BucketInfo {
+        unimplemented!();
+        // assert!(self.buckets.len() > 0);
+        // let mut lowest_node_bucket_node_score = usize::max_value();
+        // let mut lowest_node_bucket = None;
+        // for b in &mut self.buckets {
+        //     let score = b.nodes.iter().map(|n| match n.quality(genv) {
+        //         NodeQuality::Good => 4,
+        //         NodeQuality::Questionable => 2,
+        //         NodeQuality::Bad => 1,
+        //     }).sum();
+        //     if score < lowest_node_bucket_node_score && !b.nodes.is_empty() {
+        //         lowest_node_bucket_node_score = score;
+        //         lowest_node_bucket = Some(b);
+        //     }
+        // }
+        // lowest_node_bucket.unwrap()
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    // pub fn format_buckets<'a>(&'a self) -> BucketManager2Formatter<'a> {
+    //     BucketManager2Formatter { parent: &self }
+    // }
+}
+
+#[derive(Debug)]
+pub struct Node2 {
+    thin: ThinNode,
+    state: std::cell::RefCell<NodeState>,
+}
+
+#[derive(Debug)]
+pub struct NodeState {
+    // optional?? it's in the key.
+    bucket_id: TorrentId,
+    // none if we've never queried this node.
+    pub node_stats: Option<NodeReplyStats>,
+    // how many times we've timed out
+    pub timeouts: i32,
+    // record outgoing ping counter, saturating
+    pub sent_pings: i8,
+    // when we can send the next exploratory ping/find-nodes
+    pub next_allowed_ping: Instant,
 }

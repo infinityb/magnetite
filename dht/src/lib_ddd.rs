@@ -1,13 +1,16 @@
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
-enum NodeKey {
-    SocketAddr(SocketAddr),
+pub struct BucketInfo {
+    pub prefix: TorrentIdPrefix,
+    pub last_touched_time: Instant,
 }
 
 pub struct BucketManager {
-    buckets: BTreeMap<TorrentId, Bucket>,
-    
-    nodes: BTreeMap<TorrentId, Node>,
-    nodes_by_key: BTreeMap<NodeKey, TorrentId>,
+    pub self_peer_id: TorrentId,
+    pub buckets: BTreeMap<TorrentId, BucketInfo>,
+    // for node in nodes: host_ip_to_node_bind[node.thin.id] == node.thing.addr
+    // for (addr, id) in host_ip_to_node_bind: nodes[id].thin.addr == ip
+    // drop packet if either constraint violated.
+    pub host_ip_to_node_bind: HashMap<IpAddr, TorrentId>,
+    pub nodes: BTreeMap<TorrentId, Node>,
 }
 
 impl BucketManager {
