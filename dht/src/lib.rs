@@ -1141,11 +1141,11 @@ mod tests_BucketManager2 {
         rng.fill_bytes(&mut self_id.0[..]);
         let mut bm = BucketManager2::new(&self_id);
 
-        assert_eq!(bm.find_bucket_key(&TorrentId::zero()), TorrentId::zero());
+        assert_eq!(bm.find_bucket_prefix(&TorrentId::zero()).base, TorrentId::zero());
         for i in 0..1024 {
             let mut id = TorrentId::zero();
             rng.fill_bytes(&mut id.0[..]);
-            assert_eq!(bm.find_bucket_key(&id), TorrentId::zero());
+            assert_eq!(bm.find_bucket_prefix(&id).base, TorrentId::zero());
         }
         // println!("{:#?}", bm);
         // panic!();
@@ -1160,7 +1160,7 @@ mod tests_BucketManager2 {
         rng.fill_bytes(&mut self_id.0[..]);
         let mut bm = BucketManager2::new(&self_id);
 
-        assert_eq!(bm.find_bucket_key(&TorrentId::zero()), TorrentId::zero());
+        assert_eq!(bm.find_bucket_prefix(&TorrentId::zero()).base, TorrentId::zero());
 
         for i in 0..1024 {
             let mut id = TorrentId::zero();
@@ -1171,7 +1171,7 @@ mod tests_BucketManager2 {
 
             // must be able to find again, ensuring the entire keyspace
             // is covered.
-            bm.find_bucket_key(&id);
+            bm.find_bucket_prefix(&id);
         }
         // println!("{:#?}", bm);
         // panic!();
@@ -1263,11 +1263,13 @@ impl BucketManager2 {
                     NodeQuality::Bad => 1,
                 }
             }
+
             if score < lowest_node_bucket_node_score && node_count != 0 {
                 lowest_node_bucket_node_score = score;
                 lowest_node_bucket = Some(*bucket_key);
             }
         }
+
         let best_key = lowest_node_bucket.unwrap();
         self.buckets.get_mut(&best_key).unwrap()
     }
