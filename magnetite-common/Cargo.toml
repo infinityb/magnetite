@@ -11,3 +11,4 @@ byteorder = { version = "1.5.0", features = ["i128"] }
 bytes = { version = "1.5.0", features = ["serde"] }
 serde = "1.0.196"
 thiserror = "1.0.56"
+rand = "0.8.5"

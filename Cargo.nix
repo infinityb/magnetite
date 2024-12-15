@@ -3501,6 +3501,10 @@ rec {
             features = [ "serde" ];
           }
           {
+            name = "rand";
+            packageId = "rand";
+          }
+          {
             name = "serde";
             packageId = "serde";
           }

@@ -4,6 +4,6 @@ mod bytes_cow;
 
 pub mod proto;
 
-pub use self::torrent_id::{TorrentId, TorrentIdError};
+pub use self::torrent_id::{TorrentId, TorrentIdError, TorrentIdPrefix};
 pub use self::bytes_cow::BytesCow;
 // pub use self::torrent_meta::{TorrentMeta, TorrentMetaInfo, TorrentMetaInfoFile, TorrentMetaWrapped};

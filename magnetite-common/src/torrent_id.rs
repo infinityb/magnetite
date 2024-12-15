@@ -251,7 +251,7 @@ impl<'de> serde::de::Visitor<'de> for TorrentIdVisitor {
     where
         E: serde::de::Error,
     {
-        
+
         if s.len() != TorrentId::LENGTH * 2 {
             return Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(s),
@@ -310,6 +310,13 @@ fn dehex_fixed_size<'a>(val: &str, into: &'a mut [u8]) -> Result<&'a [u8], ()> {
     Ok(&into[..copied_bytes])
 }
 
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TorrentIdPrefix {
+    pub base: TorrentId,
+    pub prefix_len: u32,
+}
+
 #[test]
 fn with_high_bits() {
     assert_eq!(TorrentId::with_high_bits(0), TorrentId::zero());
@@ -317,4 +324,98 @@ fn with_high_bits() {
 
     assert_eq!(TorrentId::with_high_bits(159), "fffffffffffffffffffffffffffffffffffffffe".parse::<TorrentId>().unwrap());
     assert_eq!(TorrentId::with_high_bits(160), "ffffffffffffffffffffffffffffffffffffffff".parse::<TorrentId>().unwrap());
+}
+
+#[test]
+fn foobar2() {
+    let t0 = TorrentIdPrefix::new(TorrentId::max_value(), 1);
+    assert_eq!(t0.base, "8000000000000000000000000000000000000000".parse().unwrap());
+
+    let t1 = TorrentIdPrefix::new(TorrentId::max_value(), 2);
+    assert_eq!(t1.longer().unwrap().base, "c000000000000000000000000000000000000000".parse().unwrap());
+}
+
+impl fmt::Display for TorrentIdPrefix {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}/{}", self.base.hex(), self.prefix_len)
+    }
+}
+
+impl TorrentIdPrefix {
+    pub fn zero() -> TorrentIdPrefix {
+        TorrentIdPrefix {
+            base: TorrentId::zero(),
+            prefix_len: 0,
+        }
+    }
+
+    pub fn new(tid: TorrentId, prefix_len: u32) -> TorrentIdPrefix {
+        TorrentIdPrefix {
+            base: tid & TorrentId::with_high_bits(prefix_len),
+            prefix_len,
+        }
+    }
+
+    pub fn longer(&self) -> Option<TorrentIdPrefix> {
+        if 160 <= self.prefix_len {
+            return None;
+        }
+        let base = self.base & TorrentId::with_high_bits(self.prefix_len + 1);
+        Some(TorrentIdPrefix {
+            base,
+            prefix_len: self.prefix_len + 1,
+        })
+    }
+
+    pub fn contains(&self, id: &TorrentId) -> bool {
+        self.prefix_len <= (self.base ^ *id).leading_zeros()
+    }
+
+    pub fn split(&self) -> (TorrentIdPrefix, TorrentIdPrefix) {
+        let (bytes, bits) = (self.prefix_len / 8, self.prefix_len % 8);
+        let mut new_base = self.base;
+        let slice = new_base.as_mut_bytes();
+        slice[bytes as usize] |= 0x80 >> bits;
+
+        (
+            TorrentIdPrefix {
+                base: self.base,
+                prefix_len: self.prefix_len + 1,
+            },
+            TorrentIdPrefix {
+                base: new_base,
+                prefix_len: self.prefix_len + 1,
+            },
+        )
+    }
+
+    pub fn split_swap(&self, target: &TorrentId) -> (TorrentIdPrefix, TorrentIdPrefix) {
+        assert!(self.contains(target));
+        let (left, right) = self.split();
+        if left.contains(target) {
+            (left, right)
+        } else {
+            (right, left)
+        }
+    }
+
+    pub fn rand_within<R>(&self, rng: &mut R) -> TorrentId where R: rand::Rng {
+        let mut randomized = TorrentId::zero();
+        rng.fill_bytes(randomized.as_mut_bytes());
+        let rand_mask = !TorrentId::with_high_bits(self.prefix_len);
+        self.base | (rand_mask & randomized)
+    }
+
+    pub fn mask(&self) -> TorrentId {
+        let mut buf = [0; 20];
+        let mut prefix_left = self.prefix_len;
+        let mut byte_off = 0;
+        while prefix_left > 8 {
+            prefix_left -= 8;
+            buf[byte_off] = 0xFF;
+            byte_off += 1;
+        }
+        buf[byte_off] = (((1_u32 << prefix_left) - 1) & 0xFF) as u8;
+        TorrentId(buf)
+    }
 }
