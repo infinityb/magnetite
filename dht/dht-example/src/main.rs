@@ -924,7 +924,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                 addr: saddr,
             };
             if rate_limit_check_and_incr(&mut recent_peers_queried, saddr, &nenv) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(10000)).await;
                 nenv.gen.now = Instant::now();
                 let bm_locked = context.bm.borrow_mut();
                 dht_query_apply_txid(
