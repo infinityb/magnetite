@@ -1139,7 +1139,7 @@ mod tests_BucketManager2 {
 
         let mut self_id = TorrentId::zero();
         rng.fill_bytes(&mut self_id.0[..]);
-        let mut bm = BucketManager2::new(&self_id);
+        let bm = BucketManager2::new(&self_id);
 
         assert_eq!(bm.find_bucket_prefix(&TorrentId::zero()).base, TorrentId::zero());
         for i in 0..1024 {
@@ -1278,7 +1278,65 @@ impl BucketManager2 {
         self.nodes.len()
     }
 
-    // pub fn format_buckets<'a>(&'a self) -> BucketManager2Formatter<'a> {
-    //     BucketManager2Formatter { parent: &self }
-    // }
+    pub fn format_buckets<'a>(&'a self) -> BucketManager2Formatter<'a> {
+        BucketManager2Formatter { parent: &self }
+    }
+}
+
+pub struct BucketManager2Formatter<'a> {
+    parent: &'a BucketManager2,
+}
+
+pub struct BucketInfoFormatter<'a> {
+    pub bb: &'a BucketInfo,
+    pub nodes: std::collections::btree_map::Range<'a, TorrentId, Node>,
+    pub genv: &'a GeneralEnvironment,
+}
+
+impl<'a> fmt::Display for BucketManager2Formatter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let genv = GeneralEnvironment {
+            now: Instant::now(),
+        };
+        write!(f, "buckets count={}\n", self.parent.buckets.len())?;
+        for bucket in self.parent.buckets.values() {
+            write!(f, "{}", BucketInfoFormatter {
+                bb: bucket,
+                nodes: self.parent.nodes.range(range_from_prefix(&bucket.prefix)),
+                genv: &genv,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> fmt::Display for BucketInfoFormatter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut node_count = 0;
+        for _ in self.nodes.clone() {
+            node_count += 1;
+        }
+        write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
+            self.bb.prefix.base.hex(),
+            self.bb.prefix.prefix_len,
+            self.genv.now - self.bb.last_touched_time,
+            node_count,
+        )?;
+        for (_nid, node) in self.nodes.clone() {
+            let quality = match node.quality(self.genv) {
+                NodeQuality::Good => "🔥",
+                NodeQuality::Questionable => "❓",
+                NodeQuality::Bad => "🧊",
+            };
+
+            write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
+                quality,
+                node.thin.id.hex(),
+                node.thin.saddr,
+                node.get_last_message_age(self.genv),
+                node.timeouts,
+            )?;
+        }
+        Ok(())
+    }
 }
