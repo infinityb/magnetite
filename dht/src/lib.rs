@@ -1312,10 +1312,7 @@ impl<'a> fmt::Display for BucketManager2Formatter<'a> {
 
 impl<'a> fmt::Display for BucketInfoFormatter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut node_count = 0;
-        for _ in self.nodes.clone() {
-            node_count += 1;
-        }
+        let node_count: u32 = self.nodes.clone().map(|_| 1).sum();
         write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
             self.bb.prefix.base.hex(),
             self.bb.prefix.prefix_len,
