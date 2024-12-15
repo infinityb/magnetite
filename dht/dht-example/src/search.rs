@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 use tokio::task;
 
 use dht::wire::{DhtMessageQueryFindNode, DhtMessageQueryGetPeers};
-use dht::{GeneralEnvironment, RecursionState, ThinNode, TorrentIdPrefix, TransactionCompletion};
-use magnetite_common::TorrentId;
+use dht::{GeneralEnvironment, RecursionState, ThinNode, TransactionCompletion};
+use magnetite_common::{TorrentId, TorrentIdPrefix};
 
 use crate::{dht_query_apply_txid, send_to_node, DhtContext};
 

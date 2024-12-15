@@ -15,7 +15,7 @@ use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
 use tracing::{event, Level};
 
-use magnetite_common::TorrentId;
+use magnetite_common::{TorrentId, TorrentIdPrefix};
 use magnetite_tracker_lib::Tracker;
 use heap_dist_key::{general_heap_entry_push_or_replace, GeneralHeapEntry};
 
@@ -850,12 +850,6 @@ impl fmt::Debug for Bucket {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct TorrentIdPrefix {
-    pub base: TorrentId,
-    pub prefix_len: u32,
-}
-
 // #[test]
 // fn foobar() {
 //     let first_half = TorrentIdPrefix {
@@ -872,87 +866,6 @@ pub struct TorrentIdPrefix {
 //     assert_eq!(false, whole_set.is_proper_subset_of(&first_half));
 //     assert_eq!(false, whole_set.is_proper_subset_of(&whole_set));
 // }
-
-#[test]
-fn foobar2() {
-    let t0 = TorrentIdPrefix::new(TorrentId::max_value(), 1);
-    assert_eq!(t0.base, "8000000000000000000000000000000000000000".parse().unwrap());
-
-    let t1 = TorrentIdPrefix::new(TorrentId::max_value(), 2);
-    assert_eq!(t1.longer().unwrap().base, "c000000000000000000000000000000000000000".parse().unwrap());
-}
-
-impl fmt::Display for TorrentIdPrefix {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}", self.base.hex(), self.prefix_len)
-    }
-}
-
-impl TorrentIdPrefix {
-    fn zero() -> TorrentIdPrefix {
-        TorrentIdPrefix {
-            base: TorrentId::zero(),
-            prefix_len: 0,
-        }
-    }
-
-    pub fn new(tid: TorrentId, prefix_len: u32) -> TorrentIdPrefix {
-        TorrentIdPrefix {
-            base: tid & TorrentId::with_high_bits(prefix_len),
-            prefix_len,
-        }
-    }
-
-    pub fn longer(&self) -> Option<TorrentIdPrefix> {
-        if 160 <= self.prefix_len {
-            return None;
-        }
-        let base = self.base & TorrentId::with_high_bits(self.prefix_len + 1);
-        Some(TorrentIdPrefix {
-            base,
-            prefix_len: self.prefix_len + 1,
-        })
-    }
-
-    pub fn contains(&self, id: &TorrentId) -> bool {
-        self.prefix_len <= (self.base ^ *id).leading_zeros()
-    }
-
-    fn split(&self) -> (TorrentIdPrefix, TorrentIdPrefix) {
-        let (bytes, bits) = (self.prefix_len / 8, self.prefix_len % 8);
-        let mut new_base = self.base;
-        let slice = new_base.as_mut_bytes();
-        slice[bytes as usize] |= 0x80 >> bits;
-
-        (
-            TorrentIdPrefix {
-                base: self.base,
-                prefix_len: self.prefix_len + 1,
-            },
-            TorrentIdPrefix {
-                base: new_base,
-                prefix_len: self.prefix_len + 1,
-            },
-        )
-    }
-
-    fn split_swap(&self, target: &TorrentId) -> (TorrentIdPrefix, TorrentIdPrefix) {
-        assert!(self.contains(target));
-        let (left, right) = self.split();
-        if left.contains(target) {
-            (left, right)
-        } else {
-            (right, left)
-        }
-    }
-
-    pub fn rand_within<R>(&self, rng: &mut R) -> TorrentId where R: Rng {
-        let mut randomized = TorrentId::zero();
-        rng.fill_bytes(randomized.as_mut_bytes());
-        let rand_mask = !TorrentId::with_high_bits(self.prefix_len);
-        self.base | (rand_mask & randomized)
-    }
-}
 
 impl Bucket {
     fn touch(&mut self, env: &GeneralEnvironment) {
@@ -1211,7 +1124,7 @@ pub struct BucketManager2 {
     // for (addr, id) in host_ip_to_node_bind: nodes[id].thin.addr == ip
     // drop packet if either constraint violated.
     pub host_ip_to_node_bind: HashMap<IpAddr, TorrentId>,
-    pub nodes: BTreeMap<TorrentId, Node2>,
+    pub nodes: BTreeMap<TorrentId, Node>,
 }
 
 #[cfg(test)]
@@ -1266,6 +1179,11 @@ mod tests_BucketManager2 {
     }
 }
 
+fn range_from_prefix(prefix: TorrentIdPrefix) -> std::ops::RangeInclusive<TorrentId> {
+    let max = prefix.base | (TorrentId::max_value() & !prefix.mask());
+    prefix.base..=max
+}
+
 impl BucketManager2 {
     fn new(tid: &TorrentId) -> BucketManager2 {
         let mut buckets = BTreeMap::new();
@@ -1282,20 +1200,19 @@ impl BucketManager2 {
         }
     }
 
-    fn find_bucket_key(&self, id: &TorrentId) -> TorrentId {
+    fn find_bucket_prefix(&self, id: &TorrentId) -> TorrentIdPrefix {
         let (k, v) = self.buckets.range(..=id).next_back().unwrap();
         assert!(v.prefix.contains(id));
-        *k
+        assert_eq!(v.prefix.base, *k);
+        v.prefix
     }
 
     fn deepest_bucket_prefix(&self) -> TorrentIdPrefix {
-        let k = self.find_bucket_key(&self.self_peer_id);
-        let x = self.buckets.get(&k).expect("must exist");
-        x.prefix
+        self.find_bucket_prefix(&self.self_peer_id)
     }
 
     fn split_bucket(&mut self, id: &TorrentId) -> anyhow::Result<()> {
-        let base = self.find_bucket_key(id);
+        let base = self.find_bucket_prefix(id).base;
         let bucket: &mut BucketInfo = self.buckets.get_mut(&base).unwrap();
 
         if 128 < bucket.prefix.prefix_len {
@@ -1308,6 +1225,18 @@ impl BucketManager2 {
         bucket_copy.prefix = other_new;
         self.buckets.insert(other_new.base, bucket_copy);
         Ok(())
+    }
+
+    fn adding_to_bucket_creates_split(&self, id: &TorrentId, genv: &GeneralEnvironment) -> bool {
+        let prefix = self.find_bucket_prefix(id);
+        let mut found_good_nodes = 0;
+        for (k, v) in self.nodes.range(range_from_prefix(prefix)) {
+            assert!(prefix.contains(k));
+            if v.quality(genv).is_good() {
+                found_good_nodes += 1;
+            }
+        }
+        found_good_nodes < 8
     }
 
     pub fn find_mut_oldest_bucket<'a>(&'a mut self) -> &'a mut BucketInfo {
@@ -1345,24 +1274,4 @@ impl BucketManager2 {
     // pub fn format_buckets<'a>(&'a self) -> BucketManager2Formatter<'a> {
     //     BucketManager2Formatter { parent: &self }
     // }
-}
-
-#[derive(Debug)]
-pub struct Node2 {
-    thin: ThinNode,
-    state: std::cell::RefCell<NodeState>,
-}
-
-#[derive(Debug)]
-pub struct NodeState {
-    // optional?? it's in the key.
-    bucket_id: TorrentId,
-    // none if we've never queried this node.
-    pub node_stats: Option<NodeReplyStats>,
-    // how many times we've timed out
-    pub timeouts: i32,
-    // record outgoing ping counter, saturating
-    pub sent_pings: i8,
-    // when we can send the next exploratory ping/find-nodes
-    pub next_allowed_ping: Instant,
 }
