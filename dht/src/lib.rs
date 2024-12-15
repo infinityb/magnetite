@@ -1179,7 +1179,7 @@ mod tests_BucketManager2 {
     }
 }
 
-fn range_from_prefix(prefix: TorrentIdPrefix) -> std::ops::RangeInclusive<TorrentId> {
+fn range_from_prefix(prefix: &TorrentIdPrefix) -> std::ops::RangeInclusive<TorrentId> {
     let max = prefix.base | (TorrentId::max_value() & !prefix.mask());
     prefix.base..=max
 }
@@ -1230,13 +1230,13 @@ impl BucketManager2 {
     fn adding_to_bucket_creates_split(&self, id: &TorrentId, genv: &GeneralEnvironment) -> bool {
         let prefix = self.find_bucket_prefix(id);
         let mut found_good_nodes = 0;
-        for (k, v) in self.nodes.range(range_from_prefix(prefix)) {
+        for (k, v) in self.nodes.range(range_from_prefix(&prefix)) {
             assert!(prefix.contains(k));
             if v.quality(genv).is_good() {
                 found_good_nodes += 1;
             }
         }
-        found_good_nodes < 8
+        8 < found_good_nodes
     }
 
     pub fn find_mut_oldest_bucket<'a>(&'a mut self) -> &'a mut BucketInfo {
@@ -1249,22 +1249,27 @@ impl BucketManager2 {
     }
 
     pub fn find_mut_worst_bucket<'a>(&'a mut self, genv: &GeneralEnvironment) -> &'a mut BucketInfo {
-        unimplemented!();
-        // assert!(self.buckets.len() > 0);
-        // let mut lowest_node_bucket_node_score = usize::max_value();
-        // let mut lowest_node_bucket = None;
-        // for b in &mut self.buckets {
-        //     let score = b.nodes.iter().map(|n| match n.quality(genv) {
-        //         NodeQuality::Good => 4,
-        //         NodeQuality::Questionable => 2,
-        //         NodeQuality::Bad => 1,
-        //     }).sum();
-        //     if score < lowest_node_bucket_node_score && !b.nodes.is_empty() {
-        //         lowest_node_bucket_node_score = score;
-        //         lowest_node_bucket = Some(b);
-        //     }
-        // }
-        // lowest_node_bucket.unwrap()
+        let mut lowest_node_bucket_node_score = usize::max_value();
+        let mut lowest_node_bucket = None;
+
+        for (bucket_key, bucket_info) in &self.buckets {
+            let mut node_count = 0;
+            let mut score = 0;
+            for (_, node) in self.nodes.range(range_from_prefix(&bucket_info.prefix)) {
+                node_count += 1;
+                score += match node.quality(genv) {
+                    NodeQuality::Good => 4,
+                    NodeQuality::Questionable => 2,
+                    NodeQuality::Bad => 1,
+                }
+            }
+            if score < lowest_node_bucket_node_score && node_count != 0 {
+                lowest_node_bucket_node_score = score;
+                lowest_node_bucket = Some(*bucket_key);
+            }
+        }
+        let best_key = lowest_node_bucket.unwrap();
+        self.buckets.get_mut(&best_key).unwrap()
     }
 
     pub fn node_count(&self) -> usize {
