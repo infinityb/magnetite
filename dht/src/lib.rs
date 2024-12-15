@@ -424,9 +424,9 @@ impl<'a> fmt::Display for BucketFormatter<'a> {
         )?;
         for node in &self.bb.nodes {
             let quality = match node.quality(self.genv) {
-                NodeQuality::Good => "🙂",
-                NodeQuality::Questionable => "🙁",
-                NodeQuality::Bad => "🤢",
+                NodeQuality::Good => "🔥",
+                NodeQuality::Questionable => "❓",
+                NodeQuality::Bad => "🧊",
             };
 
             write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
