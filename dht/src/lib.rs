@@ -5,7 +5,7 @@ use std::collections::btree_map::{self, Entry, VacantEntry};
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::hash::{BuildHasher, Hasher};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use std::collections::BTreeSet;
 
@@ -340,7 +340,7 @@ pub struct BucketManager {
     pub buckets: Vec<Bucket>,
     pub recent_dead_hosts: (),
     pub bootstrap_hostnames: Vec<String>,
-    pub host_remove_dups: HashMap<SocketAddr, TorrentId>,
+    pub host_remove_dups: HashMap<IpAddr, TorrentId>,
 
     pub token_rs_next_incr: Instant,
     pub token_rs_current: RandomState,
@@ -675,6 +675,14 @@ impl BucketManager {
     }
 
     pub fn node_seen(&mut self, node: &ThinNode, env: &RequestEnvironment) {
+        let host_ip = env.addr.ip();
+        if let Some(v) = self.host_remove_dups.get(&host_ip) {
+            if *v != node.id {
+                return;
+            }
+        }
+        self.host_remove_dups.insert(host_ip, node.id);
+
         let self_peer_id = self.self_peer_id;
         if node.id == self_peer_id {
             return;

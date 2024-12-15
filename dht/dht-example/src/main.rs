@@ -238,7 +238,7 @@ fn handle_query_announce_peer(
 }
 
 fn dht_query_apply_txid(
-    bm: &mut BucketManager,
+    mut bm: std::cell::RefMut<'_, BucketManager>,
     bma: &Rc<RefCell<BucketManager>>,
     message: &mut DhtMessage,
     to: SocketAddr,
@@ -657,9 +657,7 @@ async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
     addresses.extend(net::lookup_host("router.bittorrent.com:6881").await?);
     addresses.extend(net::lookup_host("dht.transmissionbt.com:6881").await?);
 
-
     let mut to_send_msgs = Vec::new();
-    let mut bm_locked = context.bm.borrow_mut();
     let gen = GeneralEnvironment {
         now: Instant::now() - Duration::from_secs(900),
     };
@@ -669,21 +667,21 @@ async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
             is_reply: false,
             addr,
         };
+        let bm_locked = context.bm.borrow_mut();
         if rate_limit_check_and_incr(&mut recent_peers_queried, addr, &nenv) {
             let mut node_msg = msg.clone();
             dht_query_apply_txid(
-                &mut bm_locked,
+                bm_locked,
                 &context.bm,
                 &mut node_msg,
                 addr,
                 &nenv.gen.now,
                 None,
-            );
+            ).await?;
 
             to_send_msgs.push((addr, node_msg));
         }
     }
-    drop(bm_locked);
 
     for msg in &to_send_msgs {
         send_to_node(&context.so, msg.0, &msg.1).await;
@@ -705,7 +703,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
 
     let mut targets: DedupVecDeque<(TorrentId, SocketAddr)> = Default::default();
     let mut find_worst_bucket = false;
-    let mut next_request = Instant::now();
+    let mut next_request = Instant::now() + Duration::from_secs(15);
     let timer = tokio::time::sleep_until(next_request.into());
     tokio::pin!(timer);
 
@@ -843,14 +841,13 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
             drop(node);
             drop(bucket);
             let future = dht_query_apply_txid(
-                &mut bm_locked,
+                bm_locked,
                 &context.bm,
                 &mut msg,
                 node_thin.saddr,
                 &ngen.now,
                 Some(node_thin.id),
             );
-            drop(bm_locked);
             event!(
                 Level::INFO,
                 file = file!(),
@@ -929,16 +926,15 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
             if rate_limit_check_and_incr(&mut recent_peers_queried, saddr, &nenv) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 nenv.gen.now = Instant::now();
-                let mut bm_locked = context.bm.borrow_mut();
+                let bm_locked = context.bm.borrow_mut();
                 dht_query_apply_txid(
-                    &mut bm_locked,
+                    bm_locked,
                     &context.bm,
                     &mut msg,
                     saddr,
                     &ngen.now,
                     Some(tid),
                 );
-                drop(bm_locked);
                 send_to_node(&context.so, saddr, &msg).await;
             }
             event!(

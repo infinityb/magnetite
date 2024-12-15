@@ -166,16 +166,15 @@ pub fn start_search(
                     }),
                 };
 
-                let mut bm_locked = context.bm.borrow_mut();
+                let bm_locked = context.bm.borrow_mut();
                 let future = dht_query_apply_txid(
-                    &mut bm_locked,
+                    bm_locked,
                     &context.bm,
                     &mut msg,
                     wn.saddr,
                     &now,
                     Some(wn.id),
                 );
-                drop(bm_locked);
                 inflight.push(future);
                 send_to_node(&context.so, wn.saddr, &msg).await?;
             }
