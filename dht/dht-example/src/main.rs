@@ -92,8 +92,6 @@ fn handle_query_ping(bm: &BucketManager, message: &DhtMessage) -> DhtMessage {
     }
 }
 
-
-
 fn handle_query_find_node(
     bm: &BucketManager,
     message: &DhtMessage,
@@ -687,6 +685,7 @@ async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
 }
 
 async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
+    bootstrap(context.clone()).await?;
     let mut rng = rand::rngs::StdRng::from_entropy();
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
 
