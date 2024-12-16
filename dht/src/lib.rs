@@ -1489,6 +1489,7 @@ impl BucketManager2 {
         from: SocketAddr,
         env: &GeneralEnvironment,
     ) -> bool {
+        event!(Level::INFO, tx=?message.transaction, "handle-incoming-packet");
         if message.transaction.len() != 8 {
             return false;
         }
