@@ -254,7 +254,7 @@ fn dht_query_apply_txid(
     task::spawn_local(async move {
         let bm = bm_tmp;
 
-        tokio::time::sleep(Duration::new(20, 0)).await;
+        tokio::time::sleep(Duration::new(3, 0)).await;
         let mut bm_locked = bm.borrow_mut();
         let genv = GeneralEnvironment {
             now: Instant::now(),
