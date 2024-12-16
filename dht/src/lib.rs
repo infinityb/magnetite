@@ -1489,10 +1489,16 @@ impl BucketManager2 {
         from: SocketAddr,
         env: &GeneralEnvironment,
     ) -> bool {
-        event!(Level::INFO, tx=?message.transaction, "handle-incoming-packet");
+
         if message.transaction.len() != 8 {
             return false;
         }
+
+        let mut buf = [0; 8];
+        buf.copy_from_slice(&message.transaction);
+        let txid = u64::from_be_bytes(buf);
+
+        event!(Level::INFO, tx=txid, txs=?self.transactions, "handle-incoming-packet");
 
         let resp;
         if let wire::DhtMessageData::Response(ref resp_tmp) = message.data {
