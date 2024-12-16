@@ -763,7 +763,8 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
         let bucket;
         let mut want_nodes = false;
 
-        let mut bm_locked = context.bm.borrow_mut();
+        let bm_locked = context.bm.borrow();
+        eprintln!("{:#?}", *bm_locked);
         if find_worst_bucket {
             find_worst_bucket = false;
             want_nodes = false;
