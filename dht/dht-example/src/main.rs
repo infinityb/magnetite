@@ -630,7 +630,7 @@ fn rate_limit_check_and_incr(
     }
 }
 
-async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
+    async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
     // FIXME: duplicate state between maintenance and bootstrap:
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
 
@@ -648,7 +648,6 @@ async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
         want: SmallVec::new(),
     });
     let mut addresses = Vec::new();
-    addresses.extend(net::lookup_host("1.20.172.236:6881").await?);
     addresses.extend(net::lookup_host("router.bittorrent.com:6881").await?);
     addresses.extend(net::lookup_host("dht.transmissionbt.com:6881").await?);
 
@@ -861,7 +860,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
                 addr: saddr,
             };
             if rate_limit_check_and_incr(&mut recent_peers_queried, saddr, &nenv) {
-                tokio::time::sleep(Duration::from_millis(10000)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 nenv.gen.now = Instant::now();
                 let bm_locked = context.bm.borrow_mut();
                 dht_query_apply_txid(

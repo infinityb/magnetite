@@ -1222,13 +1222,9 @@ impl BucketManager2 {
     }
 
     pub fn node_seen(&mut self, node_: &ThinNode, env: &RequestEnvironment) {
-        let node: &mut Node;
-        if let Some(v) = self.nodes.get_mut(&node_.id) {
-            node = v;
-        } else {
-            return;
-        }
-
+        let node = self.nodes.entry(node_.id).or_insert_with(|| {
+            Node::new(node_.id, node_.saddr, &env.gen)
+        });
         if env.is_reply {
             node.timeouts = 0;
             if let Some(ref mut v) = node.node_stats {
