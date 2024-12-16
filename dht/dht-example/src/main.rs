@@ -518,6 +518,8 @@ async fn response_engine(context: DhtContext) -> Result<(), failure::Error> {
         };
         let mut bm_locked = context.bm.borrow_mut();
         let is_reply = bm_locked.handle_incoming_packet(&decoded, addr, &genv);
+        event!(Level::INFO, is_reply=%is_reply, "rx-message");
+
         let env = RequestEnvironment {
             gen: genv,
             is_reply,
