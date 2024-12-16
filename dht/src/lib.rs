@@ -64,7 +64,7 @@ pub struct RecursionState {
 impl RecursionState {
     pub fn new(
         target: TorrentId,
-        bm: &BucketManager,
+        bm: &BucketManager2,
         env: &GeneralEnvironment,
         cached_nodes_max: usize,
     ) -> Option<RecursionState> {
@@ -73,25 +73,23 @@ impl RecursionState {
         let mut heap = BinaryHeap::with_capacity(cached_nodes_max);
 
         let mut found_one = false;
-        for b in &bm.buckets {
-            for n in &b.nodes {
-                found_one = true;
-                if !n.quality(env).is_good() {
-                    continue;
-                }
-
-                general_heap_entry_push_or_replace(
-                    &mut heap,
-                    cached_nodes_max,
-                    HeapEntry {
-                        dist_key: !(n.thin.id ^ target),
-                        value: ThinNode {
-                            id: n.thin.id,
-                            saddr: n.thin.saddr,
-                        },
-                    },
-                );
+        for (_, n) in &bm.nodes {
+            found_one = true;
+            if !n.quality(env).is_good() {
+                continue;
             }
+
+            general_heap_entry_push_or_replace(
+                &mut heap,
+                cached_nodes_max,
+                HeapEntry {
+                    dist_key: !(n.thin.id ^ target),
+                    value: ThinNode {
+                        id: n.thin.id,
+                        saddr: n.thin.saddr,
+                    },
+                },
+            );
         }
 
         if !found_one {
@@ -495,7 +493,7 @@ impl TransactionCompletion {
 }
 
 impl BucketManager {
-    pub fn new(self_peer_id: TorrentId) -> BucketManager {
+    pub fn new(self_peer_id: &TorrentId) -> BucketManager {
         let mut buckets = Vec::new();
         let now = Instant::now();
 
@@ -510,7 +508,7 @@ impl BucketManager {
 
         let mut rs = RandomState::new();
         BucketManager {
-            self_peer_id,
+            self_peer_id: *self_peer_id,
             buckets,
             recent_dead_hosts: (),
             host_remove_dups: HashMap::new(),
@@ -703,27 +701,6 @@ impl BucketManager {
         }
     }
 
-    pub fn clean_expired_transaction(&mut self, txid: u64, genv: &GeneralEnvironment) {
-        if let Some(tx) = self.transactions.remove(&txid) {
-            let target_node = tx.queried_thin_node();
-            let res = tx.completion_port.send(Box::new(TransactionCompletion {
-                queried_node: tx.saddr,
-                queried_peer_id: tx.queried_peer_id,
-                query: tx.query,
-                response: Err(()),
-            }));
-            if let Some(tn) = target_node {
-                if let Some(node) = self.find_node_mut_by_id(&tn.id) {
-                    node.timeouts += 1;
-                    node.next_allowed_ping = genv.now + Duration::from_secs(120);
-                }
-            }
-            if let Err(err) = res {
-                // these are fine - just means the message was fire-and-forget.
-                event!(Level::TRACE, "failed to send on completion port: {:?}", err);
-            }
-        }
-    }
 
     pub fn handle_incoming_packet(
         &mut self,
@@ -782,6 +759,29 @@ impl BucketManager {
             true
         } else {
             false
+        }
+    }
+
+
+    pub fn clean_expired_transaction(&mut self, txid: u64, genv: &GeneralEnvironment) {
+        if let Some(tx) = self.transactions.remove(&txid) {
+            let target_node = tx.queried_thin_node();
+            let res = tx.completion_port.send(Box::new(TransactionCompletion {
+                queried_node: tx.saddr,
+                queried_peer_id: tx.queried_peer_id,
+                query: tx.query,
+                response: Err(()),
+            }));
+            if let Some(tn) = target_node {
+                if let Some(node) = self.find_node_mut_by_id(&tn.id) {
+                    node.timeouts += 1;
+                    node.next_allowed_ping = genv.now + Duration::from_secs(120);
+                }
+            }
+            if let Err(err) = res {
+                // these are fine - just means the message was fire-and-forget.
+                event!(Level::TRACE, "failed to send on completion port: {:?}", err);
+            }
         }
     }
 
@@ -1119,12 +1119,23 @@ pub struct BucketInfo {
 #[derive(Debug)]
 pub struct BucketManager2 {
     pub self_peer_id: TorrentId,
+    pub bootstrap_hostnames: Vec<String>,
+
     pub buckets: BTreeMap<TorrentId, BucketInfo>,
+
     // for node in nodes: host_ip_to_node_bind[node.thin.id] == node.thing.addr
     // for (addr, id) in host_ip_to_node_bind: nodes[id].thin.addr == ip
     // drop packet if either constraint violated.
     pub host_ip_to_node_bind: HashMap<IpAddr, TorrentId>,
     pub nodes: BTreeMap<TorrentId, Node>,
+    // tracks inflight requests
+    pub transactions: BTreeMap<u64, Box<TransactionState>>,
+    pub tracker: Tracker,
+    pub get_peers_search: RandomState,
+    // clocks and hashers relating to validating response packets.
+    pub token_rs_next_incr: Instant,
+    pub token_rs_current: RandomState,
+    pub token_rs_previous: RandomState,
 }
 
 #[cfg(test)]
@@ -1185,11 +1196,12 @@ fn range_from_prefix(prefix: &TorrentIdPrefix) -> std::ops::RangeInclusive<Torre
 }
 
 impl BucketManager2 {
-    fn new(tid: &TorrentId) -> BucketManager2 {
+    pub fn new(tid: &TorrentId) -> BucketManager2 {
         let mut buckets = BTreeMap::new();
+        let now = Instant::now();
         buckets.insert(TorrentId::zero(), BucketInfo {
             prefix: TorrentIdPrefix::zero(),
-            last_touched_time: Instant::now() - Duration::from_secs(900),
+            last_touched_time: now - Duration::from_secs(900),
         });
 
         BucketManager2 {
@@ -1197,7 +1209,41 @@ impl BucketManager2 {
             buckets,
             host_ip_to_node_bind: HashMap::new(),
             nodes: BTreeMap::new(),
+
+            transactions: BTreeMap::new(),
+            tracker: Tracker::new(),
+            bootstrap_hostnames: Vec::new(),
+
+            token_rs_next_incr: now + Duration::new(300, 0),
+            token_rs_current: RandomState::new(),
+            token_rs_previous: RandomState::new(),
+            get_peers_search: RandomState::new(),
         }
+    }
+
+    pub fn node_seen(&mut self, node_: &ThinNode, env: &RequestEnvironment) {
+        let node: &mut Node;
+        if let Some(v) = self.nodes.get_mut(&node_.id) {
+            node = v;
+        } else {
+            return;
+        }
+
+        if env.is_reply {
+            node.timeouts = 0;
+            if let Some(ref mut v) = node.node_stats {
+                v.last_message_time = env.gen.now;
+            }
+        }
+
+        let bucket_prefix = self.find_bucket_prefix(&node_.id);
+        if let Some(v) = self.buckets.get_mut(&bucket_prefix.base) {
+            v.last_touched_time = env.gen.now;
+        }
+    }
+
+    fn find_node_mut_by_id<'a>(&'a mut self, id: &TorrentId) -> Option<&'a mut Node> {
+        self.nodes.get_mut(id)
     }
 
     fn find_bucket_prefix(&self, id: &TorrentId) -> TorrentIdPrefix {
@@ -1227,7 +1273,7 @@ impl BucketManager2 {
         Ok(())
     }
 
-    fn adding_to_bucket_creates_split(&self, id: &TorrentId, genv: &GeneralEnvironment) -> bool {
+    pub fn adding_to_bucket_creates_split(&self, id: &TorrentId, genv: &GeneralEnvironment) -> bool {
         let prefix = self.find_bucket_prefix(id);
         let mut found_good_nodes = 0;
         for (k, v) in self.nodes.range(range_from_prefix(&prefix)) {
@@ -1237,6 +1283,20 @@ impl BucketManager2 {
             }
         }
         8 < found_good_nodes
+    }
+
+    pub fn nodes_for_bucket_containing_id<'a>(&'a self, id: &TorrentId) -> std::collections::btree_map::Range<'a, TorrentId, Node> {
+        let prefix = self.find_bucket_prefix(id);
+        self.nodes.range(range_from_prefix(&prefix))
+    }
+
+    pub fn find_oldest_bucket<'a>(&'a self) -> &'a BucketInfo {
+        assert!(self.buckets.len() > 0);
+        let (_, b) = self.buckets.iter()
+            .min_by_key(|(_, b)| b.last_touched_time)
+            .expect("must have at least one bucket");
+
+        b
     }
 
     pub fn find_mut_oldest_bucket<'a>(&'a mut self) -> &'a mut BucketInfo {
@@ -1280,6 +1340,211 @@ impl BucketManager2 {
 
     pub fn format_buckets<'a>(&'a self) -> BucketManager2Formatter<'a> {
         BucketManager2Formatter { parent: &self }
+    }
+
+    pub fn find_close_nodes(
+        &self,
+        target: &TorrentId,
+        limit: usize,
+        env: &GeneralEnvironment,
+    ) -> Vec<&Node> {
+        type HeapEntry<'a> = TorrentIdHeapEntry<&'a Node>;
+
+        let mut heap = BinaryHeap::with_capacity(limit);
+
+        let mut inspected = 0;
+        for (_, n) in self.nodes.range(target..) {
+            if !n.quality(env).is_good() {
+                continue;
+            }
+            if limit < inspected {
+                break;
+            }
+            inspected += 1;
+            general_heap_entry_push_or_replace(
+                &mut heap,
+                limit,
+                HeapEntry {
+                    // max-heap so get the reversed value of the bitwise xor
+                    dist_key: !(n.thin.id ^ *target),
+                    value: n,
+                },
+            );
+        }
+        for (_, n) in self.nodes.range(..target).rev() {
+            if !n.quality(env).is_good() {
+                continue;
+            }
+            if limit < inspected {
+                break;
+            }
+            inspected += 1;
+            general_heap_entry_push_or_replace(
+                &mut heap,
+                limit,
+                HeapEntry {
+                    // max-heap so get the reversed value of the bitwise xor
+                    dist_key: !(n.thin.id ^ *target),
+                    value: n,
+                },
+            );
+        }
+
+
+        let mut out = Vec::with_capacity(heap.len());
+        for entry in heap.drain() {
+            out.push(entry.value);
+        }
+
+        out
+    }
+
+    pub fn clean_expired_transaction(&mut self, txid: u64, genv: &GeneralEnvironment) {
+        if let Some(tx) = self.transactions.remove(&txid) {
+            let target_node = tx.queried_thin_node();
+            let res = tx.completion_port.send(Box::new(TransactionCompletion {
+                queried_node: tx.saddr,
+                queried_peer_id: tx.queried_peer_id,
+                query: tx.query,
+                response: Err(()),
+            }));
+            if let Some(tn) = target_node {
+                if let Some(node) = self.find_node_mut_by_id(&tn.id) {
+                    node.timeouts += 1;
+                    node.next_allowed_ping = genv.now + Duration::from_secs(120);
+                }
+            }
+            if let Err(err) = res {
+                // these are fine - just means the message was fire-and-forget.
+                event!(Level::TRACE, "failed to send on completion port: {:?}", err);
+            }
+        }
+    }
+
+    pub fn acquire_transaction_slot<'a>(&'a mut self) -> TransactionSlot<'a> {
+        let mut rng = thread_rng();
+        let txid;
+        loop {
+            let txid_candidate: u64 = rng.gen();
+            if self.transactions.get(&txid_candidate).is_none() {
+                txid = txid_candidate;
+                break;
+            }
+        }
+        match self.transactions.entry(txid) {
+            Entry::Vacant(v) => TransactionSlot { entry: v },
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn generate_token(&self, client_addr: &SocketAddr) -> Vec<u8> {
+        let ipv4_buf;
+        let ipv6_buf;
+        let ip_buf;
+
+        match client_addr {
+            SocketAddr::V4(v4) => {
+                ipv4_buf = v4.ip().octets();
+                ip_buf = &ipv4_buf[..];
+            }
+            SocketAddr::V6(v6) => {
+                ipv6_buf = v6.ip().octets();
+                ip_buf = &ipv6_buf[..];
+            }
+        }
+
+        let mut hasher = self.token_rs_current.build_hasher();
+        hasher.write(&ip_buf[..]);
+        hasher.finish().to_be_bytes().to_vec()
+    }
+
+    pub fn check_token(&self, token: &[u8], client_addr: &SocketAddr) -> bool {
+        let ipv4_buf;
+        let ipv6_buf;
+        let ip_buf;
+
+        match client_addr {
+            SocketAddr::V4(v4) => {
+                ipv4_buf = v4.ip().octets();
+                ip_buf = &ipv4_buf[..];
+            }
+            SocketAddr::V6(v6) => {
+                ipv6_buf = v6.ip().octets();
+                ip_buf = &ipv6_buf[..];
+            }
+        }
+
+        let mut hasher = self.token_rs_current.build_hasher();
+        hasher.write(&ip_buf[..]);
+        let token_candidate = hasher.finish().to_be_bytes();
+        if token == &token_candidate[..] {
+            return true;
+        }
+
+        let mut hasher = self.token_rs_previous.build_hasher();
+        hasher.write(&ip_buf[..]);
+        let token_candidate = hasher.finish().to_be_bytes();
+        token == &token_candidate[..]
+    }
+
+    pub fn handle_incoming_packet(
+        &mut self,
+        message: &wire::DhtMessage,
+        from: SocketAddr,
+        env: &GeneralEnvironment,
+    ) -> bool {
+        if message.transaction.len() != 8 {
+            return false;
+        }
+
+        let resp;
+        if let wire::DhtMessageData::Response(ref resp_tmp) = message.data {
+            resp = resp_tmp;
+        } else {
+            return false;
+        }
+
+        let mut buf = [0; 8];
+        buf.copy_from_slice(&message.transaction);
+        let txid = u64::from_be_bytes(buf);
+
+        if let Some(tx) = self.transactions.remove(&txid) {
+            if from != tx.saddr {
+                event!(Level::INFO,
+                    kind="bad-peer-invalid-source",
+                    from=?from, from_expected=?tx.saddr,
+                    "TX-{:016x} peer invalid: bad response source",
+                    txid,
+                );
+            }
+            if let Some(peer_id) = tx.queried_peer_id {
+                if resp.data.id != peer_id {
+                    event!(Level::INFO,
+                        kind="bad-peer-invalid-id",
+                        from=?from,
+                        peer_id=%resp.data.id.hex(),
+                        peer_id_expected=%peer_id.hex(),
+                        "TX-{:016x} peer invalid: bad response peer-id",
+                        txid,
+                    );
+                }
+            }
+            let res = tx.completion_port.send(Box::new(TransactionCompletion {
+                queried_node: tx.saddr,
+                queried_peer_id: Some(resp.data.id),
+                query: tx.query,
+                response: Ok(resp.clone()),
+            }));
+
+            if let Err(err) = res {
+                // these are fine - just means the message was fire-and-forget.
+                event!(Level::TRACE, "failed to send on completion port: {:?}", err);
+            }
+
+            true
+        } else {
+            false
+        }
     }
 }
 

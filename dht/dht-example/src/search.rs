@@ -80,10 +80,8 @@ pub fn start_search(
     }
 
     let self_peer_id = bm_locked.self_peer_id;
-    for b in &bm_locked.buckets {
-        for n in &b.nodes {
-            rs.add_candidate(n.thin);
-        }
+    for n in bm_locked.find_close_nodes(&target, recursion_node_count, &nenv).iter() {
+        rs.add_candidate(n.thin);
     }
     drop(bm_locked);
 
