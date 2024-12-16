@@ -251,17 +251,17 @@ fn dht_query_apply_txid(
     drop(bm);
 
     let bm_tmp = Rc::clone(&bma);
-    // task::spawn_local(async move {
-    //     let bm = bm_tmp;
+    task::spawn_local(async move {
+        let bm = bm_tmp;
 
-    //     tokio::time::sleep(Duration::new(3, 0)).await;
-    //     let mut bm_locked = bm.borrow_mut();
-    //     let genv = GeneralEnvironment {
-    //         now: Instant::now(),
-    //     };
-    //     bm_locked.clean_expired_transaction(txid, &genv);
-    //     drop(bm_locked);
-    // });
+        tokio::time::sleep(Duration::new(3, 0)).await;
+        let mut bm_locked = bm.borrow_mut();
+        let genv = GeneralEnvironment {
+            now: Instant::now(),
+        };
+        bm_locked.clean_expired_transaction(txid, &genv);
+        drop(bm_locked);
+    });
 
     future
 }
@@ -671,15 +671,14 @@ fn rate_limit_check_and_incr(
         let bm_locked = context.bm.borrow_mut();
         if rate_limit_check_and_incr(&mut recent_peers_queried, addr, &nenv) {
             let mut node_msg = msg.clone();
-            dht_query_apply_txid(
+            let _ = dht_query_apply_txid(
                 bm_locked,
                 &context.bm,
                 &mut node_msg,
                 addr,
                 &nenv.gen.now,
                 None,
-            ).await?;
-
+            );
             to_send_msgs.push((addr, node_msg));
         }
     }
