@@ -254,7 +254,7 @@ fn dht_query_apply_txid(
     task::spawn_local(async move {
         let bm = bm_tmp;
 
-        tokio::time::sleep(Duration::new(3, 0)).await;
+        tokio::time::sleep(Duration::new(20, 0)).await;
         let mut bm_locked = bm.borrow_mut();
         let genv = GeneralEnvironment {
             now: Instant::now(),
@@ -585,6 +585,11 @@ async fn response_engine(context: DhtContext) -> Result<(), failure::Error> {
                 },
                 &env,
             );
+            if is_reply {
+                if let Some(node) = bm_locked.nodes.get_mut(&pid) {
+                    node.apply_activity_receive_response(&env.gen);
+                }
+            }
         }
 
         drop(bm_locked);
