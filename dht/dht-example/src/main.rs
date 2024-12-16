@@ -251,17 +251,17 @@ fn dht_query_apply_txid(
     drop(bm);
 
     let bm_tmp = Rc::clone(&bma);
-    task::spawn_local(async move {
-        let bm = bm_tmp;
+    // task::spawn_local(async move {
+    //     let bm = bm_tmp;
 
-        tokio::time::sleep(Duration::new(3, 0)).await;
-        let mut bm_locked = bm.borrow_mut();
-        let genv = GeneralEnvironment {
-            now: Instant::now(),
-        };
-        bm_locked.clean_expired_transaction(txid, &genv);
-        drop(bm_locked);
-    });
+    //     tokio::time::sleep(Duration::new(3, 0)).await;
+    //     let mut bm_locked = bm.borrow_mut();
+    //     let genv = GeneralEnvironment {
+    //         now: Instant::now(),
+    //     };
+    //     bm_locked.clean_expired_transaction(txid, &genv);
+    //     drop(bm_locked);
+    // });
 
     future
 }
