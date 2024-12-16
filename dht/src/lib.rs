@@ -1304,6 +1304,32 @@ impl BucketManager2 {
         b
     }
 
+    pub fn find_worst_bucket<'a>(&'a self, genv: &GeneralEnvironment) -> &'a BucketInfo {
+        let mut lowest_node_bucket_node_score = usize::max_value();
+        let mut lowest_node_bucket = None;
+
+        for (bucket_key, bucket_info) in &self.buckets {
+            let mut node_count = 0;
+            let mut score = 0;
+            for (_, node) in self.nodes.range(range_from_prefix(&bucket_info.prefix)) {
+                node_count += 1;
+                score += match node.quality(genv) {
+                    NodeQuality::Good => 4,
+                    NodeQuality::Questionable => 2,
+                    NodeQuality::Bad => 1,
+                }
+            }
+
+            if score < lowest_node_bucket_node_score && node_count != 0 {
+                lowest_node_bucket_node_score = score;
+                lowest_node_bucket = Some(*bucket_key);
+            }
+        }
+
+        let best_key = lowest_node_bucket.unwrap();
+        self.buckets.get(&best_key).unwrap()
+    }
+
     pub fn find_mut_worst_bucket<'a>(&'a mut self, genv: &GeneralEnvironment) -> &'a mut BucketInfo {
         let mut lowest_node_bucket_node_score = usize::max_value();
         let mut lowest_node_bucket = None;
@@ -1547,6 +1573,30 @@ impl BucketManager2 {
             true
         } else {
             false
+        }
+    }
+
+    pub fn find_mut_node_for_maintenance_ping<'a>(&'a mut self, env: &GeneralEnvironment) -> Option<&'a mut Node> {
+        // borrowck....
+        let has_first_branch_node = self.nodes.iter()
+            .filter(|(_, n)| n.next_allowed_ping < env.now)
+            .filter(|(_, n)| n.sent_pings == 0)
+            .filter(|(_, n)| n.node_stats.is_none())
+            .next()
+            .is_some();
+
+        if has_first_branch_node {
+            self.nodes.iter_mut()
+                .filter(|(_, n)| n.next_allowed_ping < env.now)
+                .filter(|(_, n)| n.sent_pings == 0)
+                .filter(|(_, n)| n.node_stats.is_none())
+                .next()
+                .map(|(_, n)| n)
+        } else {
+            self.nodes.iter_mut()
+                .filter(|(_, n)| n.next_allowed_ping < env.now)
+                .min_by_key(|(_, n)| n.node_stats.as_ref().map(|s| s.last_message_time))
+                .map(|(_, n)| n)
         }
     }
 }

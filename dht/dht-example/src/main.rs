@@ -254,7 +254,7 @@ fn dht_query_apply_txid(
     task::spawn_local(async move {
         let bm = bm_tmp;
 
-        tokio::time::sleep(Duration::new(3, 0)).await;
+        tokio::time::sleep(Duration::new(13, 0)).await;
         let mut bm_locked = bm.borrow_mut();
         let genv = GeneralEnvironment {
             now: Instant::now(),
@@ -765,86 +765,86 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
 
         ngen.now = Instant::now();
 
-        let bucket;
+        let mut bucket_prefix;
         let mut want_nodes = false;
-
-        let bm_locked = context.bm.borrow();
+        let mut bm_locked = context.bm.borrow_mut();
         eprintln!("{:#?}", *bm_locked);
         if find_worst_bucket {
             find_worst_bucket = false;
             want_nodes = false;
-            bucket = bm_locked.find_oldest_bucket();
+            let bucket = bm_locked.find_worst_bucket(&ngen);
+            bucket_prefix = bucket.prefix;
             eprintln!(
                 "worst_bucket: {}",
                 BucketInfoFormatter {
                     bb: bucket,
-                    nodes: bm_locked.nodes_for_bucket_containing_id(&bucket.prefix.base),
+                    nodes: bm_locked.nodes_for_bucket_containing_id(&bucket_prefix.base),
                     genv: &ngen,
                 }
             );
             // event!(Level::INFO, worst_bucket=, "maintenance-find-bucket");
         } else {
             find_worst_bucket = true;
-            bucket = bm_locked.find_oldest_bucket();
+            let bucket = bm_locked.find_oldest_bucket();
+            bucket_prefix = bucket.prefix;
             eprintln!(
                 "oldest_bucket: {}",
                 BucketInfoFormatter {
                     bb: bucket,
-                    nodes: bm_locked.nodes_for_bucket_containing_id(&bucket.prefix.base),
+                    nodes: bm_locked.nodes_for_bucket_containing_id(&bucket_prefix.base),
                     genv: &ngen,
                 }
             );
             // event!(Level::INFO, oldest_bucket=BucketFormatter { bb: bucket }, "maintenance-find-bucket");
         }
-        want_nodes |= !bm_locked.adding_to_bucket_creates_split(&bucket.prefix.base, &ngen);
-        want_nodes |= bucket.prefix.contains(&self_peer_id);
-        // let search_target = bucket.prefix.rand_within(&mut rng);
-        // if let Some(node) = bucket.find_mut_node_for_maintenance_ping(&ngen) {
-        //     let mut msg = if want_nodes {
-        //         Into::into(DhtMessageQueryFindNode {
-        //             id: self_peer_id,
-        //             target: target_id,
-        //             want: SmallVec::new(),
-        //         })
-        //     } else {
-        //         Into::into(DhtMessageQueryPing { id: self_peer_id })
-        //     };
-        //     node.apply_activity_receive_request(&ngen);
-        //     let node_thin = node.thin;
-        //     drop(node);
-        //     drop(bucket);
-        //     let future = dht_query_apply_txid(
-        //         bm_locked,
-        //         &context.bm,
-        //         &mut msg,
-        //         node_thin.saddr,
-        //         &ngen.now,
-        //         Some(node_thin.id),
-        //     );
-        //     event!(
-        //         Level::INFO,
-        //         file = file!(),
-        //         line = line!(),
-        //         "maintenance-blocker enter"
-        //     );
-        //     send_to_node(&context.so, node_thin.saddr, &msg).await;
-        //     event!(
-        //         Level::INFO,
-        //         file = file!(),
-        //         line = line!(),
-        //         "maintenance-blocker exit"
-        //     );
-        //     let completed = future.await?;
-        //     if let Ok(mr) = completed.response {
-        //         for node in &mr.data.nodes {
-        //             let saddr = SocketAddr::V4(node.1);
-        //             targets.push_back((node.0, saddr));
-        //         }
-        //     }
-        // } else {
-        //     drop(bucket);
-        //     drop(bm_locked);
-        // }
+        want_nodes |= !bm_locked.adding_to_bucket_creates_split(&bucket_prefix.base, &ngen);
+        want_nodes |= bucket_prefix.contains(&self_peer_id);
+        let search_target = bucket_prefix.rand_within(&mut rng);
+
+        if let Some(node) = bm_locked.find_mut_node_for_maintenance_ping(&ngen) {
+            let mut msg = if want_nodes {
+                Into::into(DhtMessageQueryFindNode {
+                    id: self_peer_id,
+                    target: target_id,
+                    want: SmallVec::new(),
+                })
+            } else {
+                Into::into(DhtMessageQueryPing { id: self_peer_id })
+            };
+            node.apply_activity_receive_request(&ngen);
+            let node_thin = node.thin;
+            drop(node);
+            let future = dht_query_apply_txid(
+                bm_locked,
+                &context.bm,
+                &mut msg,
+                node_thin.saddr,
+                &ngen.now,
+                Some(node_thin.id),
+            );
+            event!(
+                Level::INFO,
+                file = file!(),
+                line = line!(),
+                "maintenance-blocker enter"
+            );
+            send_to_node(&context.so, node_thin.saddr, &msg).await;
+            event!(
+                Level::INFO,
+                file = file!(),
+                line = line!(),
+                "maintenance-blocker exit"
+            );
+            let completed = future.await?;
+            if let Ok(mr) = completed.response {
+                for node in &mr.data.nodes {
+                    let saddr = SocketAddr::V4(node.1);
+                    targets.push_back((node.0, saddr));
+                }
+            }
+        } else {
+            drop(bm_locked);
+        }
 
         while let Some((tid, saddr)) = targets.pop_front() {
             let mut msg = Into::into(DhtMessageQueryFindNode {
