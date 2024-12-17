@@ -285,6 +285,7 @@ impl Node {
         NodeDebug { node: self }
     }
 
+    #[deprecated]  // use self.last_touch_time
     pub fn get_last_message_age(&self, env: &GeneralEnvironment) -> Option<Duration> {
         if let Some(ref v) = self.node_stats {
             return Some(env.now - v.last_message_time);
@@ -439,7 +440,7 @@ impl<'a> fmt::Display for BucketFormatter<'a> {
                 quality,
                 node.thin.id.hex(),
                 node.thin.saddr,
-                node.get_last_message_age(self.genv),
+                self.genv.now - node.last_touch_time,
                 node.timeouts,
             )?;
         }
@@ -1659,12 +1660,12 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 false => "🕳️",
             };
 
-            write!(f, "        {} {} {:21} {} age={:?} timeouts={}\n",
+            write!(f, "        {}{} {} {:21} age={:?} timeouts={}\n",
                 quality,
+                in_bucket,
                 node.thin.id.hex(),
                 node.thin.saddr,
-                in_bucket,
-                node.get_last_message_age(self.genv),
+                self.genv.now - node.last_touch_time,
                 node.timeouts,
             )?;
         }
