@@ -949,7 +949,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             let mut msg = if want_nodes {
                 Into::into(DhtMessageQueryFindNode {
                     id: self_peer_id,
-                    target: target_id,
+                    target: search_target,
                     want: SmallVec::new(),
                 })
             } else {
@@ -993,7 +993,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
         while let Some((tid, saddr)) = targets.pop_front() {
             let mut msg = Into::into(DhtMessageQueryFindNode {
                 id: self_peer_id,
-                target: target_id,
+                target: search_target,
                 want: Default::default(),
             });
 
@@ -1013,7 +1013,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 nenv.gen.now = Instant::now();
                 let bm_locked = context.bm.borrow_mut();
-                dht_query_apply_txid(
+                let _ = dht_query_apply_txid(
                     bm_locked,
                     &context.bm,
                     &mut msg,
