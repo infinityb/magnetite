@@ -193,6 +193,11 @@ pub struct Node {
     // * inserted into the pool
     // * responds to a query
     pub last_touch_time: Instant,
+    // used for expiration when not in bucket, bumped to now when:
+    // * inserted into the pool
+    // * responds to a query
+    // * we see a request from it
+    pub last_touch_time_weak: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +283,7 @@ impl Node {
             sent_pings: 0,
             next_allowed_ping: env.now,
             last_touch_time: env.now,
+            last_touch_time_weak: env.now,
         }
     }
 
@@ -311,9 +317,8 @@ impl Node {
     }
 
     pub fn apply_activity_receive_request(&mut self, env: &GeneralEnvironment) {
-        self.next_allowed_ping = env.now + Duration::from_secs(120);
+        self.last_touch_time_weak = env.now;
         self.sent_pings = self.sent_pings.saturating_add(1);
-
         if let Some(ref mut rs) = self.node_stats {
             rs.last_message_time = env.now;
         } else {
@@ -326,6 +331,9 @@ impl Node {
     }
 
     pub fn apply_activity_receive_response(&mut self, env: &GeneralEnvironment) {
+        self.last_touch_time = env.now;
+        self.last_touch_time_weak = env.now;
+        self.next_allowed_ping = env.now + Duration::from_secs(120);
         self.timeouts = 0;
         if let Some(ref mut rs) = self.node_stats {
             rs.last_message_time = env.now;
@@ -916,6 +924,7 @@ impl Bucket {
             sent_pings: 0,
             next_allowed_ping: env.gen.now,
             last_touch_time: env.gen.now,
+            last_touch_time_weak: env.gen.now,
         };
         if env.is_reply {
             nn.apply_activity_receive_response(&env.gen);
@@ -1030,6 +1039,7 @@ impl Bucket {
                 sent_pings: 0,
                 next_allowed_ping: env.gen.now,
                 last_touch_time: env.gen.now,
+                last_touch_time_weak: env.gen.now,
             };
             if env.is_reply {
                 nn.apply_activity_receive_response(&env.gen);
@@ -1659,7 +1669,6 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 true => "🪣",
                 false => "🕳️",
             };
-
             write!(f, "        {}{} {} {:21} age={:?} timeouts={}\n",
                 quality,
                 in_bucket,
