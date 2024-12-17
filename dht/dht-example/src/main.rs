@@ -272,24 +272,6 @@ pub struct DhtContext {
     so: Rc<UdpSocket>,
 }
 
-// fn should_bootstrap(bm: &BucketManager) -> bool {
-//     for bucket in &bm.buckets {
-//         if bucket.nodes.len() < 8 {
-//             return true;
-//         }
-//     }
-//     false
-// }
-
-// fn should_bootstrap_hardest(bm: &BucketManager) -> bool {
-//     for bucket in &bm.buckets {
-//         if bucket.nodes.len() != 0 {
-//             return false;
-//         }
-//     }
-//     true
-// }
-
 async fn send_to_node(so: &UdpSocket, to: SocketAddr, msg: &DhtMessage) -> io::Result<usize> {
     let resp_bytes = bencode::to_bytes(&msg).unwrap();
     event!(Level::TRACE, what=?msg, what_bin=?BinStr(&resp_bytes), to=?to, "sending");
@@ -413,7 +395,7 @@ async fn main() -> Result<(), failure::Error> {
                 bm: Rc::clone(&bm),
                 so: Rc::clone(&sock),
             };
-            starter_tasks.push(task::spawn_local(file_saver(context)));
+            starter_tasks.push(task::spawn_local(file_sync(context)));
 
             let context = DhtContext {
                 bm: Rc::clone(&bm),
@@ -448,7 +430,112 @@ fn print_test_logging() {
     event!(Level::ERROR, "logger initialized - error check");
 }
 
-async fn file_saver(context: DhtContext) -> anyhow::Result<()> {
+async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
+    let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
+    let mut rng = rand::rngs::StdRng::from_entropy();
+    let bm_locked = context.bm.borrow_mut();
+    let self_peer_id = bm_locked.self_peer_id;
+    drop(bm_locked);
+
+    let mut target_id = self_peer_id;
+    // slightly randomized target
+    rng.fill_bytes(&mut target_id.as_mut_bytes()[12..]);
+
+    let mut nodes_to_ping_as_bootstrap = Vec::new();
+    if let Ok(mut ff) = File::options().read(true).open("dht-state.ben") {
+        let mut bytes = Vec::new();
+        ff.read_to_end(&mut bytes)?;
+        drop(ff);
+
+        let gen = GeneralEnvironment {
+            now: Instant::now() - Duration::from_secs(900),
+        };
+        let decoded: DhtNodeSave = bencode::from_bytes(&bytes[..])?;
+        let mut bm_locked = context.bm.borrow_mut();
+        for node in &decoded.nodes {
+            let nenv = RequestEnvironment {
+                gen,
+                is_reply: false,
+                addr: SocketAddr::V4(node.1),
+            };
+            let saddr = SocketAddr::V4(node.1);
+            bm_locked.node_seen(&ThinNode { id: node.0, saddr }, &nenv);
+        }
+        nodes_to_ping_as_bootstrap.extend(decoded.nodes.iter().map(|(x, y)| (*y, *x)));
+        drop(bm_locked);
+    } else {
+        let bm_locked = context.bm.borrow_mut();
+        let self_peer_id = bm_locked.self_peer_id;
+        drop(bm_locked);
+
+        let mut target_id = self_peer_id;
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        rng.fill_bytes(&mut target_id.as_mut_bytes()[12..]);
+
+        let msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
+            id: self_peer_id,
+            target: target_id,
+            want: SmallVec::new(),
+        });
+        let mut addresses = Vec::new();
+        addresses.extend(net::lookup_host("router.bittorrent.com:6881").await?);
+        addresses.extend(net::lookup_host("dht.transmissionbt.com:6881").await?);
+
+        let mut to_send_msgs = Vec::new();
+        let gen = GeneralEnvironment {
+            now: Instant::now() - Duration::from_secs(900),
+        };
+        for addr in addresses {
+            let nenv = RequestEnvironment {
+                gen,
+                is_reply: false,
+                addr,
+            };
+            let bm_locked = context.bm.borrow_mut();
+            if rate_limit_check_and_incr(&mut recent_peers_queried, addr, &nenv) {
+                let mut node_msg = msg.clone();
+                let _ = dht_query_apply_txid(
+                    bm_locked,
+                    &context.bm,
+                    &mut node_msg,
+                    addr,
+                    &nenv.gen.now,
+                    None,
+                );
+                to_send_msgs.push((addr, node_msg));
+            }
+        }
+
+        for msg in &to_send_msgs {
+            send_to_node(&context.so, msg.0, &msg.1).await;
+        }
+    }
+
+    let now = Instant::now();
+    let msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
+        id: self_peer_id,
+        target: target_id,
+        want: SmallVec::new(),
+    });
+    for (addr, node) in &nodes_to_ping_as_bootstrap {
+        let addr = SocketAddr::V4(*addr);
+        let mut node_msg = msg.clone();
+        let bm_locked = context.bm.borrow_mut();
+        let _ = dht_query_apply_txid(
+            bm_locked,
+            &context.bm,
+            &mut node_msg,
+            addr,
+            &now,
+            Some(*node),
+        );
+        if let Err(e) = send_to_node(&context.so, addr, &node_msg).await {
+            eprintln!("error sending {}", e);
+        } else {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     let mut now = Instant::now();
     let mut next_run = now + Duration::from_secs(60);
 
@@ -637,58 +724,6 @@ fn rate_limit_check_and_incr(
     }
 }
 
-async fn bootstrap(context: DhtContext) -> anyhow::Result<()> {
-    // FIXME: duplicate state between maintenance and bootstrap:
-    let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
-
-    let bm_locked = context.bm.borrow_mut();
-    let self_peer_id = bm_locked.self_peer_id;
-    drop(bm_locked);
-
-    let mut target_id = self_peer_id;
-    let mut rng = rand::rngs::StdRng::from_entropy();
-    rng.fill_bytes(&mut target_id.as_mut_bytes()[12..]);
-
-    let mut msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
-        id: self_peer_id,
-        target: target_id,
-        want: SmallVec::new(),
-    });
-    let mut addresses = Vec::new();
-    addresses.extend(net::lookup_host("router.bittorrent.com:6881").await?);
-    addresses.extend(net::lookup_host("dht.transmissionbt.com:6881").await?);
-
-    let mut to_send_msgs = Vec::new();
-    let gen = GeneralEnvironment {
-        now: Instant::now() - Duration::from_secs(900),
-    };
-    for addr in addresses {
-        let nenv = RequestEnvironment {
-            gen,
-            is_reply: false,
-            addr,
-        };
-        let bm_locked = context.bm.borrow_mut();
-        if rate_limit_check_and_incr(&mut recent_peers_queried, addr, &nenv) {
-            let mut node_msg = msg.clone();
-            let _ = dht_query_apply_txid(
-                bm_locked,
-                &context.bm,
-                &mut node_msg,
-                addr,
-                &nenv.gen.now,
-                None,
-            );
-            to_send_msgs.push((addr, node_msg));
-        }
-    }
-
-    for msg in &to_send_msgs {
-        send_to_node(&context.so, msg.0, &msg.1).await;
-    }
-    Ok(())
-}
-
 async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     use rand::seq::SliceRandom;
 
@@ -786,7 +821,6 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
 }
 
 async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
-    bootstrap(context.clone()).await?;
     let mut rng = rand::rngs::StdRng::from_entropy();
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
 
@@ -803,30 +837,6 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
     let mut next_request = Instant::now() + Duration::from_secs(15);
     let timer = tokio::time::sleep_until(next_request.into());
     tokio::pin!(timer);
-
-    if let Ok(mut ff) = File::options().read(true).open("dht-state.ben") {
-        let mut bytes = Vec::new();
-        ff.read_to_end(&mut bytes)?;
-        drop(ff);
-
-        let gen = GeneralEnvironment {
-            now: Instant::now() - Duration::from_secs(900),
-        };
-        let decoded: DhtNodeSave = bencode::from_bytes(&bytes[..])?;
-        let mut bm_locked = context.bm.borrow_mut();
-        for node in &decoded.nodes {
-            let nenv = RequestEnvironment {
-                gen,
-                is_reply: false,
-                addr: SocketAddr::V4(node.1),
-            };
-            let saddr = SocketAddr::V4(node.1);
-            bm_locked.node_seen(&ThinNode { id: node.0, saddr }, &nenv);
-        }
-        drop(bm_locked);
-    }
-
-    event!(Level::TRACE, target=?target_id, "start bootstrapper/maintenance");
 
     let mut bm_locked = context.bm.borrow_mut();
     let formatted = format!(
