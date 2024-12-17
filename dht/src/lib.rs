@@ -1662,19 +1662,19 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
             (self.genv.now - self.bb.last_touched_time).as_secs_f64(),
             node_count,
         )?;
+        let node_expiration = self.genv.now + Duration::new(2000, 0);
         for (_nid, node) in self.nodes.clone() {
             let quality = match node.quality(self.genv) {
                 NodeQuality::Good => "🔥",
                 NodeQuality::Questionable => "❓",
                 NodeQuality::Bad => "🧊",
             };
-            let in_bucket = match node.in_bucket {
-                true => "🪣",
-                false => "🕳️",
-            };
-            write!(f, "        {}{} {} {:21} age={:4.2}s timeouts={}\n",
+            let in_bucket = if node.in_bucket { "🪣" } else { "➖" };
+            let expiration = if node_expiration < node.last_touch_time { "🦠" } else { "➖" };
+            write!(f, "        {}{}{} {} {:21} age={:4.2}s timeouts={}\n",
                 quality,
                 in_bucket,
+                expiration,
                 node.thin.id.hex(),
                 node.thin.saddr,
                 (self.genv.now - node.last_touch_time).as_secs_f64(),
