@@ -1284,8 +1284,8 @@ impl BucketManager2 {
     pub fn adding_to_bucket_creates_split(&self, id: &TorrentId, genv: &GeneralEnvironment) -> bool {
         let prefix = self.find_bucket_prefix(id);
         let mut found_good_nodes = 0;
-        for (k, v) in self.nodes.range(range_from_prefix(&prefix)) {
-            assert!(prefix.contains(k));
+        for (k, v) in self.nodes.range(prefix.to_range()) {
+            assert!(prefix.contains(k), "{:?} not in {}", k, prefix);
             if v.quality(genv).is_good() {
                 found_good_nodes += 1;
             }
