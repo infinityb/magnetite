@@ -1638,6 +1638,12 @@ impl<'a> fmt::Display for BucketManager2Formatter<'a> {
         let genv = GeneralEnvironment {
             now: Instant::now(),
         };
+        write!(f, "buckets count={}, nodes={}, nodes_persisted={}\n",
+            self.parent.buckets.len(),
+            self.parent.nodes.len(),
+            self.parent.nodes.iter().filter(|(_, n)| n.in_bucket).map(|_| 1).sum::<i64>(),
+        )?;
+
         write!(f, "buckets count={}\n", self.parent.buckets.len())?;
         for bucket in self.parent.buckets.values() {
             write!(f, "{}", BucketInfoFormatter {
