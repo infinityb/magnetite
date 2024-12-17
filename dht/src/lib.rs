@@ -1659,11 +1659,16 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 NodeQuality::Questionable => "❓",
                 NodeQuality::Bad => "🧊",
             };
+            let in_bucket = match node.in_bucket {
+                true => "🪣",
+                false => "🕳️",
+            };
 
-            write!(f, "        {} {} {:21} age={:?} timeouts={}\n",
+            write!(f, "        {} {} {:21} {} age={:?} timeouts={}\n",
                 quality,
                 node.thin.id.hex(),
                 node.thin.saddr,
+                in_bucket,
                 node.get_last_message_age(self.genv),
                 node.timeouts,
             )?;
