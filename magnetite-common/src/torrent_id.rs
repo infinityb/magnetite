@@ -349,7 +349,13 @@ fn TorrentIdPrefix_mask() {
             base: TorrentId::zero(),
             prefix_len: 1,
         }.mask());
-    // panic!("{:?}", TorrentIdPrefix::zero().to_range());
+    let top_half = "8000000000000000000000000000000000000000".parse::<TorrentId>().unwrap();
+    assert_eq!(
+        TorrentIdPrefix {
+            base: top_half,
+            prefix_len: 1,
+        }.to_range(),
+        top_half..=TorrentId::max_value());
 }
 
 

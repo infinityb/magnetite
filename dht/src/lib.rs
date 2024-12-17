@@ -1202,11 +1202,6 @@ mod tests_BucketManager2 {
     }
 }
 
-fn range_from_prefix(prefix: &TorrentIdPrefix) -> std::ops::RangeInclusive<TorrentId> {
-    let max = prefix.base | (TorrentId::max_value() & !prefix.mask());
-    prefix.base..=max
-}
-
 impl BucketManager2 {
     pub fn new(tid: &TorrentId) -> BucketManager2 {
         let mut buckets = BTreeMap::new();
@@ -1295,7 +1290,7 @@ impl BucketManager2 {
 
     pub fn nodes_for_bucket_containing_id<'a>(&'a self, id: &TorrentId) -> std::collections::btree_map::Range<'a, TorrentId, Node> {
         let prefix = self.find_bucket_prefix(id);
-        self.nodes.range(range_from_prefix(&prefix))
+        self.nodes.range(prefix.to_range())
     }
 
     pub fn find_oldest_bucket<'a>(&'a self) -> &'a BucketInfo {
@@ -1323,7 +1318,7 @@ impl BucketManager2 {
         for (bucket_key, bucket_info) in &self.buckets {
             let mut node_count = 0;
             let mut score = 0;
-            for (_, node) in self.nodes.range(range_from_prefix(&bucket_info.prefix)) {
+            for (_, node) in self.nodes.range(bucket_info.prefix.to_range()) {
                 node_count += 1;
                 score += match node.quality(genv) {
                     NodeQuality::Good => 4,
@@ -1349,7 +1344,7 @@ impl BucketManager2 {
         for (bucket_key, bucket_info) in &self.buckets {
             let mut node_count = 0;
             let mut score = 0;
-            for (_, node) in self.nodes.range(range_from_prefix(&bucket_info.prefix)) {
+            for (_, node) in self.nodes.range(bucket_info.prefix.to_range()) {
                 node_count += 1;
                 score += match node.quality(genv) {
                     NodeQuality::Good => 4,
@@ -1636,7 +1631,7 @@ impl<'a> fmt::Display for BucketManager2Formatter<'a> {
         for bucket in self.parent.buckets.values() {
             write!(f, "{}", BucketInfoFormatter {
                 bb: bucket,
-                nodes: self.parent.nodes.range(range_from_prefix(&bucket.prefix)),
+                nodes: self.parent.nodes.range(bucket.prefix.to_range()),
                 genv: &genv,
             })?;
         }
