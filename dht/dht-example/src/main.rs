@@ -532,7 +532,7 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
         if let Err(e) = send_to_node(&context.so, addr, &node_msg).await {
             eprintln!("error sending {}", e);
         } else {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(800)).await;
         }
     }
 
