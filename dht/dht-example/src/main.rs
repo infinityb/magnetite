@@ -507,34 +507,44 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
         }
 
         for msg in &to_send_msgs {
-            send_to_node(&context.so, msg.0, &msg.1).await;
+            if let Err(e) = send_to_node(&context.so, msg.0, &msg.1).await {
+                event!(Level::WARN, "error sending {}", e);
+            }
         }
     }
 
-    let now = Instant::now();
     let msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
         id: self_peer_id,
         target: target_id,
         want: SmallVec::new(),
     });
+
+    let max_inflight = 64;
+    let mut running = futures::stream::FuturesUnordered::new();
     for (addr, node) in &nodes_to_ping_as_bootstrap {
+        use futures::prelude::stream::StreamExt;
+        while max_inflight <= running.len() {
+            running.next().await;
+        }
         let now = Instant::now();
         let addr = SocketAddr::V4(*addr);
         let mut node_msg = msg.clone();
         let bm_locked = context.bm.borrow_mut();
-        let _ = dht_query_apply_txid(
+        running.push(dht_query_apply_txid(
             bm_locked,
             &context.bm,
             &mut node_msg,
             addr,
             &now,
             Some(*node),
-        );
+        ));
         if let Err(e) = send_to_node(&context.so, addr, &node_msg).await {
-            eprintln!("error sending {}", e);
-        } else {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            event!(Level::WARN, "error sending {}", e);
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    while !running.is_empty() {
+        running.next().await;
     }
 
     let mut now = Instant::now();
@@ -561,10 +571,12 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
         let mut ff = File::options()
             .write(true)
             .create(true)
-            .open("dht-state.ben")?;
+            .open("dht-state.ben.tmp")?;
 
         ff.write_all(&bytes[..])?;
         drop(ff);
+
+        std::fs::rename("dht-state.ben.tmp", "dht-state.ben")?;
 
         let formatted = format!(
             "self-id: {}\n{}",
@@ -685,7 +697,9 @@ async fn response_engine(context: DhtContext) -> anyhow::Result<()> {
         drop(bm_locked);
 
         if let Some(ref resp) = response {
-            send_to_node(&context.so, addr, resp).await;
+            if let Err(e) = send_to_node(&context.so, addr, resp).await {
+                event!(Level::WARN, "error sending {}", e);
+            }
         }
     }
 }
@@ -725,7 +739,7 @@ fn rate_limit_check_and_incr(
     }
 }
 
-async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
+fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     use rand::seq::SliceRandom;
 
     let gen = GeneralEnvironment {
@@ -737,16 +751,10 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     while need_reprocessing {
         need_reprocessing = false;
         let BucketManager { ref mut buckets, ref mut nodes, self_peer_id, .. } = *bm_locked;
-        let mut initial_in_bucket = 0;
-        for (nid, node) in nodes.range(..) {
-            if node.in_bucket {
-                initial_in_bucket += 1;
-            }
-        };
-        for (base, bi) in buckets {
+        for (_base, bi) in buckets {
             let mut good_nodes_unassigned = 0;
             let mut good_nodes_assigned = 0;
-            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
                 if node.quality(&gen).is_good() {
                     if node.in_bucket {
                         good_nodes_assigned += 1;
@@ -756,67 +764,60 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
                 }
             }
             event!(
-                Level::INFO,
-                initial_in_bucket=initial_in_bucket,
+                Level::DEBUG,
                 good_nodes_assigned=good_nodes_assigned,
                 good_nodes_unassigned=good_nodes_unassigned,
                 "collected-initial-node-stats"
             );
 
-            let mut max_demotes = std::cmp::max(BUCKET_SIZE, good_nodes_unassigned);
-            let mut demote_count = 0;
-            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
-                // demote as many as we are promoting later.
-                if max_demotes > 0 && !node.quality(&gen).is_good() {
-                    if node.in_bucket {
-                        demote_count += 1;
-                        node.in_bucket = false;
-                        max_demotes -= 1;
-                    }
-                }
-            }
-            event!(Level::INFO, demote_count=demote_count, "demote");
+            assert!(good_nodes_assigned <= BUCKET_SIZE, "cannot have more than 8 good nodes in a bucket");
+            let remaining_good_slots = if good_nodes_assigned <= BUCKET_SIZE {
+                BUCKET_SIZE - good_nodes_assigned
+            } else {
+                0
+            };
 
-            let assigned_capped = std::cmp::min(good_nodes_assigned, BUCKET_SIZE);
-            let mut max_promotes = BUCKET_SIZE - assigned_capped;
-            let mut promote_count = 0;
-            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
-                if max_promotes > 0 && node.quality(&gen).is_good() {
-                    if !node.in_bucket {
-                        node.in_bucket = true;
-                        max_promotes -= 1;
-                        promote_count += 1;
-                    }
-                }
-            }
-            event!(Level::INFO, promote_count=promote_count, "promote");
-
+            let mut max_demotes = std::cmp::min(remaining_good_slots, std::cmp::max(BUCKET_SIZE, good_nodes_unassigned));
             let mut node_candidates = Vec::new();
-            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+                // demote as many as we are promoting later in the loop iteration.
+                if !node.quality(&gen).is_good() && node.in_bucket {
+                    node_candidates.push(node);
+                }
+            }
+            node_candidates.shuffle(&mut thread_rng());
+            node_candidates.truncate(max_demotes);
+            event!(Level::DEBUG, demote_count=node_candidates.len(), "demote");
+            for n in node_candidates.into_iter() {
+                n.in_bucket = false;
+                max_demotes -= 1;
+            }
+
+            let max_promotes = remaining_good_slots;
+            let mut node_candidates = Vec::new();
+            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
                 if !node.in_bucket && node.quality(&gen).is_good() {
                     node_candidates.push(node);
                 }
             }
-
             node_candidates.shuffle(&mut thread_rng());
-
+            node_candidates.truncate(max_promotes);
+            event!(Level::DEBUG, promote_count=node_candidates.len(), "promote");
             for n in node_candidates.into_iter() {
-                if BUCKET_SIZE <= good_nodes_assigned {
-                    break;
-                }
                 n.in_bucket = true;
-                good_nodes_assigned += 1;
             }
 
             let mut good_nodes_assigned = 0;
-            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
                 if node.quality(&gen).is_good() {
                     if node.in_bucket {
                         good_nodes_assigned += 1;
                     }
                 }
             }
-            event!(Level::INFO,
+            assert!(good_nodes_assigned <= BUCKET_SIZE, "cannot have more than 8 good nodes in a bucket");
+
+            event!(Level::DEBUG,
                 good_nodes_assigned=good_nodes_assigned,
                 is_bucket_saturated=BUCKET_SIZE <= good_nodes_assigned,
                 is_self_bucket=bi.prefix.contains(&self_peer_id),
@@ -826,7 +827,7 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
 
             if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&self_peer_id) {
                 // we will split so reset reprocessing flag.
-                event!(Level::INFO, "need_reprocessing");
+                event!(Level::DEBUG, "need_reprocessing");
                 need_reprocessing = true;
             }
         }
@@ -876,7 +877,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
     let timer = tokio::time::sleep_until(next_request.into());
     tokio::pin!(timer);
 
-    let mut bm_locked = context.bm.borrow_mut();
+    let bm_locked = context.bm.borrow_mut();
     let formatted = format!(
         "self-id: {}\n{}",
         bm_locked.self_peer_id.hex(),
@@ -887,7 +888,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
     println!("{}", formatted);
 
     loop {
-        reapply_bucketting(context.clone()).await?;
+        reapply_bucketting(context.clone())?;
         event!(
             Level::INFO,
             file = file!(),
@@ -957,7 +958,6 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             };
             node.apply_activity_receive_request(&ngen);
             let node_thin = node.thin;
-            drop(node);
             let future = dht_query_apply_txid(
                 bm_locked,
                 &context.bm,
@@ -972,7 +972,9 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 line = line!(),
                 "maintenance-blocker enter"
             );
-            send_to_node(&context.so, node_thin.saddr, &msg).await;
+            if let Err(e) = send_to_node(&context.so, node_thin.saddr, &msg).await {
+                event!(Level::WARN, "error sending {}", e);
+            }
             event!(
                 Level::INFO,
                 file = file!(),
@@ -1021,7 +1023,9 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                     &ngen.now,
                     Some(tid),
                 );
-                send_to_node(&context.so, saddr, &msg).await;
+                if let Err(e) = send_to_node(&context.so, saddr, &msg).await {
+                    event!(Level::WARN, "error sending {}", e);
+                }
             }
             event!(
                 Level::INFO,
