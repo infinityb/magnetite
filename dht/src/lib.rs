@@ -1638,13 +1638,10 @@ impl<'a> fmt::Display for BucketManager2Formatter<'a> {
         let genv = GeneralEnvironment {
             now: Instant::now(),
         };
-        write!(f, "buckets count={}, nodes={}, nodes_persisted={}\n",
+        write!(f, "buckets count={} nodes={}, nodes_persisted={}\n",
             self.parent.buckets.len(),
             self.parent.nodes.len(),
-            self.parent.nodes.iter().filter(|(_, n)| n.in_bucket).map(|_| 1).sum::<i64>(),
-        )?;
-
-        write!(f, "buckets count={}\n", self.parent.buckets.len())?;
+            self.parent.nodes.iter().filter(|(_, n)| n.in_bucket).map(|_| 1).sum::<i64>())?;
         for bucket in self.parent.buckets.values() {
             write!(f, "{}", BucketInfoFormatter {
                 bb: bucket,
@@ -1659,10 +1656,10 @@ impl<'a> fmt::Display for BucketManager2Formatter<'a> {
 impl<'a> fmt::Display for BucketInfoFormatter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let node_count: u32 = self.nodes.clone().map(|_| 1).sum();
-        write!(f, "    bucket {}/{} age={:?}    nodes={}\n",
+        write!(f, "    bucket {}/{} age={:4.2}s nodes={}\n",
             self.bb.prefix.base.hex(),
             self.bb.prefix.prefix_len,
-            self.genv.now - self.bb.last_touched_time,
+            (self.genv.now - self.bb.last_touched_time).as_secs_f64(),
             node_count,
         )?;
         for (_nid, node) in self.nodes.clone() {
@@ -1675,12 +1672,12 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 true => "🪣",
                 false => "🕳️",
             };
-            write!(f, "        {}{} {} {:21} age={:?} timeouts={}\n",
+            write!(f, "        {}{} {} {:21} age={:4.2}s timeouts={}\n",
                 quality,
                 in_bucket,
                 node.thin.id.hex(),
                 node.thin.saddr,
-                self.genv.now - node.last_touch_time,
+                (self.genv.now - node.last_touch_time).as_secs_f64(),
                 node.timeouts,
             )?;
         }
