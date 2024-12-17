@@ -32,7 +32,7 @@ use dht::wire::{
     DhtMessageResponseData, DhtNodeSave,
 };
 use dht::{
-    BucketInfoFormatter, BucketManager2, GeneralEnvironment, RequestEnvironment, ThinNode, TransactionCompletion, BUCKET_SIZE
+    BucketManager2, GeneralEnvironment, RequestEnvironment, ThinNode, TransactionCompletion, BUCKET_SIZE
 };
 use magnetite_common::TorrentId;
 use magnetite_tracker_lib::{AnnounceCtx, TrackerSearch};
@@ -716,13 +716,6 @@ fn rate_limit_check_and_incr(
         last_sent: nenv.gen.now,
         recent_sent_queries: 0,
     });
-
-    // event!(Level::INFO,
-    //     now=?nenv.gen.now.elapsed(),
-    //     last_sent=?v.last_sent.elapsed(),
-    //     recent_sent_queries=?v.recent_sent_queries,
-    //     should_rt=?(nenv.gen.now < (v.last_sent + Duration::from_secs(90))),
-    //     "checking-rate-limit");
     if (v.last_sent + Duration::from_secs(90)) < nenv.gen.now {
         v.recent_sent_queries = 1;
         v.last_sent = nenv.gen.now;
@@ -843,7 +836,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     while expiring_nodes {
         let mut remove_nid = None;
         for (nid, node) in bm_locked.nodes.range(last_nid..) {
-            if node.is_expired(&gen) {
+            if !node.in_bucket && node.is_expired(&gen) {
                 remove_nid = Some(*nid);
                 break;
             }
