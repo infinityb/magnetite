@@ -7,20 +7,18 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{App, Arg};
 use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;
-use futures::{Future, StreamExt};
-use rand::prelude::SliceRandom;
+use futures::StreamExt;
 use rand::thread_rng;
 use rand::{RngCore, SeedableRng};
 use smallvec::SmallVec;
 use tokio::net::{self, UdpSocket};
-use tokio::sync::{mpsc, Mutex};
-use tokio::{task, time};
+use tokio::sync::mpsc;
+use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
@@ -34,7 +32,7 @@ use dht::wire::{
     DhtMessageResponseData, DhtNodeSave,
 };
 use dht::{
-    BucketFormatter, BucketInfoFormatter, BucketManager2, GeneralEnvironment, RecursionState, RequestEnvironment, ThinNode, TransactionCompletion, BUCKET_SIZE
+    BucketInfoFormatter, BucketManager2, GeneralEnvironment, RequestEnvironment, ThinNode, TransactionCompletion, BUCKET_SIZE
 };
 use magnetite_common::TorrentId;
 use magnetite_tracker_lib::{AnnounceCtx, TrackerSearch};
@@ -45,7 +43,7 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 mod search;
-// mod debug_server;
+mod debug_server;
 
 struct DedupVecDeque<T> {
     queue: VecDeque<T>,
