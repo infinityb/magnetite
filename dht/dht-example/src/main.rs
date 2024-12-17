@@ -736,6 +736,12 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     while need_reprocessing {
         need_reprocessing = false;
         let BucketManager { ref mut buckets, ref mut nodes, self_peer_id, .. } = *bm_locked;
+        let mut initial_in_bucket = 0;
+        for (nid, node) in nodes.range(..) {
+            if node.in_bucket {
+                initial_in_bucket += 1;
+            }
+        };
         for (base, bi) in buckets {
             let mut good_nodes_unassigned = 0;
             let mut good_nodes_assigned = 0;
@@ -748,6 +754,13 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
                     }
                 }
             }
+            event!(
+                Level::INFO,
+                initial_in_bucket=initial_in_bucket,
+                good_nodes_assigned=good_nodes_assigned,
+                good_nodes_unassigned=good_nodes_unassigned,
+                "collected-initial-node-stats"
+            );
             for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
                 // demote as many as we are promoting later.
                 let mut assign_slots = good_nodes_unassigned;
