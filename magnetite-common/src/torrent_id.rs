@@ -335,6 +335,24 @@ fn foobar2() {
     assert_eq!(t1.longer().unwrap().base, "c000000000000000000000000000000000000000".parse().unwrap());
 }
 
+#[test]
+fn TorrentIdPrefix_mask() {
+    assert_eq!(
+        TorrentId::max_value(),
+        TorrentIdPrefix {
+            base: TorrentId::zero(),
+            prefix_len: 0,
+        }.mask());
+    assert_eq!(
+        "7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".parse::<TorrentId>().unwrap(),
+        TorrentIdPrefix {
+            base: TorrentId::zero(),
+            prefix_len: 1,
+        }.mask());
+}
+
+
+
 impl fmt::Display for TorrentIdPrefix {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}/{}", self.base.hex(), self.prefix_len)
@@ -413,14 +431,14 @@ impl TorrentIdPrefix {
 
     pub fn mask(&self) -> TorrentId {
         let mut buf = [0; 20];
-        let mut prefix_left = self.prefix_len;
-        let mut byte_off = 0;
-        while prefix_left > 8 {
-            prefix_left -= 8;
+        let mut set_ones_left = 160 - self.prefix_len;
+        let mut byte_off = 19;
+        while set_ones_left > 8 {
+            set_ones_left -= 8;
             buf[byte_off] = 0xFF;
-            byte_off += 1;
+            byte_off -= 1;
         }
-        buf[byte_off] = (((1_u32 << prefix_left) - 1) & 0xFF) as u8;
+        buf[byte_off] = (((1_u32 << set_ones_left) - 1) & 0xFF) as u8;
         TorrentId(buf)
     }
 }
