@@ -864,6 +864,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
 }
 
 async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
+    event!(Level::WARN, "maintenance-started");
     let mut rng = rand::rngs::StdRng::from_entropy();
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
 
