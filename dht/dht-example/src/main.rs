@@ -761,22 +761,29 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
                 good_nodes_unassigned=good_nodes_unassigned,
                 "collected-initial-node-stats"
             );
+
+            let mut max_demotes = std::cmp::max(BUCKET_SIZE, good_nodes_unassigned);
+            let mut demote_count = 0;
             for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
                 // demote as many as we are promoting later.
-                let mut assign_slots = good_nodes_unassigned;
-                if assign_slots > 0 && !node.quality(&gen).is_good() {
+                if max_demotes > 0 && !node.quality(&gen).is_good() {
                     if node.in_bucket {
+                        demote_count += 1;
                         node.in_bucket = false;
-                        assign_slots -= 1;
+                        max_demotes -= 1;
                     }
                 }
             }
+            event!(Level::INFO, demote_count=demote_count, "demote");
+            let assigned_capped = std::cmp::min(good_nodes_assigned, BUCKET_SIZE);
+            let mut max_promotes = BUCKET_SIZE - assigned_capped;
             for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
-                if node.quality(&gen).is_good() {
+                if max_promotes > 0 && node.quality(&gen).is_good() {
                     if node.in_bucket {
                         node.in_bucket = true;
                         good_nodes_assigned += 1;
                         good_nodes_unassigned -= 1;
+                        max_promotes -= 1;
                     }
                 }
             }
