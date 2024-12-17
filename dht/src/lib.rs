@@ -299,6 +299,10 @@ impl Node {
         None
     }
 
+    pub fn is_expired(&self, genv: &GeneralEnvironment) -> bool {
+        Duration::new(2000, 0) < (genv.now - self.last_touch_time)
+    }
+
     pub fn quality(&self, genv: &GeneralEnvironment) -> NodeQuality {
         if MAX_UNRESPONDED_QUERIES_BAD <= self.timeouts {
             return NodeQuality::Bad;
@@ -1090,7 +1094,21 @@ impl Bucket {
 
 #[cfg(test)]
 mod tests {
-    use super::{TorrentId, TorrentIdPrefix};
+    use std::{net::SocketAddr, time::Instant};
+
+    use super::{TorrentId, TorrentIdPrefix, Node, GeneralEnvironment};
+
+    #[test]
+    fn test_node() {
+        let ip = "0.0.0.0:1111".parse::<SocketAddr>().unwrap();
+        let now = Instant::now();
+        let genv_past = GeneralEnvironment {
+            now: now - std::time::Duration::new(2100, 0),
+        };
+        let node = Node::new(TorrentId::zero(), ip, &genv_past);
+        let genv = GeneralEnvironment { now };
+        assert!(node.is_expired(&genv));
+    }
 
     #[test]
     fn test_id_split() {
@@ -1662,7 +1680,7 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
             (self.genv.now - self.bb.last_touched_time).as_secs_f64(),
             node_count,
         )?;
-        let node_expiration = self.genv.now + Duration::new(2000, 0);
+        let node_expiration = self.genv.now - Duration::new(2000, 0);
         for (_nid, node) in self.nodes.clone() {
             let quality = match node.quality(self.genv) {
                 NodeQuality::Good => "🔥",
@@ -1670,7 +1688,7 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 NodeQuality::Bad => "🧊",
             };
             let in_bucket = if node.in_bucket { "🪣" } else { "➖" };
-            let is_expiring = if node_expiration < node.last_touch_time { "🦠" } else { "➖" };
+            let is_expiring = if node.last_touch_time < node_expiration { "🦠" } else { "➖" };
             write!(f, "        {}{}{} {} {:21} age={:6.1}s timeouts={}\n",
                 quality,
                 in_bucket,
