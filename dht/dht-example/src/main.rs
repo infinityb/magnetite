@@ -777,16 +777,19 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             event!(Level::INFO, demote_count=demote_count, "demote");
             let assigned_capped = std::cmp::min(good_nodes_assigned, BUCKET_SIZE);
             let mut max_promotes = BUCKET_SIZE - assigned_capped;
+            let mut promote_count = 0;
             for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
                 if max_promotes > 0 && node.quality(&gen).is_good() {
-                    if node.in_bucket {
+                    if !node.in_bucket {
                         node.in_bucket = true;
                         good_nodes_assigned += 1;
                         good_nodes_unassigned -= 1;
                         max_promotes -= 1;
+                        promote_count += 1;
                     }
                 }
             }
+            event!(Level::INFO, promote_count=promote_count, "promote");
 
             if BUCKET_SIZE <= good_nodes_assigned || good_nodes_unassigned == 0 {
                 continue;
