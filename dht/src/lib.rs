@@ -1099,7 +1099,7 @@ mod tests {
     use super::{TorrentId, TorrentIdPrefix, Node, GeneralEnvironment};
 
     #[test]
-    fn test_node() {
+    fn test_node_expiration() {
         let ip = "0.0.0.0:1111".parse::<SocketAddr>().unwrap();
         let now = Instant::now();
         let genv_past = GeneralEnvironment {
