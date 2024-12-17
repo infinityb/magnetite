@@ -1285,7 +1285,7 @@ impl BucketManager2 {
         let prefix = self.find_bucket_prefix(id);
         let mut found_good_nodes = 0;
         for (k, v) in self.nodes.range(prefix.to_range()) {
-            assert!(prefix.contains(k), "{:?} not in {}", k, prefix);
+            assert!(prefix.contains(k), "{:?} not in {:?}", k, prefix.to_range());
             if v.quality(genv).is_good() {
                 found_good_nodes += 1;
             }
