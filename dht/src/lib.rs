@@ -1536,7 +1536,7 @@ impl BucketManager2 {
         buf.copy_from_slice(&message.transaction);
         let txid = u64::from_be_bytes(buf);
 
-        event!(Level::INFO, tx=txid, txs=?self.transactions, "handle-incoming-packet");
+        event!(Level::INFO, tx=txid, "handle-incoming-packet");
 
         let resp;
         if let wire::DhtMessageData::Response(ref resp_tmp) = message.data {
