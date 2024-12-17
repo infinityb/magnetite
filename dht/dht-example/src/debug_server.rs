@@ -18,7 +18,7 @@ pub async fn webserver_system(context: DhtContext) -> anyhow::Result<()> {
         Ok(Response::new(Full::new(Bytes::from("Hello, World!"))))
     }
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3004));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3004));
 
     // We create a TcpListener and bind it to 127.0.0.1:3000
     let listener = TcpListener::bind(addr).await?;
