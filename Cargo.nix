@@ -1599,6 +1599,10 @@ rec {
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./dht/dht-example; };
         dependencies = [
           {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
             name = "bencode";
             packageId = "bencode";
           }

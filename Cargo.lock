@@ -498,6 +498,7 @@ dependencies = [
 name = "dht-example"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bencode",
  "bin-str",
  "chrono",

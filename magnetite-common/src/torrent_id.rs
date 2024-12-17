@@ -356,6 +356,11 @@ impl TorrentIdPrefix {
         }
     }
 
+    pub fn to_range(&self) -> std::ops::RangeInclusive<TorrentId> {
+        let max = self.base | (TorrentId::max_value() & !self.mask());
+        self.base..=max
+    }
+
     pub fn longer(&self) -> Option<TorrentIdPrefix> {
         if 160 <= self.prefix_len {
             return None;
