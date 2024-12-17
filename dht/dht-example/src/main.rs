@@ -820,18 +820,23 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             }
             event!(Level::INFO,
                 good_nodes_assigned=good_nodes_assigned,
+                is_bucket_saturated=BUCKET_SIZE <= good_nodes_assigned,
                 is_self_bucket=bi.prefix.contains(&self_peer_id),
                 prefix=%bi.prefix,
                 self_peer_id=?self_peer_id,
                 "presplit");
+
             if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&self_peer_id) {
                 // we will split so reset reprocessing flag.
+                event!(Level::INFO, "need_reprocessing");
                 need_reprocessing = true;
             }
         }
 
         if need_reprocessing {
+            event!(Level::INFO, before_buckets=bm_locked.buckets.len(), "need_reprocessing");
             bm_locked.split_bucket(&self_peer_id)?;
+            event!(Level::INFO, after_buckets=bm_locked.buckets.len(), "need_reprocessing");
         }
     }
 
@@ -907,7 +912,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
 
         ngen.now = Instant::now();
 
-        let mut bucket_prefix;
+        let bucket_prefix;
         let mut want_nodes = false;
         let mut bm_locked = context.bm.borrow_mut();
         if find_worst_bucket {
