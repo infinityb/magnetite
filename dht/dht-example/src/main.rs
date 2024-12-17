@@ -775,6 +775,7 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
                 }
             }
             event!(Level::INFO, demote_count=demote_count, "demote");
+
             let assigned_capped = std::cmp::min(good_nodes_assigned, BUCKET_SIZE);
             let mut max_promotes = BUCKET_SIZE - assigned_capped;
             let mut promote_count = 0;
@@ -789,13 +790,9 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             }
             event!(Level::INFO, promote_count=promote_count, "promote");
 
-            if BUCKET_SIZE <= good_nodes_assigned || good_nodes_unassigned == 0 {
-                continue;
-            }
-
             let mut node_candidates = Vec::new();
             for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
-                if node.in_bucket && !node.quality(&gen).is_good() {
+                if !node.in_bucket && node.quality(&gen).is_good() {
                     node_candidates.push(node);
                 }
             }
