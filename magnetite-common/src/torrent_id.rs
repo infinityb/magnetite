@@ -349,6 +349,7 @@ fn TorrentIdPrefix_mask() {
             base: TorrentId::zero(),
             prefix_len: 1,
         }.mask());
+    // panic!("{:?}", TorrentIdPrefix::zero().to_range());
 }
 
 
@@ -375,7 +376,7 @@ impl TorrentIdPrefix {
     }
 
     pub fn to_range(&self) -> std::ops::RangeInclusive<TorrentId> {
-        let max = self.base | (TorrentId::max_value() & !self.mask());
+        let max = self.base | (TorrentId::max_value() & self.mask());
         self.base..=max
     }
 
