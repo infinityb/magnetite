@@ -179,6 +179,8 @@ type TorrentIdHeapEntry<T> = GeneralHeapEntry<TorrentId, T>;
 #[derive(Debug, Clone)]
 pub struct Node {
     pub thin: ThinNode,
+    // if a persisted node, this will be set to the bucket it belongs to.
+    pub in_bucket: bool,
     // none if we've never queried this node.
     pub node_stats: Option<NodeReplyStats>,
     // how many times we've timed out
@@ -187,6 +189,10 @@ pub struct Node {
     pub sent_pings: i8,
     // when we can send the next exploratory ping/find-nodes
     pub next_allowed_ping: Instant,
+    // used for expiration when not in bucket, bumped to now when:
+    // * inserted into the pool
+    // * responds to a query
+    pub last_touch_time: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -266,10 +272,12 @@ impl Node {
                 id: peer_id,
                 saddr: peer_addr,
             },
+            in_bucket: false,
             node_stats: None,
             timeouts: 0,
             sent_pings: 0,
             next_allowed_ping: env.now,
+            last_touch_time: env.now,
         }
     }
 
@@ -902,9 +910,11 @@ impl Bucket {
         let mut nn = Node {
             thin: *seen_node,
             node_stats: None,
+            in_bucket: false,
             timeouts: 0,
             sent_pings: 0,
             next_allowed_ping: env.gen.now,
+            last_touch_time: env.gen.now,
         };
         if env.is_reply {
             nn.apply_activity_receive_response(&env.gen);
@@ -1014,9 +1024,11 @@ impl Bucket {
             let mut nn = Node {
                 thin: *seen_node,
                 node_stats: None,
+                in_bucket: false,
                 timeouts: 0,
                 sent_pings: 0,
                 next_allowed_ping: env.gen.now,
+                last_touch_time: env.gen.now,
             };
             if env.is_reply {
                 nn.apply_activity_receive_response(&env.gen);
@@ -1249,11 +1261,11 @@ impl BucketManager2 {
         v.prefix
     }
 
-    fn deepest_bucket_prefix(&self) -> TorrentIdPrefix {
+    pub fn deepest_bucket_prefix(&self) -> TorrentIdPrefix {
         self.find_bucket_prefix(&self.self_peer_id)
     }
 
-    fn split_bucket(&mut self, id: &TorrentId) -> anyhow::Result<()> {
+    pub fn split_bucket(&mut self, id: &TorrentId) -> anyhow::Result<()> {
         let base = self.find_bucket_prefix(id).base;
         let bucket: &mut BucketInfo = self.buckets.get_mut(&base).unwrap();
 
@@ -1577,9 +1589,13 @@ impl BucketManager2 {
     }
 
     pub fn find_mut_node_for_maintenance_ping<'a>(&'a mut self, env: &GeneralEnvironment) -> Option<&'a mut Node> {
+        fn elligible_for_maintenance_ping(n: &Node, env: &GeneralEnvironment) -> bool {
+            n.next_allowed_ping < env.now && n.in_bucket
+        }
+
         // borrowck....
         let has_first_branch_node = self.nodes.iter()
-            .filter(|(_, n)| n.next_allowed_ping < env.now)
+            .filter(|(_, n)| elligible_for_maintenance_ping(n, env))
             .filter(|(_, n)| n.sent_pings == 0)
             .filter(|(_, n)| n.node_stats.is_none())
             .next()
@@ -1587,14 +1603,14 @@ impl BucketManager2 {
 
         if has_first_branch_node {
             self.nodes.iter_mut()
-                .filter(|(_, n)| n.next_allowed_ping < env.now)
+                .filter(|(_, n)| elligible_for_maintenance_ping(n, env))
                 .filter(|(_, n)| n.sent_pings == 0)
                 .filter(|(_, n)| n.node_stats.is_none())
                 .next()
                 .map(|(_, n)| n)
         } else {
             self.nodes.iter_mut()
-                .filter(|(_, n)| n.next_allowed_ping < env.now)
+                .filter(|(_, n)| elligible_for_maintenance_ping(n, env))
                 .min_by_key(|(_, n)| n.node_stats.as_ref().map(|s| s.last_message_time))
                 .map(|(_, n)| n)
         }

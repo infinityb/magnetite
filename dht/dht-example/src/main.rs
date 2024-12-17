@@ -384,7 +384,7 @@ async fn main() -> Result<(), failure::Error> {
     task::LocalSet::new()
         .run_until(async {
             let sock = Rc::new(UdpSocket::bind(&bind_address).await?);
-            let mut starter_tasks: Vec<tokio::task::JoinHandle<Result<(), failure::Error>>> =
+            let mut starter_tasks: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>> =
                 Vec::new();
             let self_id = TorrentId(*b"\x18E)\xd0j\xc4V\x9e\x03Yu[t\xbb\x85\x12{Z\xc4o");
             let bm = Rc::new(RefCell::new(BucketManager::new(&self_id)));
@@ -421,7 +421,7 @@ async fn main() -> Result<(), failure::Error> {
             };
             starter_tasks.push(task::spawn_local(maintenance(context)));
 
-            let mut futures: FuturesUnordered<tokio::task::JoinHandle<Result<(), failure::Error>>> =
+            let mut futures: FuturesUnordered<tokio::task::JoinHandle<anyhow::Result<()>>> =
                 starter_tasks.into_iter().collect();
 
             while !futures.is_empty() {
@@ -448,7 +448,7 @@ fn print_test_logging() {
     event!(Level::ERROR, "logger initialized - error check");
 }
 
-async fn file_saver(context: DhtContext) -> Result<(), failure::Error> {
+async fn file_saver(context: DhtContext) -> anyhow::Result<()> {
     let mut now = Instant::now();
     let mut next_run = now + Duration::from_secs(60);
 
@@ -490,7 +490,7 @@ async fn file_saver(context: DhtContext) -> Result<(), failure::Error> {
     }
 }
 
-async fn response_engine(context: DhtContext) -> Result<(), failure::Error> {
+async fn response_engine(context: DhtContext) -> anyhow::Result<()> {
     let mut buf = [0; 1400];
     loop {
         let (len, addr) = context.so.recv_from(&mut buf).await?;
@@ -637,7 +637,7 @@ fn rate_limit_check_and_incr(
     }
 }
 
-    async fn bootstrap(context: DhtContext) -> Result<(), failure::Error> {
+async fn bootstrap(context: DhtContext) -> anyhow::Result<()> {
     // FIXME: duplicate state between maintenance and bootstrap:
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
 
@@ -689,7 +689,103 @@ fn rate_limit_check_and_incr(
     Ok(())
 }
 
-async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
+async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
+    use rand::seq::SliceRandom;
+
+    let gen = GeneralEnvironment {
+        now: Instant::now() - Duration::from_secs(900),
+    };
+
+    let mut bm_locked = context.bm.borrow_mut();
+    let mut need_reprocessing = true;
+    while need_reprocessing {
+        need_reprocessing = false;
+        let BucketManager { ref mut buckets, ref mut nodes, self_peer_id, .. } = *bm_locked;
+        for (base, bi) in buckets {
+            let mut good_nodes_unassigned = 0;
+            let mut good_nodes_assigned = 0;
+            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+                if node.quality(&gen).is_good() {
+                    if node.in_bucket {
+                        good_nodes_assigned += 1;
+                    } else {
+                        good_nodes_unassigned += 1;
+                    }
+                }
+            }
+            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+                // demote as many as we are promoting later.
+                let mut assign_slots = good_nodes_unassigned;
+                if assign_slots > 0 && !node.quality(&gen).is_good() {
+                    if node.in_bucket {
+                        node.in_bucket = false;
+                        assign_slots -= 1;
+                    }
+                }
+            }
+            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+                if node.quality(&gen).is_good() {
+                    if node.in_bucket {
+                        node.in_bucket = true;
+                        good_nodes_assigned += 1;
+                        good_nodes_unassigned -= 1;
+                    }
+                }
+            }
+
+            if BUCKET_SIZE <= good_nodes_assigned || good_nodes_unassigned == 0 {
+                continue;
+            }
+
+            let mut node_candidates = Vec::new();
+            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+                if node.in_bucket && !node.quality(&gen).is_good() {
+                    node_candidates.push(node);
+                }
+            }
+
+            node_candidates.shuffle(&mut thread_rng());
+
+            for n in node_candidates.into_iter() {
+                if BUCKET_SIZE <= good_nodes_assigned {
+                    break;
+                }
+                n.in_bucket = true;
+                good_nodes_assigned += 1;
+            }
+
+            if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&self_peer_id) {
+                // we will split so reset reprocessing flag.
+                need_reprocessing = true;
+            }
+        }
+
+        if need_reprocessing {
+            bm_locked.split_bucket(&self_peer_id)?;
+        }
+    }
+
+    let node_expiration = gen.now + Duration::new(7200, 0);
+    let mut expiring_nodes = true;
+    let mut last_nid = TorrentId::zero();
+    while expiring_nodes {
+        let mut remove_nid = None;
+        for (nid, node) in bm_locked.nodes.range(last_nid..) {
+            if node_expiration < node.last_touch_time {
+                remove_nid = Some(*nid);
+                break;
+            }
+        }
+        expiring_nodes = remove_nid.is_some();
+        if let Some(n) = remove_nid {
+            last_nid = n;
+            bm_locked.nodes.remove(&n).unwrap();
+        }
+    }
+    Ok(())
+}
+
+async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
     bootstrap(context.clone()).await?;
     let mut rng = rand::rngs::StdRng::from_entropy();
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
@@ -743,6 +839,7 @@ async fn maintenance(context: DhtContext) -> Result<(), failure::Error> {
     println!("{}", formatted);
 
     loop {
+        reapply_bucketting(context.clone()).await?;
         event!(
             Level::INFO,
             file = file!(),
