@@ -518,6 +518,7 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
         want: SmallVec::new(),
     });
     for (addr, node) in &nodes_to_ping_as_bootstrap {
+        let now = Instant::now();
         let addr = SocketAddr::V4(*addr);
         let mut node_msg = msg.clone();
         let bm_locked = context.bm.borrow_mut();
