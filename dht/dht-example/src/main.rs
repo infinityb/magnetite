@@ -910,7 +910,6 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
         let mut bucket_prefix;
         let mut want_nodes = false;
         let mut bm_locked = context.bm.borrow_mut();
-        eprintln!("{:#?}", *bm_locked);
         if find_worst_bucket {
             find_worst_bucket = false;
             want_nodes = false;
