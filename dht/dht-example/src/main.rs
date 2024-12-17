@@ -782,8 +782,6 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
                 if max_promotes > 0 && node.quality(&gen).is_good() {
                     if !node.in_bucket {
                         node.in_bucket = true;
-                        good_nodes_assigned += 1;
-                        good_nodes_unassigned -= 1;
                         max_promotes -= 1;
                         promote_count += 1;
                     }
@@ -812,6 +810,18 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
                 good_nodes_assigned += 1;
             }
 
+            let mut good_nodes_assigned = 0;
+            for (nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+                if node.quality(&gen).is_good() {
+                    if node.in_bucket {
+                        good_nodes_assigned += 1;
+                    }
+                }
+            }
+            event!(Level::INFO,
+                good_nodes_assigned=good_nodes_assigned,
+                is_self_bucket=bi.prefix.contains(&self_peer_id),
+                "presplit");
             if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&self_peer_id) {
                 // we will split so reset reprocessing flag.
                 need_reprocessing = true;
