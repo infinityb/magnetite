@@ -1103,7 +1103,7 @@ mod tests {
         let ip = "0.0.0.0:1111".parse::<SocketAddr>().unwrap();
         let now = Instant::now();
         let genv_past = GeneralEnvironment {
-            now: now - std::time::Duration::new(2100, 0),
+            now: now - std::time::Duration::new(7200, 0),
         };
         let node = Node::new(TorrentId::zero(), ip, &genv_past);
         let genv = GeneralEnvironment { now };

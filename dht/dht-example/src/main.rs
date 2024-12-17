@@ -837,19 +837,13 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
         }
     }
 
-    let node_expiration = gen.now - Duration::new(2000, 0);
     let mut expiring_nodes = true;
     let mut last_nid = TorrentId::zero();
     let mut removed_expired = 0;
     while expiring_nodes {
         let mut remove_nid = None;
         for (nid, node) in bm_locked.nodes.range(last_nid..) {
-            event!(Level::WARN,
-                node_expiration=?node_expiration,
-                node.last_touch_time=?node.last_touch_time,
-                result=node_expiration < node.last_touch_time,
-                "expiration-check");
-            if node.last_touch_time < node_expiration {
+            if node.is_expired(&gen) {
                 remove_nid = Some(*nid);
                 break;
             }
