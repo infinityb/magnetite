@@ -1285,7 +1285,7 @@ impl BucketManager2 {
         let prefix = self.find_bucket_prefix(id);
         let mut found_good_nodes = 0;
         for (k, v) in self.nodes.range(prefix.to_range()) {
-            assert!(prefix.contains(k), "{:?} not in {:?}", k, prefix.to_range());
+            assert!(prefix.contains(k), "{:?} not in {:?}, prefix mask is {:?}", k, prefix.to_range(), prefix.mask());
             if v.quality(genv).is_good() {
                 found_good_nodes += 1;
             }
@@ -1536,7 +1536,7 @@ impl BucketManager2 {
         buf.copy_from_slice(&message.transaction);
         let txid = u64::from_be_bytes(buf);
 
-        event!(Level::INFO, tx=txid, "handle-incoming-packet");
+        event!(Level::TRACE, tx=txid, "handle-incoming-packet");
 
         let resp;
         if let wire::DhtMessageData::Response(ref resp_tmp) = message.data {
