@@ -881,31 +881,9 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
     let timer = tokio::time::sleep_until(next_request.into());
     tokio::pin!(timer);
 
-    let bm_locked = context.bm.borrow_mut();
-    let formatted = format!(
-        "self-id: {}\n{}",
-        bm_locked.self_peer_id.hex(),
-        bm_locked.format_buckets()
-    );
-    drop(bm_locked);
-
-    println!("{}", formatted);
-
     loop {
         reapply_bucketting(context.clone())?;
-        event!(
-            Level::INFO,
-            file = file!(),
-            line = line!(),
-            "maintenance-blocker enter"
-        );
         timer.as_mut().await;
-        event!(
-            Level::INFO,
-            file = file!(),
-            line = line!(),
-            "maintenance-blocker exit"
-        );
         let mut ngen = GeneralEnvironment {
             now: Instant::now(),
         };
@@ -923,28 +901,10 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             want_nodes = false;
             let bucket = bm_locked.find_worst_bucket(&ngen);
             bucket_prefix = bucket.prefix;
-            eprintln!(
-                "worst_bucket: {}",
-                BucketInfoFormatter {
-                    bb: bucket,
-                    nodes: bm_locked.nodes_for_bucket_containing_id(&bucket_prefix.base),
-                    genv: &ngen,
-                }
-            );
-            // event!(Level::INFO, worst_bucket=, "maintenance-find-bucket");
         } else {
             find_worst_bucket = true;
             let bucket = bm_locked.find_oldest_bucket();
             bucket_prefix = bucket.prefix;
-            eprintln!(
-                "oldest_bucket: {}",
-                BucketInfoFormatter {
-                    bb: bucket,
-                    nodes: bm_locked.nodes_for_bucket_containing_id(&bucket_prefix.base),
-                    genv: &ngen,
-                }
-            );
-            // event!(Level::INFO, oldest_bucket=BucketFormatter { bb: bucket }, "maintenance-find-bucket");
         }
         want_nodes |= !bm_locked.adding_to_bucket_creates_split(&bucket_prefix.base, &ngen);
         want_nodes |= bucket_prefix.contains(&self_peer_id);
