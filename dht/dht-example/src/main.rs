@@ -821,6 +821,8 @@ async fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             event!(Level::INFO,
                 good_nodes_assigned=good_nodes_assigned,
                 is_self_bucket=bi.prefix.contains(&self_peer_id),
+                prefix=%bi.prefix,
+                self_peer_id=?self_peer_id,
                 "presplit");
             if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&self_peer_id) {
                 // we will split so reset reprocessing flag.
