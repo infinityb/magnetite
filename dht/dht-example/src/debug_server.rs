@@ -241,6 +241,7 @@ async fn handle(
             "    🧊 - bad node",
             "other indicators:",
             "    🪣 - persisted node, can be given out in responses, checked for liveness.",
+            "         unpersisted nodes may be promoted to persisted if the bucket has space",
             "    🦠 - expired, will be eliminated next check",
             "",
         ].join("\n");

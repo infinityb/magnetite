@@ -1006,14 +1006,13 @@ impl<'a> fmt::Display for BucketManager2Formatter<'a> {
 
 impl<'a> fmt::Display for BucketInfoFormatter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let node_count: u32 = self.nodes.clone().map(|_| 1).sum();
-        write!(f, "    bucket {}/{} age={:4.2}s nodes={}\n",
+        write!(f, "    bucket {}/{} age={:4.2}s nodes={} nodes_in_bucket={}\n",
             self.bb.prefix.base.hex(),
             self.bb.prefix.prefix_len,
             (self.genv.now - self.bb.last_touched_time).as_secs_f64(),
-            node_count,
+            self.nodes.clone().map(|_| 1).sum::<u32>(),
+            self.nodes.clone().map(|(_, n)| n.in_bucket as u32).sum::<u32>()
         )?;
-        let node_expiration = self.genv.now - Duration::new(2000, 0);
         for (_nid, node) in self.nodes.clone() {
             let quality = match node.quality(self.genv) {
                 NodeQuality::Good => "🔥",
@@ -1021,7 +1020,7 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 NodeQuality::Bad => "🧊",
             };
             let in_bucket = if node.in_bucket { "🪣" } else { "➖" };
-            let is_expiring = if node.last_touch_time < node_expiration { "🦠" } else { "➖" };
+            let is_expiring = if node.is_expired(&self.genv) { "🦠" } else { "➖" };
             write!(f, "        {}{}{} {} {:21} age={:6.1}s timeouts={}\n",
                 quality,
                 in_bucket,
