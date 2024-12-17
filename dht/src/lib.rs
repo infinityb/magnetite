@@ -1670,11 +1670,11 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
                 NodeQuality::Bad => "🧊",
             };
             let in_bucket = if node.in_bucket { "🪣" } else { "➖" };
-            let expiration = if node_expiration < node.last_touch_time { "🦠" } else { "➖" };
+            let is_expiring = if node_expiration < node.last_touch_time { "🦠" } else { "➖" };
             write!(f, "        {}{}{} {} {:21} age={:4.2}s timeouts={}\n",
                 quality,
                 in_bucket,
-                expiration,
+                is_expiring,
                 node.thin.id.hex(),
                 node.thin.saddr,
                 (self.genv.now - node.last_touch_time).as_secs_f64(),
