@@ -387,8 +387,8 @@ async fn main() -> Result<(), failure::Error> {
                 bm: Rc::clone(&bm),
                 so: Rc::clone(&sock),
             };
+            starter_tasks.push(task::spawn_local(debug_server::webserver_system(context.clone())));
             starter_tasks.push(task::spawn_local(response_engine(context)));
-
             let context = DhtContext {
                 bm: Rc::clone(&bm),
                 so: Rc::clone(&sock),
