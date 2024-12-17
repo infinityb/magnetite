@@ -382,7 +382,7 @@ impl TorrentIdPrefix {
     }
 
     pub fn to_range(&self) -> std::ops::RangeInclusive<TorrentId> {
-        let max = self.base | (TorrentId::max_value() & self.mask());
+        let max = self.base | self.mask();
         self.base..=max
     }
 
