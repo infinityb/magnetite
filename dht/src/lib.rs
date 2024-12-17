@@ -1332,7 +1332,7 @@ impl BucketManager2 {
                 }
             }
 
-            if score < lowest_node_bucket_node_score && node_count != 0 {
+            if score < lowest_node_bucket_node_score {
                 lowest_node_bucket_node_score = score;
                 lowest_node_bucket = Some(*bucket_key);
             }
