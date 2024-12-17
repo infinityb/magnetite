@@ -234,9 +234,21 @@ async fn handle(
     }
 
     if uri == "/show-buckets" {
+        let help_text = [
+            "node health status:",
+            "    🔥 - healthy node",
+            "    ❓ - questionable node, eligible for demotion if in bucket",
+            "    🧊 - bad node",
+            "other indicators:",
+            "    🪣 - persisted node, can be given out in responses, checked for liveness.",
+            "    🦠 - expired, will be eliminated next check",
+            "",
+        ].join("\n");
+
         let bm_locked = context.bm.borrow();
-        let formatted = format!("self-id: {}\n{}",
+        let formatted = format!("self-id: {}\n{}\n{}",
             bm_locked.self_peer_id.hex(),
+            help_text,
             bm_locked.format_buckets());
         drop(bm_locked);
 

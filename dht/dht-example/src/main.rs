@@ -892,7 +892,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             now: Instant::now(),
         };
 
-        next_request = ngen.now + Duration::from_secs(6);
+        next_request = ngen.now + Duration::from_secs(83);
         timer.as_mut().reset(next_request.into());
 
         ngen.now = Instant::now();

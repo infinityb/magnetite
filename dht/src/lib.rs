@@ -1671,7 +1671,7 @@ impl<'a> fmt::Display for BucketInfoFormatter<'a> {
             };
             let in_bucket = if node.in_bucket { "🪣" } else { "➖" };
             let is_expiring = if node_expiration < node.last_touch_time { "🦠" } else { "➖" };
-            write!(f, "        {}{}{} {} {:21} age={:4.2}s timeouts={}\n",
+            write!(f, "        {}{}{} {} {:21} age={:6.1}s timeouts={}\n",
                 quality,
                 in_bucket,
                 is_expiring,
