@@ -2,6 +2,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::{HashSet, VecDeque};
+use std::f32::consts::PI;
 use std::fs::File;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::io::{self, Read, Write};
@@ -42,7 +43,7 @@ type BucketManager = BucketManager2;
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
-mod search;
+// mod search;
 mod debug_server;
 
 struct DedupVecDeque<T> {
@@ -296,7 +297,7 @@ enum DhtSystemRequestData {
 
 struct DhtSystemRequestSearch {
     target: TorrentId,
-    search_kind: search::SearchKind,
+    // search_kind: search::SearchKind,
 }
 
 impl Into<DhtSystemRequestData> for DhtSystemRequestSearch {
@@ -360,7 +361,7 @@ async fn main() -> Result<(), failure::Error> {
         .next()
         .expect("invalid bind-address arg: didn't resolve to anything");
 
-    let (tx, rx) = mpsc::channel::<DhtSystemRequestData>(64);
+    // let (tx, rx) = mpsc::channel::<DhtSystemRequestData>(64);
     task::LocalSet::new()
         .run_until(async {
             let sock = Rc::new(UdpSocket::bind(&bind_address).await?);
@@ -368,20 +369,17 @@ async fn main() -> Result<(), failure::Error> {
                 Vec::new();
             let self_id = TorrentId(*b"\x18E)\xd0j\xc4V\x9e\x03Yu[t\xbb\x85\x12{Z\xc4o");
             let bm = Rc::new(RefCell::new(BucketManager::new(&self_id)));
-            let bm_tmp = Rc::clone(&bm);
-            let sock_tmp = Rc::clone(&sock);
-
             // let context = DhtContext {
             //     bm: Rc::clone(&bm),
             //     so: Rc::clone(&sock),
             // };
-            starter_tasks.push(task::spawn_local(async move {
-                let mut rx = ReceiverStream::new(rx);
-                while let Some(v) = rx.next().await {
-                    //
-                }
-                Ok(())
-            }));
+            // starter_tasks.push(task::spawn_local(async move {
+            //     let mut rx = ReceiverStream::new(rx);
+            //     while let Some(v) = rx.next().await {
+            //         //
+            //     }
+            //     Ok(())
+            // }));
 
             let context = DhtContext {
                 bm: Rc::clone(&bm),
@@ -856,138 +854,161 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
 async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
     event!(Level::WARN, "maintenance-started");
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
 
     let bm_locked = context.bm.borrow_mut();
     let self_peer_id = bm_locked.self_peer_id;
     drop(bm_locked);
 
     let mut target_id = self_peer_id;
-    // slightly randomized target
-    rng.fill_bytes(&mut target_id.as_mut_bytes()[12..]);
 
-    let mut targets: DedupVecDeque<(TorrentId, SocketAddr)> = Default::default();
-    let mut find_worst_bucket = false;
     let mut next_request = Instant::now() + Duration::from_secs(15);
     let timer = tokio::time::sleep_until(next_request.into());
     tokio::pin!(timer);
-
+    let mut ngen = GeneralEnvironment {
+        now: Instant::now(),
+    };
     loop {
+        rng.fill_bytes(&mut target_id.as_mut_bytes()[12..]);
         reapply_bucketting(context.clone())?;
         timer.as_mut().await;
-        let mut ngen = GeneralEnvironment {
-            now: Instant::now(),
-        };
 
         next_request = ngen.now + Duration::from_secs(83);
         timer.as_mut().reset(next_request.into());
-
         ngen.now = Instant::now();
 
-        let bucket_prefix;
-        let mut want_nodes = false;
-        let mut bm_locked = context.bm.borrow_mut();
-        if find_worst_bucket {
-            find_worst_bucket = false;
-            want_nodes = false;
-            let bucket = bm_locked.find_worst_bucket(&ngen);
-            bucket_prefix = bucket.prefix;
-        } else {
-            find_worst_bucket = true;
-            let bucket = bm_locked.find_oldest_bucket();
-            bucket_prefix = bucket.prefix;
-        }
-        want_nodes |= !bm_locked.adding_to_bucket_creates_split(&bucket_prefix.base, &ngen);
-        want_nodes |= bucket_prefix.contains(&self_peer_id);
-        let search_target = bucket_prefix.rand_within(&mut rng);
+        let mut maintenance_finished = false;
 
-        if let Some(node) = bm_locked.find_mut_node_for_maintenance_ping(&ngen) {
-            let mut msg = if want_nodes {
-                Into::into(DhtMessageQueryFindNode {
+        while !maintenance_finished {
+            let mut buckets_needing_maintenance = Vec::new();
+            let bm_locked = context.bm.borrow_mut();
+            for (_, bi) in bm_locked.buckets.range(..) {
+                let in_bucket_count: usize = bm_locked.nodes.range(bi.prefix.to_range())
+                    .map(|(_, node)| node.in_bucket as usize)
+                    .sum();
+
+                if in_bucket_count < BUCKET_SIZE {
+                    buckets_needing_maintenance.push(bi.prefix);
+                }
+            }
+            drop(bm_locked);
+            maintenance_finished = buckets_needing_maintenance.is_empty();
+            for b in buckets_needing_maintenance.into_iter() {
+                let search_target = b.rand_within(&mut rng);
+
+                let bm_locked = context.bm.borrow_mut();
+                let msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
                     id: self_peer_id,
                     target: search_target,
                     want: SmallVec::new(),
-                })
-            } else {
-                Into::into(DhtMessageQueryPing { id: self_peer_id })
-            };
-            node.apply_activity_receive_request(&ngen);
-            let node_thin = node.thin;
-            let future = dht_query_apply_txid(
-                bm_locked,
-                &context.bm,
-                &mut msg,
-                node_thin.saddr,
-                &ngen.now,
-                Some(node_thin.id),
-            );
-            event!(
-                Level::INFO,
-                file = file!(),
-                line = line!(),
-                "maintenance-blocker enter"
-            );
-            if let Err(e) = send_to_node(&context.so, node_thin.saddr, &msg).await {
-                event!(Level::WARN, "error sending {}", e);
+                });
+                ngen.now = Instant::now();
+                // let future = dht_query_apply_txid(
+                //     bm_locked,
+                //     &context.bm,
+                //     &mut msg,
+                //     node_thin.saddr,
+                //     &ngen.now,
+                //     Some(node_thin.id),
+                // );
+                // if let Err(e) = send_to_node(&context.so, saddr, &msg).await {
+                //     event!(Level::WARN, "error sending {}", e);
+                // }
             }
-            event!(
-                Level::INFO,
-                file = file!(),
-                line = line!(),
-                "maintenance-blocker exit"
-            );
-            let completed = future.await?;
-            if let Ok(mr) = completed.response {
-                for node in &mr.data.nodes {
-                    let saddr = SocketAddr::V4(node.1);
-                    targets.push_back((node.0, saddr));
-                }
-            }
-        } else {
-            drop(bm_locked);
-        }
-
-        while let Some((tid, saddr)) = targets.pop_front() {
-            let mut msg = Into::into(DhtMessageQueryFindNode {
-                id: self_peer_id,
-                target: search_target,
-                want: Default::default(),
-            });
-
-            ngen.now = Instant::now();
-            event!(
-                Level::INFO,
-                file = file!(),
-                line = line!(),
-                "maintenance-blocker enter"
-            );
-            let mut nenv = RequestEnvironment {
-                gen: ngen,
-                is_reply: false,
-                addr: saddr,
-            };
-            if rate_limit_check_and_incr(&mut recent_peers_queried, saddr, &nenv) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                nenv.gen.now = Instant::now();
-                let bm_locked = context.bm.borrow_mut();
-                let _ = dht_query_apply_txid(
-                    bm_locked,
-                    &context.bm,
-                    &mut msg,
-                    saddr,
-                    &ngen.now,
-                    Some(tid),
-                );
-                if let Err(e) = send_to_node(&context.so, saddr, &msg).await {
-                    event!(Level::WARN, "error sending {}", e);
-                }
-            }
-            event!(
-                Level::INFO,
-                file = file!(),
-                line = line!(),
-                "maintenance-blocker exit"
-            );
         }
     }
 }
+
+// fn x() {
+//     loop {
+//         let bucket_prefix;
+//         let mut want_nodes = false;
+//         let mut bm_locked = context.bm.borrow_mut();
+//         if find_worst_bucket {
+//             find_worst_bucket = false;
+//             want_nodes = false;
+//             let bucket = bm_locked.find_worst_bucket(&ngen);
+//             bucket_prefix = bucket.prefix;
+//         } else {
+//             find_worst_bucket = true;
+//             let bucket = bm_locked.find_oldest_bucket();
+//             bucket_prefix = bucket.prefix;
+//         }
+//         want_nodes |= !bm_locked.adding_to_bucket_creates_split(&bucket_prefix.base, &ngen);
+//         want_nodes |= bucket_prefix.contains(&self_peer_id);
+//         let search_target = bucket_prefix.rand_within(&mut rng);
+
+//         if let Some(node) = bm_locked.find_mut_node_for_maintenance_ping(&ngen) {
+//             let mut msg = if want_nodes {
+//                 Into::into(DhtMessageQueryFindNode {
+//                     id: self_peer_id,
+//                     target: search_target,
+//                     want: SmallVec::new(),
+//                 })
+//             } else {
+//                 Into::into(DhtMessageQueryPing { id: self_peer_id })
+//             };
+//             node.apply_activity_receive_request(&ngen);
+//             let node_thin = node.thin;
+//             let future = dht_query_apply_txid(
+//                 bm_locked,
+//                 &context.bm,
+//                 &mut msg,
+//                 node_thin.saddr,
+//                 &ngen.now,
+//                 Some(node_thin.id),
+//             );
+//             let completed = future.await?;
+//             if let Ok(mr) = completed.response {
+//                 for node in &mr.data.nodes {
+//                     let saddr = SocketAddr::V4(node.1);
+//                     targets.push_back((node.0, saddr));
+//                 }
+//             }
+//         } else {
+//             drop(bm_locked);
+//         }
+
+//         while let Some((tid, saddr)) = targets.pop_front() {
+//             let mut msg = Into::into(DhtMessageQueryFindNode {
+//                 id: self_peer_id,
+//                 target: search_target,
+//                 want: Default::default(),
+//             });
+
+//             ngen.now = Instant::now();
+//             event!(
+//                 Level::INFO,
+//                 file = file!(),
+//                 line = line!(),
+//                 "maintenance-blocker enter"
+//             );
+//             let mut nenv = RequestEnvironment {
+//                 gen: ngen,
+//                 is_reply: false,
+//                 addr: saddr,
+//             };
+//             if rate_limit_check_and_incr(&mut recent_peers_queried, saddr, &nenv) {
+//                 tokio::time::sleep(Duration::from_millis(100)).await;
+//                 nenv.gen.now = Instant::now();
+//                 let bm_locked = context.bm.borrow_mut();
+//                 let _ = dht_query_apply_txid(
+//                     bm_locked,
+//                     &context.bm,
+//                     &mut msg,
+//                     saddr,
+//                     &ngen.now,
+//                     Some(tid),
+//                 );
+//                 if let Err(e) = send_to_node(&context.so, saddr, &msg).await {
+//                     event!(Level::WARN, "error sending {}", e);
+//                 }
+//             }
+//             event!(
+//                 Level::INFO,
+//                 file = file!(),
+//                 line = line!(),
+//                 "maintenance-blocker exit"
+//             );
+//         }
+//     }
+// }

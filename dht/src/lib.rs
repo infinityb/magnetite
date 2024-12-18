@@ -44,12 +44,7 @@ pub struct ThinNode {
 
 pub struct RecursionState {
     target_info_hash: TorrentId,
-    cached_nodes_max: usize,
     search_eye: TorrentIdPrefix,
-    // anti-spamming measure.
-    visited_nodes: BTreeSet<SocketAddr>,
-    // sorted by distance from target
-    pub nodes: BTreeMap<TorrentId, ThinNode>,
 }
 
 impl RecursionState {
@@ -57,10 +52,10 @@ impl RecursionState {
         target: TorrentId,
         bm: &BucketManager2,
         env: &GeneralEnvironment,
-        cached_nodes_max: usize,
     ) -> Option<RecursionState> {
         type HeapEntry = TorrentIdHeapEntry<ThinNode>;
 
+        let cached_nodes_max = 48;
         let mut heap = BinaryHeap::with_capacity(cached_nodes_max);
 
         let mut found_one = false;
@@ -89,80 +84,10 @@ impl RecursionState {
 
         Some(RecursionState {
             target_info_hash: target,
-            cached_nodes_max,
             search_eye: TorrentIdPrefix::zero(),
-            nodes: heap.into_iter().map(|e| {
-                (e.dist_key, e.value)
-            }).collect(),
-            visited_nodes: Default::default(),
         })
     }
 
-    pub fn has_work(&self) -> bool {
-        !self.nodes.is_empty()
-    }
-
-    pub fn get_work(&mut self) -> Option<ThinNode> {
-        let (k, _) = self.nodes.range(..).next()?;
-        let k2 = k.clone();
-        drop(k);
-        self.nodes.remove(&k2)
-    }
-
-    pub fn search_eye(&self) -> TorrentIdPrefix {
-        TorrentIdPrefix::new(
-            self.target_info_hash,
-            self.search_eye.prefix_len)
-    }
-
-    pub fn add_candidate(&mut self, node: ThinNode) -> bool {
-        assert!(self.cached_nodes_max > 0);
-        if self.visited_nodes.contains(&node.saddr) {
-            event!(Level::INFO, "node already visited");
-            return false;
-        }
-
-        let dist_val = self.target_info_hash ^ node.id;
-        if !self.search_eye.contains(&dist_val) {
-            return false;
-        }
-        if self.nodes.len() < self.cached_nodes_max {
-            self.nodes.insert(dist_val, node);
-            return true;
-        } else {
-            let (k, _) = self.nodes.range(..).rev().next().expect("unreachable unless self.cached_nodes_max is 0");
-            let k2 = k.clone();
-            drop(k);
-
-            let e;
-            if let btree_map::Entry::Occupied(e_tmp) = self.nodes.entry(k2) {
-                e = e_tmp;
-            } else {
-                unreachable!("key was fetched from btree but doesn't exist within it.");
-            }
-
-            let ekey = *e.key();
-            let mut added = false;
-            if dist_val < ekey {
-                e.remove();
-                self.nodes.insert(dist_val, node);
-                added = true;
-
-                // we're at the `cached_nodes_max` limit, so see if we can reduce our
-                // eye.  If we need longer-lived/wider searches, the thing to tune is
-                // `cached_nodes_max`.
-                while let Some(longer) = self.search_eye.longer() {
-                    if longer.contains(&dist_val) {
-                        self.search_eye = longer;
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            return added;
-        }
-    }
 }
 
 type TorrentIdHeapEntry<T> = GeneralHeapEntry<TorrentId, T>;
@@ -291,7 +216,7 @@ impl Node {
     }
 
     pub fn is_expired(&self, genv: &GeneralEnvironment) -> bool {
-        Duration::new(2000, 0) < (genv.now - self.last_touch_time)
+        Duration::new(7200, 0) < (genv.now - self.last_touch_time)
     }
 
     pub fn quality(&self, genv: &GeneralEnvironment) -> NodeQuality {
@@ -301,12 +226,8 @@ impl Node {
         if MAX_UNRESPONDED_QUERIES_QUESTIONABLE <= self.timeouts {
             return NodeQuality::Questionable;
         }
-        if let Some(ref stats) = self.node_stats {
-            if let Some(lcrt) = stats.last_correct_reply_time {
-                if genv.now - lcrt < QUESTIONABLE_THRESH {
-                    return NodeQuality::Good;
-                }
-            }
+        if genv.now - self.last_touch_time < QUESTIONABLE_THRESH {
+            return NodeQuality::Good;
         }
         NodeQuality::Questionable
     }
@@ -516,7 +437,7 @@ pub struct BucketManager2 {
 mod tests_BucketManager2 {
     use rand::{thread_rng, Rng, RngCore};
 
-    use super::{TorrentId, TorrentIdPrefix, BucketManager2};
+    use super::{TorrentId, BucketManager2};
 
     #[test]
     fn test_find_bucket_key() -> anyhow::Result<()> {
@@ -678,10 +599,8 @@ impl BucketManager2 {
         let mut lowest_node_bucket = None;
 
         for (bucket_key, bucket_info) in &self.buckets {
-            let mut node_count = 0;
             let mut score = 0;
             for (_, node) in self.nodes.range(bucket_info.prefix.to_range()) {
-                node_count += 1;
                 score += match node.quality(genv) {
                     NodeQuality::Good => 4,
                     NodeQuality::Questionable => 2,
@@ -884,7 +803,6 @@ impl BucketManager2 {
         from: SocketAddr,
         env: &GeneralEnvironment,
     ) -> bool {
-
         if message.transaction.len() != 8 {
             return false;
         }
@@ -916,6 +834,7 @@ impl BucketManager2 {
                 );
             }
             if let Some(peer_id) = tx.queried_peer_id {
+                let bucket_prefix = self.find_bucket_prefix(&peer_id);
                 if resp.data.id != peer_id {
                     event!(Level::INFO,
                         kind="bad-peer-invalid-id",
@@ -925,6 +844,10 @@ impl BucketManager2 {
                         "TX-{:016x} peer invalid: bad response peer-id",
                         txid,
                     );
+                } else if let Some(node) = self.nodes.get_mut(&peer_id) {
+                    node.apply_activity_receive_response(env);
+                    let bucket = self.buckets.get_mut(&bucket_prefix.base).unwrap();
+                    bucket.last_touched_time = env.now;
                 }
             }
             let res = tx.completion_port.send(Box::new(TransactionCompletion {
