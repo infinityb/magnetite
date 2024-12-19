@@ -880,7 +880,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
         ngen.now = Instant::now();
 
         let mut maintenance_finished = true;
-
+        let before_loop = ngen.now;
         while !maintenance_finished {
             let mut buckets_needing_maintenance = Vec::new();
             let bm_locked = context.bm.borrow_mut();
@@ -925,10 +925,11 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                     }
                 }
             }
-            while !running.is_empty() {
-                running.next().await;
-            }
         }
+        while !running.is_empty() {
+            running.next().await;
+        }
+        event!(Level::WARN, maintenance_delay_s=before_loop.elapsed().as_secs_f64(), "maintenance-delay");
     }
 }
 
