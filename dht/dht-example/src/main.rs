@@ -853,6 +853,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
 }
 
 async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
+    let max_inflight = 16;
     event!(Level::WARN, "maintenance-started");
     let mut rng = rand::rngs::StdRng::from_entropy();
 
@@ -896,7 +897,6 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             maintenance_finished = buckets_needing_maintenance.is_empty();
             for b in buckets_needing_maintenance.into_iter() {
                 let search_target = b.rand_within(&mut rng);
-
                 let mut msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
                     id: self_peer_id,
                     target: search_target,
@@ -909,6 +909,9 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                     closest_to: search_target,
                 }, &ngen) {
                     let node_thin = node.thin;
+                    while max_inflight <= running.len() {
+                        running.next().await;
+                    }
                     running.push(dht_query_apply_txid(
                         bm_locked,
                         &context.bm,
@@ -920,9 +923,10 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                     if let Err(e) = send_to_node(&context.so, node_thin.saddr, &msg).await {
                         event!(Level::WARN, "error sending {}", e);
                     }
-                } else {
-                    //
                 }
+            }
+            while !running.is_empty() {
+                running.next().await;
             }
         }
     }
