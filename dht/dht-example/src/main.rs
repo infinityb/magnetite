@@ -881,6 +881,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
 
         let mut maintenance_finished = false;
         let before_loop = ngen.now;
+        let mut ping_these_nodes_after = Vec::new();
         while !maintenance_finished {
             let mut buckets_needing_maintenance = Vec::new();
             let bm_locked = context.bm.borrow_mut();
@@ -908,26 +909,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                     if let Some(Ok(r)) = running.next().await {
                         let r: Box<TransactionCompletion> = r;
                         if let Ok(r2) = r.response {
-                            for (node_id, addr) in &r2.data.nodes {
-                                let addr = SocketAddr::V4(*addr);
-                                let mut msg: DhtMessage = Into::into(DhtMessageQueryPing {
-                                    id: self_peer_id,
-                                });
-                                ngen.now = Instant::now();
-                                let bm_locked = context.bm.borrow_mut();
-                                running.push(dht_query_apply_txid(
-                                    bm_locked,
-                                    &context.bm,
-                                    &mut msg,
-                                    addr,
-                                    &ngen.now,
-                                    Some(*node_id),
-                                ));
-
-                                if let Err(e) = send_to_node(&context.so, addr, &msg).await {
-                                    event!(Level::WARN, "error sending {}", e);
-                                }
-                            }
+                            ping_these_nodes_after.extend(r2.data.nodes);
                         }
                     }
                 }
@@ -948,6 +930,34 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                         event!(Level::WARN, "error sending {}", e);
                     }
                 }
+            }
+        }
+        while !running.is_empty() {
+            if let Some(Ok(r)) = running.next().await {
+                let r: Box<TransactionCompletion> = r;
+                if let Ok(r2) = r.response {
+                    ping_these_nodes_after.extend(r2.data.nodes);
+                }
+            }
+        }
+        for (node_id, addr) in &ping_these_nodes_after {
+            let addr = SocketAddr::V4(*addr);
+            let mut msg: DhtMessage = Into::into(DhtMessageQueryPing {
+                id: self_peer_id,
+            });
+            ngen.now = Instant::now();
+            let bm_locked = context.bm.borrow_mut();
+            running.push(dht_query_apply_txid(
+                bm_locked,
+                &context.bm,
+                &mut msg,
+                addr,
+                &ngen.now,
+                Some(*node_id),
+            ));
+
+            if let Err(e) = send_to_node(&context.so, addr, &msg).await {
+                event!(Level::WARN, "error sending {}", e);
             }
         }
         while !running.is_empty() {
