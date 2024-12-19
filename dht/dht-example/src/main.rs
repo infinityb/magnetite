@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::collections::{HashSet, VecDeque};
 use std::f32::consts::PI;
@@ -18,9 +18,7 @@ use rand::thread_rng;
 use rand::{RngCore, SeedableRng};
 use smallvec::SmallVec;
 use tokio::net::{self, UdpSocket};
-use tokio::sync::mpsc;
 use tokio::task;
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -237,18 +235,19 @@ fn handle_query_announce_peer(
 }
 
 fn dht_query_apply_txid(
-    mut bm: std::cell::RefMut<'_, BucketManager>,
+    // mut bm: std::cell::RefMut<'_, BucketManager>,
+    mut locked: LockedWithMessage<'_>,
     bma: &Rc<RefCell<BucketManager>>,
     message: &mut DhtMessage,
     to: SocketAddr,
     now: &Instant,
     queried_peer_id: Option<TorrentId>,
 ) -> oneshot::Receiver<Box<TransactionCompletion>> {
-    let txslot = bm.acquire_transaction_slot();
+    let txslot = locked.locked.acquire_transaction_slot();
     let txid = txslot.key();
 
     let future = txslot.assign(message, to, now, queried_peer_id);
-    drop(bm);
+    drop(locked);
 
     let bm_tmp = Rc::clone(&bma);
     task::spawn_local(async move {
@@ -427,6 +426,24 @@ fn print_test_logging() {
     event!(Level::ERROR, "logger initialized - error check");
 }
 
+#[must_use]
+struct LockedWithMessage<'a> {
+    locked: RefMut<'a, BucketManager2>,
+    message: &'static str,
+}
+
+impl<'a> Drop for LockedWithMessage<'a> {
+    fn drop(&mut self) {
+        event!(Level::WARN, message=self.message, "lock-release");
+    }
+}
+
+fn lock_context_mut<'a>(item: &'a RefCell<BucketManager2>, message: &'static str) -> LockedWithMessage<'a> {
+    event!(Level::WARN, message=message, "lock-acquire-pre");
+    let locked = item.borrow_mut();
+    LockedWithMessage { locked, message }
+}
+
 async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
     let mut recent_peers_queried: BTreeMap<SocketAddr, RateLimit> = Default::default();
     let mut rng = rand::rngs::StdRng::from_entropy();
@@ -448,7 +465,7 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
             now: Instant::now() - Duration::from_secs(900),
         };
         let decoded: DhtNodeSave = bencode::from_bytes(&bytes[..])?;
-        let mut bm_locked = context.bm.borrow_mut();
+        let mut bm_locked = lock_context_mut(&context.bm, "file-sync-insert");
         for node in &decoded.nodes {
             let nenv = RequestEnvironment {
                 gen,
@@ -456,13 +473,13 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
                 addr: SocketAddr::V4(node.1),
             };
             let saddr = SocketAddr::V4(node.1);
-            bm_locked.node_seen(&ThinNode { id: node.0, saddr }, &nenv);
+            bm_locked.locked.node_seen(&ThinNode { id: node.0, saddr }, &nenv);
         }
         nodes_to_ping_as_bootstrap.extend(decoded.nodes.iter().map(|(x, y)| (*y, *x)));
         drop(bm_locked);
     } else {
-        let bm_locked = context.bm.borrow_mut();
-        let self_peer_id = bm_locked.self_peer_id;
+        let bm_locked = lock_context_mut(&context.bm, "file-sync-bootstrap");
+        let self_peer_id = bm_locked.locked.self_peer_id;
         drop(bm_locked);
 
         let mut target_id = self_peer_id;
@@ -488,7 +505,7 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
                 is_reply: false,
                 addr,
             };
-            let bm_locked = context.bm.borrow_mut();
+            let bm_locked = lock_context_mut(&context.bm, "file-sync-bootstrap-node");
             if rate_limit_check_and_incr(&mut recent_peers_queried, addr, &nenv) {
                 let mut node_msg = msg.clone();
                 let _ = dht_query_apply_txid(
@@ -526,7 +543,7 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
         let now = Instant::now();
         let addr = SocketAddr::V4(*addr);
         let mut node_msg = msg.clone();
-        let bm_locked = context.bm.borrow_mut();
+        let bm_locked = lock_context_mut(&context.bm, "file-sync-ping");
         running.push(dht_query_apply_txid(
             bm_locked,
             &context.bm,
@@ -557,8 +574,8 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
         timer.as_mut().reset(next_run.into());
 
         let mut nodes = Vec::new();
-        let bm_locked = context.bm.borrow_mut();
-        for (_, node) in &bm_locked.nodes {
+        let bm_locked = lock_context_mut(&context.bm, "file-sync-read");
+        for (_, node) in &bm_locked.locked.nodes {
             if let SocketAddr::V4(v4) = node.thin.saddr {
                 nodes.push((node.thin.id, v4));
             }
@@ -577,8 +594,8 @@ async fn file_sync(context: DhtContext) -> anyhow::Result<()> {
 
         let formatted = format!(
             "self-id: {}\n{}",
-            bm_locked.self_peer_id.hex(),
-            bm_locked.format_buckets()
+            bm_locked.locked.self_peer_id.hex(),
+            bm_locked.locked.format_buckets()
         );
 
         println!("{}", formatted);
@@ -613,8 +630,8 @@ async fn response_engine(context: DhtContext) -> anyhow::Result<()> {
         let genv = GeneralEnvironment {
             now: Instant::now(),
         };
-        let mut bm_locked = context.bm.borrow_mut();
-        let is_reply = bm_locked.handle_incoming_packet(&decoded, addr, &genv);
+        let mut bm_locked = lock_context_mut(&context.bm, "response-engine");
+        let is_reply = bm_locked.locked.handle_incoming_packet(&decoded, addr, &genv);
         event!(Level::INFO, is_reply=%is_reply, "rx-message");
 
         let env = RequestEnvironment {
@@ -640,24 +657,24 @@ async fn response_engine(context: DhtContext) -> anyhow::Result<()> {
         match decoded.data {
             DhtMessageData::Query(DhtMessageQuery::Ping(ref ping)) => {
                 peer_id = Some(ping.id);
-                response = Some(handle_query_ping(&bm_locked, &decoded));
+                response = Some(handle_query_ping(&bm_locked.locked, &decoded));
             }
             DhtMessageData::Query(DhtMessageQuery::FindNode(ref find_node)) => {
                 peer_id = Some(find_node.id);
                 response = Some(handle_query_find_node(
-                    &bm_locked, &decoded, find_node, &env.gen,
+                    &bm_locked.locked, &decoded, find_node, &env.gen,
                 ));
             }
             DhtMessageData::Query(DhtMessageQuery::GetPeers(ref gp)) => {
                 peer_id = Some(gp.id);
                 response = Some(handle_query_get_peers(
-                    &bm_locked, &decoded, gp, &env.gen, &addr,
+                    &bm_locked.locked, &decoded, gp, &env.gen, &addr,
                 ));
             }
             DhtMessageData::Query(DhtMessageQuery::AnnouncePeer(ref ap)) => {
                 peer_id = Some(ap.id);
                 response = Some(handle_query_announce_peer(
-                    &mut bm_locked,
+                    &mut bm_locked.locked,
                     &decoded,
                     ap,
                     &env.gen,
@@ -677,7 +694,7 @@ async fn response_engine(context: DhtContext) -> anyhow::Result<()> {
         }
 
         if let Some(pid) = peer_id {
-            bm_locked.node_seen(
+            bm_locked.locked.node_seen(
                 &ThinNode {
                     id: pid,
                     saddr: addr,
@@ -685,7 +702,7 @@ async fn response_engine(context: DhtContext) -> anyhow::Result<()> {
                 &env,
             );
             if is_reply {
-                if let Some(node) = bm_locked.nodes.get_mut(&pid) {
+                if let Some(node) = bm_locked.locked.nodes.get_mut(&pid) {
                     node.apply_activity_receive_response(&env.gen);
                 }
             }
@@ -736,16 +753,17 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
         now: Instant::now(),
     };
 
-    let mut bm_locked = context.bm.borrow_mut();
+
+    let mut bm_locked = lock_context_mut(&context.bm, "reapply-bucketting");
     let mut need_reprocessing = true;
     while need_reprocessing {
         println!("--");
         need_reprocessing = false;
-        let BucketManager { ref mut buckets, ref mut nodes, self_peer_id, .. } = *bm_locked;
-        for (_base, bi) in buckets {
+        // let BucketManager { ref mut buckets, ref mut nodes, self_peer_id, .. } = *bm_locked;
+        for (_base, bi) in bm_locked.locked.buckets.clone() {
             let mut good_nodes_unassigned = 0;
             let mut good_nodes_assigned = 0;
-            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (_nid, node) in bm_locked.locked.nodes.range(bi.prefix.to_range()) {
                 if node.quality(&gen).is_good() {
                     if node.in_bucket {
                         good_nodes_assigned += 1;
@@ -770,23 +788,24 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
 
             let mut max_demotes = std::cmp::min(remaining_good_slots, std::cmp::max(BUCKET_SIZE, good_nodes_unassigned));
             let mut node_candidates = Vec::new();
-            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (nid, node) in bm_locked.locked.nodes.range(bi.prefix.to_range()) {
                 // demote as many as we are promoting later in the loop iteration.
                 if !node.quality(&gen).is_good() && node.in_bucket {
-                    node_candidates.push(node);
+                    node_candidates.push(*nid);
                 }
             }
             node_candidates.shuffle(&mut thread_rng());
             node_candidates.truncate(max_demotes);
             event!(Level::DEBUG, demote_count=node_candidates.len(), "demote");
             for n in node_candidates.into_iter() {
+                let n = bm_locked.locked.nodes.get_mut(&n).unwrap();
                 n.in_bucket = false;
                 max_demotes -= 1;
             }
 
             let max_promotes = remaining_good_slots;
             let mut node_candidates = Vec::new();
-            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (_nid, node) in bm_locked.locked.nodes.range_mut(bi.prefix.to_range()) {
                 if !node.in_bucket && node.quality(&gen).is_good() {
                     node_candidates.push(node);
                 }
@@ -799,7 +818,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             }
 
             let mut good_nodes_assigned = 0;
-            for (_nid, node) in nodes.range_mut(bi.prefix.to_range()) {
+            for (_nid, node) in bm_locked.locked.nodes.range_mut(bi.prefix.to_range()) {
                 if node.quality(&gen).is_good() {
                     if node.in_bucket {
                         good_nodes_assigned += 1;
@@ -811,12 +830,12 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             event!(Level::DEBUG,
                 good_nodes_assigned=good_nodes_assigned,
                 is_bucket_saturated=BUCKET_SIZE <= good_nodes_assigned,
-                is_self_bucket=bi.prefix.contains(&self_peer_id),
+                is_self_bucket=bi.prefix.contains(&bm_locked.locked.self_peer_id),
                 prefix=%bi.prefix,
-                self_peer_id=?self_peer_id,
+                self_peer_id=?bm_locked.locked.self_peer_id,
                 "presplit");
 
-            if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&self_peer_id) {
+            if BUCKET_SIZE <= good_nodes_assigned && bi.prefix.contains(&bm_locked.locked.self_peer_id) {
                 // we will split so reset reprocessing flag.
                 event!(Level::DEBUG, "need_reprocessing");
                 need_reprocessing = true;
@@ -824,9 +843,10 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
         }
 
         if need_reprocessing {
-            event!(Level::INFO, before_buckets=bm_locked.buckets.len(), "need_reprocessing");
-            bm_locked.split_bucket(&self_peer_id)?;
-            event!(Level::INFO, after_buckets=bm_locked.buckets.len(), "need_reprocessing");
+            event!(Level::INFO, before_buckets=bm_locked.locked.buckets.len(), "need_reprocessing");
+            let self_peer_id = bm_locked.locked.self_peer_id;
+            bm_locked.locked.split_bucket(&self_peer_id)?;
+            event!(Level::INFO, after_buckets=bm_locked.locked.buckets.len(), "need_reprocessing");
         }
         println!("--xxx");
     }
@@ -836,7 +856,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     let mut removed_expired = 0;
     while expiring_nodes {
         let mut remove_nid = None;
-        for (nid, node) in bm_locked.nodes.range(last_nid..) {
+        for (nid, node) in bm_locked.locked.nodes.range(last_nid..) {
             if !node.in_bucket && node.is_expired(&gen) {
                 remove_nid = Some(*nid);
                 break;
@@ -847,7 +867,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             removed_expired += 1;
             event!(Level::WARN, node_id=?n, removed_expired=removed_expired, "remove-expired");
             last_nid = n;
-            bm_locked.nodes.remove(&n).unwrap();
+            bm_locked.locked.nodes.remove(&n).unwrap();
         }
     }
     event!(Level::WARN, removed_expired=removed_expired, "remove-expired-end");
@@ -915,8 +935,8 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                         }
                     }
                 }
-                let mut bm_locked = context.bm.borrow_mut();
-                if let Some(node) = bm_locked.select_node_for_maintenance_mut(&SelectNodeSearch {
+                let mut bm_locked = lock_context_mut(&context.bm, "maintenance");
+                if let Some(node) = bm_locked.locked.select_node_for_maintenance_mut(&SelectNodeSearch {
                     closest_to: search_target,
                 }, &ngen) {
                     let node_thin = node.thin;
@@ -959,7 +979,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 id: self_peer_id,
             });
             ngen.now = Instant::now();
-            let bm_locked = context.bm.borrow_mut();
+            let bm_locked = lock_context_mut(&context.bm, "maintenance");
             running.push(dht_query_apply_txid(
                 bm_locked,
                 &context.bm,
