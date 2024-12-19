@@ -935,7 +935,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                         }
                     }
                 }
-                let mut bm_locked = lock_context_mut(&context.bm, "maintenance");
+                let mut bm_locked = lock_context_mut(&context.bm, "maintenance-one");
                 if let Some(node) = bm_locked.locked.select_node_for_maintenance_mut(&SelectNodeSearch {
                     closest_to: search_target,
                 }, &ngen) {
@@ -979,7 +979,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 id: self_peer_id,
             });
             ngen.now = Instant::now();
-            let bm_locked = lock_context_mut(&context.bm, "maintenance");
+            let bm_locked = lock_context_mut(&context.bm, "maintenance-two");
             running.push(dht_query_apply_txid(
                 bm_locked,
                 &context.bm,
