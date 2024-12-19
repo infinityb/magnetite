@@ -948,6 +948,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             }
             ping_these_nodes_after2.push(pair);
         }
+        drop(bm_locked);
         ping_these_nodes_after = ping_these_nodes_after2;
 
         for (node_id, addr) in &ping_these_nodes_after {
