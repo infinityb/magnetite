@@ -905,6 +905,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
         let before_loop = ngen.now;
         let mut ping_these_nodes_after = Vec::new();
         while !maintenance_finished {
+            maintenance_finished = true;
             let mut buckets_needing_maintenance = Vec::new();
             let bm_locked = context.bm.borrow_mut();
             for (_, bi) in bm_locked.buckets.range(..) {
@@ -917,7 +918,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 }
             }
             drop(bm_locked);
-            maintenance_finished = buckets_needing_maintenance.is_empty();
+            // maintenance_finished = buckets_needing_maintenance.is_empty();
             for b in buckets_needing_maintenance.into_iter() {
                 let search_target = b.rand_within(&mut rng);
                 let mut msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
