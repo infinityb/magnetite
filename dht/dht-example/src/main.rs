@@ -733,7 +733,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     use rand::seq::SliceRandom;
 
     let gen = GeneralEnvironment {
-        now: Instant::now() - Duration::from_secs(900),
+        now: Instant::now(),
     };
 
     let mut bm_locked = context.bm.borrow_mut();
