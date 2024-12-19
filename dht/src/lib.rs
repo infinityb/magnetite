@@ -905,6 +905,7 @@ impl BucketManager2 {
                         "TX-{:016x} peer invalid: bad response peer-id",
                         txid,
                     );
+                    self.nodes.remove(&peer_id);
                 } else if let Some(node) = self.nodes.get_mut(&peer_id) {
                     node.apply_activity_receive_response(env);
                     let bucket = self.buckets.get_mut(&bucket_prefix.base).unwrap();

@@ -879,7 +879,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
         timer.as_mut().reset(next_request.into());
         ngen.now = Instant::now();
 
-        let mut maintenance_finished = true;
+        let mut maintenance_finished = false;
         let before_loop = ngen.now;
         while !maintenance_finished {
             let mut buckets_needing_maintenance = Vec::new();
