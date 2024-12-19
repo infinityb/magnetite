@@ -951,6 +951,15 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                     if let Err(e) = send_to_node(&context.so, node_thin.saddr, &msg).await {
                         event!(Level::WARN, "error sending {}", e);
                     }
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            }
+            while !running.is_empty() {
+                if let Some(Ok(r)) = running.next().await {
+                    let r: Box<TransactionCompletion> = r;
+                    if let Ok(r2) = r.response {
+                        ping_these_nodes_after.extend(r2.data.nodes);
+                    }
                 }
             }
         }
