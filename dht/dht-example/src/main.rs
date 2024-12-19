@@ -739,6 +739,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
     let mut bm_locked = context.bm.borrow_mut();
     let mut need_reprocessing = true;
     while need_reprocessing {
+        println!("--");
         need_reprocessing = false;
         let BucketManager { ref mut buckets, ref mut nodes, self_peer_id, .. } = *bm_locked;
         for (_base, bi) in buckets {
@@ -827,6 +828,7 @@ fn reapply_bucketting(context: DhtContext) -> anyhow::Result<()> {
             bm_locked.split_bucket(&self_peer_id)?;
             event!(Level::INFO, after_buckets=bm_locked.buckets.len(), "need_reprocessing");
         }
+        println!("--xxx");
     }
 
     let mut expiring_nodes = true;
