@@ -905,8 +905,31 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
 
                 ngen.now = Instant::now();
                 while max_inflight <= running.len() {
-                    let response = running.next().await;
-                    println!("got find-peer response {:#?}", response);
+                    if let Some(Ok(r)) = running.next().await {
+                        let r: Box<TransactionCompletion> = r;
+                        if let Ok(r2) = r.response {
+                            for (node_id, addr) in &r2.data.nodes {
+                                let addr = SocketAddr::V4(*addr);
+                                let mut msg: DhtMessage = Into::into(DhtMessageQueryPing {
+                                    id: self_peer_id,
+                                });
+                                ngen.now = Instant::now();
+                                let bm_locked = context.bm.borrow_mut();
+                                running.push(dht_query_apply_txid(
+                                    bm_locked,
+                                    &context.bm,
+                                    &mut msg,
+                                    addr,
+                                    &ngen.now,
+                                    Some(*node_id),
+                                ));
+
+                                if let Err(e) = send_to_node(&context.so, addr, &msg).await {
+                                    event!(Level::WARN, "error sending {}", e);
+                                }
+                            }
+                        }
+                    }
                 }
                 let mut bm_locked = context.bm.borrow_mut();
                 if let Some(node) = bm_locked.select_node_for_maintenance_mut(&SelectNodeSearch {
