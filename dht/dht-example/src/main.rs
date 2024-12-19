@@ -940,6 +940,16 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 }
             }
         }
+        let mut ping_these_nodes_after2 = Vec::new();
+        let bm_locked = context.bm.borrow_mut();
+        for pair in ping_these_nodes_after.into_iter() {
+            if bm_locked.nodes.get(&pair.0).is_some() {
+                continue;
+            }
+            ping_these_nodes_after2.push(pair);
+        }
+        ping_these_nodes_after = ping_these_nodes_after2;
+
         for (node_id, addr) in &ping_these_nodes_after {
             let addr = SocketAddr::V4(*addr);
             let mut msg: DhtMessage = Into::into(DhtMessageQueryPing {
