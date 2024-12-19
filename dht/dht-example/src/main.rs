@@ -33,7 +33,8 @@ use dht::wire::{
     DhtMessageResponseData, DhtNodeSave,
 };
 use dht::{
-    BucketManager2, GeneralEnvironment, RequestEnvironment, ThinNode, TransactionCompletion, BUCKET_SIZE
+    BucketManager2, GeneralEnvironment, RequestEnvironment, ThinNode, TransactionCompletion, BUCKET_SIZE,
+    SelectNodeSearch,
 };
 use magnetite_common::TorrentId;
 use magnetite_tracker_lib::{AnnounceCtx, TrackerSearch};
@@ -861,6 +862,7 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
 
     let mut target_id = self_peer_id;
 
+    let mut running = futures::stream::FuturesUnordered::new();
     let mut next_request = Instant::now() + Duration::from_secs(15);
     let timer = tokio::time::sleep_until(next_request.into());
     tokio::pin!(timer);
@@ -895,24 +897,32 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
             for b in buckets_needing_maintenance.into_iter() {
                 let search_target = b.rand_within(&mut rng);
 
-                //  let bm_locked = context.bm.borrow_mut();
-                let msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
+                let mut msg: DhtMessage = Into::into(DhtMessageQueryFindNode {
                     id: self_peer_id,
                     target: search_target,
                     want: SmallVec::new(),
                 });
+
                 ngen.now = Instant::now();
-                // let future = dht_query_apply_txid(
-                //     bm_locked,
-                //     &context.bm,
-                //     &mut msg,
-                //     node_thin.saddr,
-                //     &ngen.now,
-                //     Some(node_thin.id),
-                // );
-                // if let Err(e) = send_to_node(&context.so, saddr, &msg).await {
-                //     event!(Level::WARN, "error sending {}", e);
-                // }
+                let mut bm_locked = context.bm.borrow_mut();
+                if let Some(node) = bm_locked.select_node_for_maintenance_mut(&SelectNodeSearch {
+                    closest_to: search_target,
+                }, &ngen) {
+                    let node_thin = node.thin;
+                    running.push(dht_query_apply_txid(
+                        bm_locked,
+                        &context.bm,
+                        &mut msg,
+                        node_thin.saddr,
+                        &ngen.now,
+                        Some(node_thin.id),
+                    ));
+                    if let Err(e) = send_to_node(&context.so, node_thin.saddr, &msg).await {
+                        event!(Level::WARN, "error sending {}", e);
+                    }
+                } else {
+                    //
+                }
             }
         }
     }

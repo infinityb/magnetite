@@ -95,24 +95,24 @@ type TorrentIdHeapEntry<T> = GeneralHeapEntry<TorrentId, T>;
 #[derive(Debug, Clone)]
 pub struct Node {
     pub thin: ThinNode,
-    // if a persisted node, this will be set to the bucket it belongs to.
+    /// if a persisted node, this will be set to the bucket it belongs to.
     pub in_bucket: bool,
-    // none if we've never queried this node.
+    /// none if we've never queried this node.
     pub node_stats: Option<NodeReplyStats>,
-    // how many times we've timed out
+    /// how many times we've timed out
     pub timeouts: i32,
-    // record outgoing ping counter, saturating
+    /// record outgoing ping counter, saturating
     pub sent_pings: i8,
-    // when we can send the next exploratory ping/find-nodes
+    /// when we can send the next exploratory ping/find-nodes
     pub next_allowed_ping: Instant,
-    // used for expiration when not in bucket, bumped to now when:
-    // * inserted into the pool
-    // * responds to a query
+    /// used for expiration when not in bucket, bumped to now when:
+    /// * inserted into the pool
+    /// * responds to a query
     pub last_touch_time: Instant,
-    // used for expiration when not in bucket, bumped to now when:
-    // * inserted into the pool
-    // * responds to a query
-    // * we see a request from it
+    /// used for expiration when not in bucket, bumped to now when:
+    /// * inserted into the pool
+    /// * responds to a query
+    /// * we see a request from it
     pub last_touch_time_weak: Instant,
 }
 
@@ -485,6 +485,10 @@ mod tests_BucketManager2 {
     }
 }
 
+pub struct SelectNodeSearch {
+    pub closest_to: TorrentId,
+}
+
 impl BucketManager2 {
     pub fn new(tid: &TorrentId) -> BucketManager2 {
         let mut buckets = BTreeMap::new();
@@ -509,6 +513,63 @@ impl BucketManager2 {
             token_rs_previous: RandomState::new(),
             get_peers_search: RandomState::new(),
         }
+    }
+
+    pub fn bucket_requires_maintenance(&self, node_id: &TorrentId, env: &GeneralEnvironment) -> bool {
+        let mut in_bucket_and_good = 0;
+        for (_, n) in self.nodes.range(self.find_bucket_prefix(node_id).to_range()) {
+            in_bucket_and_good += (n.in_bucket && n.quality(env).is_good()) as usize;
+        }
+        assert!(in_bucket_and_good <= BUCKET_SIZE);
+        in_bucket_and_good < BUCKET_SIZE
+    }
+
+    pub fn select_node_for_maintenance_mut<'a>(&'a mut self, search: &SelectNodeSearch, env: &GeneralEnvironment) -> Option<&'a mut Node> {
+        struct NodeRecord {
+            node_id: TorrentId,
+            last_touch_time: Instant,
+        }
+
+        fn compare_and_replace_if_older(into: &mut Option<NodeRecord>, new: &NodeRecord) {
+            if let Some(ref nr) = *into {
+                if new.last_touch_time < nr.last_touch_time {
+                    *into = Some(NodeRecord {
+                        node_id: new.node_id,
+                        last_touch_time: new.last_touch_time,
+                    });
+                }
+            } else {
+                *into = Some(NodeRecord {
+                    node_id: new.node_id,
+                    last_touch_time: new.last_touch_time,
+                });
+            }
+        }
+
+        let mut rng = thread_rng();
+        let mut oldest_node_ltt: Option<NodeRecord> = None;
+        let mut oldest_node_ltt_without_rand: Option<NodeRecord> = None;
+        for (node_id, n) in self.nodes.range(self.find_bucket_prefix(&search.closest_to).to_range()) {
+            if !n.in_bucket {
+                continue;
+            }
+            compare_and_replace_if_older(&mut oldest_node_ltt_without_rand, &NodeRecord {
+                node_id: *node_id,
+                last_touch_time: n.last_touch_time,
+            });
+            if rng.gen_range(0..=n.timeouts) != 0 {
+                continue;
+            }
+            compare_and_replace_if_older(&mut oldest_node_ltt, &NodeRecord {
+                node_id: *node_id,
+                last_touch_time: n.last_touch_time,
+            });
+        }
+        if let Some(ref o) = oldest_node_ltt {
+            return self.nodes.get_mut(&o.node_id);
+        }
+        let o = oldest_node_ltt_without_rand?;
+        return self.nodes.get_mut(&o.node_id);
     }
 
     pub fn node_seen(&mut self, node_: &ThinNode, env: &RequestEnvironment) {
