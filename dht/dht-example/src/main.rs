@@ -904,14 +904,15 @@ async fn maintenance(context: DhtContext) -> anyhow::Result<()> {
                 });
 
                 ngen.now = Instant::now();
+                while max_inflight <= running.len() {
+                    let response = running.next().await;
+                    println!("got find-peer response {:#?}", response);
+                }
                 let mut bm_locked = context.bm.borrow_mut();
                 if let Some(node) = bm_locked.select_node_for_maintenance_mut(&SelectNodeSearch {
                     closest_to: search_target,
                 }, &ngen) {
                     let node_thin = node.thin;
-                    while max_inflight <= running.len() {
-                        running.next().await;
-                    }
                     running.push(dht_query_apply_txid(
                         bm_locked,
                         &context.bm,
