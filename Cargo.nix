@@ -3956,6 +3956,10 @@ rec {
             packageId = "reqwest";
           }
           {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
             name = "svix-ksuid";
             packageId = "svix-ksuid";
           }

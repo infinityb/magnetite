@@ -14,6 +14,8 @@ use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
 use tokio_postgres::tls::NoTls;
 // use hyper::client::Client;
 
+use serde_json;
+
 use magnetite_common::TorrentId;
 use magnetite_model::{TorrentMetaWrapped, BitField};
 use magnetite_single_api::proto::magnetite_server::{Magnetite, MagnetiteServer};
@@ -176,6 +178,33 @@ impl TryFromProto<proto::AddTorrentRequest> for AddTorrentRequestParsed {
     }
 }
 
+#[derive(Debug)]
+struct ChangeTorrentStatusRequestParsed {
+    info_hash: TorrentId,
+    set_active: bool,
+}
+
+impl TryFromProto<proto::ChangeTorrentStatusRequest> for ChangeTorrentStatusRequestParsed {
+    fn try_from_proto(value: &proto::ChangeTorrentStatusRequest) -> Result<Self, Status> {
+        let info_hash: TorrentId = value.info_hash.parse()
+            .map_err(|e| Status::invalid_argument(format!("badly formed info_hash: {}", e)))?;
+
+        Ok(ChangeTorrentStatusRequestParsed {
+            info_hash: info_hash,
+            set_active: value.set_active,
+        })
+    }
+}
+
+struct ChangeTorrentStatusResponseParsed {}
+
+impl TryIntoProto for ChangeTorrentStatusResponseParsed {
+    type Proto = proto::ChangeTorrentStatusResponse;
+
+    fn try_into_proto(&self) -> Result<Self::Proto, Status> {
+        Ok(proto::ChangeTorrentStatusResponse {})
+    }
+}
 
 struct AddTorrentResponseParsed {}
 
@@ -238,18 +267,18 @@ async fn database_add_torrent(
         return Err(StatusError(Status::already_exists("info_hash already added")).into());
     }
 
-    let empty = serde_json::value!();
+    let empty = serde_json::json!({});
     let info_data = TorrentMetaWrapped::get_info_bytes(&request.get_ref().torrent_data[..])?;
     let maybe_rec = client.query_opt("
         INSERT INTO torrent
         (info_hash, info_data, annotations, state)
         VALUES
-        ()
+        ($1, $2, $3, $4)
     ", &[
         &request.get_ref().info_hash,
         &info_data,
         &empty,
-        "",
+        &"",
     ]).await?;
 
     // let mut locked = self.torrents.lock().await;
@@ -382,109 +411,24 @@ impl Magnetite for MagnetiteService {
         -> Result<Response<proto::ChangeTorrentStatusResponse>, Status>
     {
         let (mut client, connection) = get_database_handle(&self.pgdsn, NoTls).await?;
-        let parsed = TryFromProto::try_from_proto(request.get_ref())?;
-
-        /////////////////
-        /////////////////
+        let parsed: ChangeTorrentStatusRequestParsed = TryFromProto::try_from_proto(request.get_ref())?;
         
-        // let req_body = request.get_ref();
-        // let info_hash: TorrentId = req_body.info_hash.parse()
-        //     .map_err(|e| Status::invalid_argument(format!("badly formed info_hash: {}", e)))?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Connection error: {}", e);
+            }
+        });
 
-        // let mut locked = self.torrents.lock().await;
-        // let service_arc = locked.get_mut(&info_hash)
-        //     .ok_or_else(|| Status::invalid_argument("info_hash not known"))
-        //     .map(|e| Arc::clone(e))
-        //     ?;
-        // drop(locked);
+        // need to spawn management task.. todo..
 
-        // let mut service = service_arc.lock().await;
-        // let notify2 = Arc::clone(&service.statics.state_changed);
+        let _rows_affected = client.execute(
+            "UPDATE torrent SET active = $2 WHERE info_hash = $1",
+            &[&parsed.info_hash.hex().to_string(), &parsed.set_active]
+        ).await
+            .map_err(|e| Status::internal(format!("Database error: {}", e)))?;
 
-        // let mut do_start_task = false;
-        // if req_body.set_active {
-        //     match service.state_active {
-        //         TorrentServiceState::Stopping => {
-        //             return Err(Status::failed_precondition("currently stopping torrent, cannot start"));
-        //         }
-        //         TorrentServiceState::Active => {
-        //             return Ok(Response::new(proto::ChangeTorrentStatusResponse {}));
-        //         }
-        //         TorrentServiceState::Offline => {
-        //             do_start_task = true;
-        //         }
-        //     }
-        // } else {
-        //     if service.state_active == TorrentServiceState::Active {
-        //         service.state_active = TorrentServiceState::Stopping;
-        //         service.statics.state_changed.notify_one();
-        //     }
-        //     if service.state_active == TorrentServiceState::Stopping {
-        //         return Ok(Response::new(proto::ChangeTorrentStatusResponse {}));
-        //     }
-        // }
-        // drop(service);
-
-        // if do_start_task {
-        //     let torrent = {
-        //         let service = service_arc.lock().await;
-        //         TorrentMetaWrapped::from_bytes(&service.statics.data)
-        //              .map_err(|e| Status::internal(format!("stored torrent invalid!: {}", e)))?
-        //     };
-
-        //     let self_peer_id = self.self_peer_id.clone();
-        //     tokio::spawn(async move {
-        //         let mut interval = 120;
-        //         let service_arc = service_arc;
-        //         // "/announce?info_hash=<PHEX>&peer_id=<PHEX>&event=started"
-        //         event!(Level::INFO, announce = %torrent.meta.announce, "add_torrent.meta");
-        //         let url = format!("{}?info_hash={}&peer_id={}&event=started&port={}",
-        //             torrent.meta.announce,
-        //             percent_encode(info_hash.as_bytes(), NON_ALPHANUMERIC),
-        //             percent_encode(self_peer_id.as_bytes(), NON_ALPHANUMERIC),
-        //             51409,
-        //         );
-
-        //         event!(Level::WARN, announce_url = url, "add_torrent.meta2");
-        //         let bytes = reqwest::get(&url)
-        //             .await?
-        //             .bytes()
-        //             .await?;
-
-        //         loop {
-        //             let sleeper = sleep(Duration::from_secs(interval));
-        //             tokio::pin!(sleeper);
-
-        //             tokio::select! {
-        //                 _ = notify2.notified() => {
-        //                     let service = service_arc.lock().await;
-        //                     if service.state_active == TorrentServiceState::Stopping {
-        //                         break;
-        //                     } else {
-        //                         continue;
-        //                     }
-        //                 }
-        //                 _ = &mut sleeper, if !sleeper.is_elapsed() => {}
-        //             }
-
-        //             let url = format!("{}?info_hash={}&peer_id={}&event=started&port={}",
-        //                 torrent.meta.announce,
-        //                 percent_encode(info_hash.as_bytes(), NON_ALPHANUMERIC),
-        //                 percent_encode(self_peer_id.as_bytes(), NON_ALPHANUMERIC),
-        //                 51409,
-        //             );
-
-        //             event!(Level::WARN, announce_url = url, "add_torrent.meta2");
-        //             let bytes = reqwest::get(&url)
-        //                 .await?
-        //                 .bytes()
-        //                 .await?;
-        //         }
-        //         Result::<_, failure::Error>::Ok(())
-        //     });
-        // }
-
-        Ok(Response::new(proto::ChangeTorrentStatusResponse {}))
+        let out = ChangeTorrentStatusResponseParsed {};
+        Ok(Response::new(out.try_into_proto()?))
     }
 }
 
