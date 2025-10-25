@@ -190,7 +190,7 @@ where
                     counter!("memorycache.cache_miss", 1);
                 }
 
-                let _ = tx.broadcast(Some(res));
+                let _ = tx.send_replace(Some(res));
                 drop(tx);
             });
 

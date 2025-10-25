@@ -7,8 +7,9 @@ use sha1::{Digest, Sha1};
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
+use magnetite_model::TorrentMetaWrapped;
 
-use crate::model::{StorageEngineCorruption, TorrentMetaWrapped};
+use crate::model::{StorageEngineCorruption};
 use crate::storage::{multi_file, GetPieceRequest, PieceStorageEngineDumb};
 use crate::CARGO_PKG_VERSION;
 
@@ -36,7 +37,7 @@ pub fn get_subcommand() -> App<'static> {
         )
 }
 
-pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 

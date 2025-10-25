@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use magnetite_common::TorrentId;
 
-use crate::model::TorrentMetaWrapped;
+use magnetite_model::TorrentMetaWrapped;
 use crate::storage::PieceStorageEngineDumb;
 
 mod errors;

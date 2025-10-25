@@ -12,7 +12,7 @@ magnetite-model = { path = "../magnetite-model" }
 
 bytes = { version = "1.5.0", features = ["serde"] }
 clap = "4.4.18"
-failure = "0.1.8"
+anyhow = "1.0.70"
 rand = "0.8.5"
 # tokio = { version = "1.35.1", features = ["full"] }
 tracing = { version = "0.1.40", features = ["std"], default-features = false }

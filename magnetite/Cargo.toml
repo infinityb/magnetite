@@ -9,10 +9,11 @@ edition = "2018"
 bencode = { path = "../bencode" }
 bin-str = { path = "../bin-str" }
 magnetite-common = { path = "../magnetite-common" }
+magnetite-model = { path = "../magnetite-model" }
 
-# external
+#
 byteorder = "1"
-bytes = "0.5"
+bytes = "1.5.0"
 clap = "3.2.23"
 env_logger = "0.6"
 failure = "0.1.6"
@@ -21,6 +22,7 @@ iresult = { path = "../iresult" }
 libc = "0.2.16"
 log = "*"
 lru = "0.4.3"
+thiserror = "2.0.17"
 # prost = "0.6"
 # prost-types = "0.6"
 rand = "0.7"
@@ -50,4 +52,3 @@ default = []
 
 # [build-dependencies]
 # tonic-build = { version = "0.9.1", features = ["prost"] }
-

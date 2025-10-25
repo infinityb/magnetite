@@ -9,7 +9,7 @@ members = [
 	"magnetite-model",
 	"bencode",
 	"iresult",
-	# "magnetite",
+	"magnetite",
 	"magnetite-common",
 	"magnetite-tracker",
 	"magnetite-tracker/lib",

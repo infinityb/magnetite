@@ -9,9 +9,10 @@ use tokio::sync::Mutex;
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
+use magnetite_model::BitField;
 
 use super::{GetPieceRequest, PieceStorageEngineDumb};
-use crate::model::{BitField, MagnetiteError, StorageEngineCorruption};
+use crate::model::{MagnetiteError, StorageEngineCorruption};
 
 #[derive(Debug)]
 pub enum ShaVerifyState {

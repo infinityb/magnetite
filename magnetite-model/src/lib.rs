@@ -174,7 +174,7 @@ pub struct TorrentMetaWrapped {
 }
 
 impl TorrentMetaWrapped {
-    pub fn get_info_bytes<'a>(buffer: &'a [u8]) -> Result<&'a [u8], failure::Error> {
+    pub fn get_info_bytes<'a>(buffer: &'a [u8]) -> Result<&'a [u8], anyhow::Error> {
         fn find_subsequence<T>(haystack: &[T], needle: &[T]) -> Option<usize>
             where for<'a> &'a [T]: PartialEq
         {
@@ -187,11 +187,11 @@ impl TorrentMetaWrapped {
             let byte_offset = find_subsequence(buffer, &info).expect("bencoder bug");
             return Ok(&buffer[byte_offset..][..info.len()])
         } else {
-            return Err(failure::format_err!("invalid torrent: missing info"));
+            return Err(anyhow::format_err!("invalid torrent: missing info"));
         }
     }
 
-    pub fn from_bytes(buffer: &[u8]) -> Result<TorrentMetaWrapped, failure::Error> {
+    pub fn from_bytes(buffer: &[u8]) -> Result<TorrentMetaWrapped, anyhow::Error> {
         let unpacked: bencode::Value = bencode::from_bytes(buffer)?;
         let meta: TorrentMeta = bencode::from_bytes(&buffer[..])?;
 
@@ -203,10 +203,10 @@ impl TorrentMetaWrapped {
             let hash_result = hasher.result();
             info_hash = TorrentId::from_slice(&hash_result[..])?;
         } else {
-            return Err(failure::format_err!("invalid torrent: missing info"));
+            return Err(anyhow::format_err!("invalid torrent: missing info"));
         }
 
-        
+
         let total_length = if let Some(length) = meta.info.length {
             length
         } else {

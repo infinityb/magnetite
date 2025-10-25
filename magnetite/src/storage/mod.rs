@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::Mutex;
+use tokio::io::AsyncSeekExt;
 
 use magnetite_common::TorrentId;
 
@@ -11,7 +12,6 @@ pub mod memory_cache;
 pub mod multi_file;
 pub mod piece_file;
 pub mod piggyback;
-pub mod remote_magnetite;
 pub mod sha_verify;
 pub mod state_wrapper;
 
@@ -84,7 +84,7 @@ pub mod utils {
     use std::io::{self, SeekFrom};
 
     use tokio::fs::File as TokioFile;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     use tokio::sync::Mutex;
 
     pub async fn piece_file_pread_exact(

@@ -66,7 +66,7 @@ struct Opts {
     enable_directory_listings: bool,
 }
 
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), anyhow::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();
@@ -213,7 +213,7 @@ async fn service_request_helper<P>(
     _remote_addr: std::net::SocketAddr,
     opts: Opts,
     req: Request<Body>,
-) -> Result<Response<Body>, failure::Error>
+) -> Result<Response<Body>, anyhow::Error>
 where
     P: PieceStorageEngineDumb + Clone + Send + Sync + 'static,
 {
@@ -518,7 +518,7 @@ where
 fn get_ranges(
     value: &hyper::header::HeaderValue,
     total_size: u64,
-) -> Result<Vec<HttpRangeSpan>, failure::Error> {
+) -> Result<Vec<HttpRangeSpan>, anyhow::Error> {
     let value_str = value.to_str().map_err(|_| ClientError)?;
     if !value_str.starts_with("bytes=") {
         return Err(ClientError.into());
@@ -551,7 +551,7 @@ fn get_ranges(
     Ok(out)
 }
 
-fn http_span_check_no_overlaps(spans: &[HttpRangeSpan]) -> Result<(), failure::Error> {
+fn http_span_check_no_overlaps(spans: &[HttpRangeSpan]) -> Result<(), anyhow::Error> {
     if spans.len() > 30 {
         // FIXME
         return Err(ClientError.into());

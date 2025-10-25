@@ -11,7 +11,7 @@ use metrics::{counter, gauge};
 // use salsa20::stream_cipher::{SyncStreamCipher, SyncStreamCipherSeek};
 // use salsa20::XSalsa20;
 use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 

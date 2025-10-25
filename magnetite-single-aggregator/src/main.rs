@@ -255,7 +255,7 @@ async fn database_add_torrent(
     client: &mut tokio_postgres::Client,
     request: Request<proto::AddTorrentRequest>,
     parsed: &AddTorrentRequestParsed,
-) -> Result<AddTorrentResponseParsed, failure::Error> {
+) -> Result<AddTorrentResponseParsed, anyhow::Error> {
     let maybe_rec = client.query_opt("
         SELECT id FROM torrent
         WHERE info_hash = $1
@@ -291,7 +291,7 @@ async fn database_add_torrent(
     //     state_active: TorrentServiceState::Offline,
     // })));
 
-   
+
     Ok(AddTorrentResponseParsed {})
 }
 
@@ -342,7 +342,7 @@ impl Magnetite for MagnetiteService {
         // tokio::spawn(async move {
         //     use proto::torrent_session_start_item::Item;
 
-        //     let bitfield = BitField::all(torrent.meta.info.pieces.len() as u32);   
+        //     let bitfield = BitField::all(torrent.meta.info.pieces.len() as u32);
         //     let bfvec = bitfield.data.iter().cloned().collect();
         //     tx.send(Ok(proto::TorrentSessionStartItemInit {
         //         session_id: session_id.to_string(),
@@ -412,7 +412,7 @@ impl Magnetite for MagnetiteService {
     {
         let (mut client, connection) = get_database_handle(&self.pgdsn, NoTls).await?;
         let parsed: ChangeTorrentStatusRequestParsed = TryFromProto::try_from_proto(request.get_ref())?;
-        
+
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("Connection error: {}", e);
@@ -440,4 +440,3 @@ fn print_test_logging() {
     event!(Level::WARN, "logger initialized - warn check");
     event!(Level::ERROR, "logger initialized - error check");
 }
-

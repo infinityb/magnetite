@@ -21,7 +21,7 @@ mod clients;
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
-fn main() -> Result<(), failure::Error> {
+fn main() -> Result<(), anyhow::Error> {
     let mut rt = Runtime::new().unwrap();
 
     let metrics_rx = Receiver::builder()
@@ -61,7 +61,7 @@ fn main() -> Result<(), failure::Error> {
             .subcommand(cmdlet::validate_mse_tome::get_subcommand())
             .subcommand(cmdlet::host::get_subcommand())
             .subcommand(cmdlet::webserver::get_subcommand());
-        
+
     let app = app
         .subcommand(cmdlet::dump_torrent_info::get_subcommand())
         .subcommand(cmdlet::validate_torrent_data::get_subcommand());

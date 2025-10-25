@@ -314,7 +314,7 @@ impl Into<DhtSystemRequestData> for DhtSystemRequestSearch {
 // }
 
 #[tokio::main]
-async fn main() -> Result<(), failure::Error> {
+async fn main() -> Result<(), anyhow::Error> {
     let mut my_subscriber_builder =
         FmtSubscriber::builder().with_span_events(FmtSpan::FULL | FmtSpan::NEW | FmtSpan::CLOSE);
 
@@ -410,11 +410,11 @@ async fn main() -> Result<(), failure::Error> {
                     .unwrap();
             }
 
-            Result::<_, failure::Error>::Ok(())
+            Result::<_, anyhow::Error>::Ok(())
         })
         .await?;
 
-    Result::<_, failure::Error>::Ok(())
+    Result::<_, anyhow::Error>::Ok(())
 }
 
 #[allow(clippy::cognitive_complexity)] // macro bug around event!()

@@ -4,17 +4,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::pin::Pin;
 
+
 use clap::{App, Arg, SubCommand};
 use tokio::net::TcpListener;
-use tokio::task;
+use tokio::sync::mpsc;
+use tokio::task::{self, LocalSet};
 use tracing::{event, Level};
 use anyhow::{Context};
 use futures::{Future, FutureExt, StreamExt, SinkExt};
 
-use crate::model::config::build_storage_engine;
-use crate::model::config::{Frontend, FrontendHost};
-
-use crate::storage::remote_magnetite::start_server;
+use crate::model::config::{Config, build_storage_engine, Frontend, FrontendHost};
 
 use crate::CARGO_PKG_VERSION;
 
@@ -89,7 +88,7 @@ pub fn start_download_thread<'a>(local: &'a task::LocalSet) -> impl Future<Outpu
     let shared_state = ();
     let shared_state: Rc<RefCell<_>> = Rc::new(RefCell::new(shared_state));
 
-    
+
     local.run_until(async move {
         Ok(())
     })
@@ -99,7 +98,7 @@ pub fn start_download_thread<'a>(local: &'a task::LocalSet) -> impl Future<Outpu
     // Ok(())
 
     // .run_until(async {
-        
+
 
     //     // driver/reaper task
     //     let (tx, rx) = futures::channel::mpsc::channel(64);
@@ -117,35 +116,34 @@ pub fn start_download_thread<'a>(local: &'a task::LocalSet) -> impl Future<Outpu
     // }).await
 }
 
-pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
-    use crate::model::config::Config;
-
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
     let config = matches.value_of("config").unwrap();
     let mut cfg_fi = File::open(&config).unwrap();
     let mut cfg_by = Vec::new();
     cfg_fi.read_to_end(&mut cfg_by).unwrap();
     let config: Config = toml::de::from_slice(&cfg_by).unwrap();
 
+    unimplemented!();
 
-    let (send, mut recv) = mpsc::unbounded_channel();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    // let (send, mut recv) = mpsc::unbounded_channel();
+    // let rt = tokio::runtime::Builder::new_current_thread()
+    //     .enable_all()
+    //     .build()
+    //     .unwrap();
+    //
+    // std::thread::Builder::new().name("foo".into()).spawn(move || {
+    //     let local = LocalSet::new();
+    //     local.spawn_local(async {
+    //         send.send(start_download_thread(&local).await);
+    //     });
 
-    thread::Builder::new().name("foo".into()).spawn(move || {
-        let local = LocalSet::new();
-        local.spawn_local(async move {
-            send.send(start_download_thread(&local).await);
-        });
+    //     // This will return once all senders are dropped and all
+    //     // spawned tasks have returned.
+    //     rt.block_on(local);
+    // });
 
-        // This will return once all senders are dropped and all
-        // spawned tasks have returned.
-        rt.block_on(local);
-    });
-
-    if let Some(v) = recv.recv().await {
-        v?;
-    }
-    Ok(())
+    // if let Some(v) = recv.recv().await {
+    //     v?;
+    // }
+    // Ok(())
 }

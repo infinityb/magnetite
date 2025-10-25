@@ -13,8 +13,10 @@ use smallvec::SmallVec;
 use bytes::{Bytes, BytesMut};
 use futures::Future;
 
+use magnetite_model::TorrentMetaWrapped;
+
 // use crate::storage::{GetDataVec, GetDataRequest, GetDataResponsePending, GetDataResponse};
-use crate::model::{InternalError, MagnetiteError, TorrentMetaWrapped};
+use crate::model::{InternalError, MagnetiteError};
 
 const COMMAND_BUFFER_MAX_OPEN_FILES: usize = 16;
 
@@ -74,7 +76,7 @@ pub enum StorageCge {
 
 pub async fn execute_command_buffer(commands: &[StorageCge]) -> Result<(), MagnetiteError> {
     let mut bound_files: [Option<Arc<Mutex<File>>>; COMMAND_BUFFER_MAX_OPEN_FILES] = std::array::from_fn(|_| None);
-    
+
     let mut buffer = BytesMut::new();
     for c in commands {
         match c {
@@ -249,7 +251,7 @@ struct LastSentPieceSource<'a> {
 
 //             // FIXME: we can use iovecs here.
 //             Box::pin(async {
-//                 // 
+//                 //
 //                 // let request_length = mul_u32_to_u64(req.block_fetch_count, req.piece_length);
 //                 // let mut last_file = None;
 //                 let mut offset_cache: Option<LastSentPieceSource> = None;
@@ -258,7 +260,7 @@ struct LastSentPieceSource<'a> {
 //                 // assert_eq!(
 //                 //     pending.individual_remaining().map(|x| x.piece_length as u64).sum(),
 //                 //     spans.iter().map(|x| x.length as u64).sum());
-                
+
 //                 if pending.is_complete() {
 //                     // nothing requested  - the remaining iterator returned no values, so we're in the
 //                     // complete state.

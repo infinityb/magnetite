@@ -16,11 +16,14 @@ impl Inflight {
     ) -> impl std::future::Future<Output = Result<Bytes, MagnetiteError>> + Send {
         async move {
             loop {
-                match self.finished.recv().await {
-                    Some(Some(v)) => return v,
-                    Some(None) => continue,
-                    None => return Err(CompletionLost.into()),
+                if let Err(_err) = self.finished.changed().await {
+                    return Err(CompletionLost.into());
                 }
+                let value = match self.finished.borrow().as_ref() {
+                    Some(v) => v.clone(),
+                    None => continue,
+                };
+                return value;
             }
         }
     }

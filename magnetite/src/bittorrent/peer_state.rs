@@ -4,9 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use magnetite_common::TorrentId;
-
-use crate::model::proto::Handshake;
-use crate::model::{BitField, TorrentMetaWrapped};
+use magnetite_common::proto::Handshake;
+use magnetite_model::{BitField, TorrentMetaWrapped};
 
 pub struct TrackerGroup {
     //

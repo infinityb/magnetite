@@ -70,7 +70,7 @@ impl FuseResultWrapper for FuseReplyDirectory {
 pub fn fuse_result_wrapper<P, F>(mut responder: P::Responder, f: F) -> FuseCompleter<P>
 where
     P: FuseResultWrapper,
-    F: FnOnce(&mut P::Responder) -> Result<P::Result, failure::Error>,
+    F: FnOnce(&mut P::Responder) -> Result<P::Result, anyhow::Error>,
 {
     match f(&mut responder) {
         Ok(result) => FuseCompleter {

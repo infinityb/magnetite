@@ -3,34 +3,36 @@ use std::io;
 use std::ops::{BitAnd, BitXor};
 use std::path::PathBuf;
 
-use failure::Fail;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use thiserror::Error;
 
-use magnetite_common::{TorrentId, TorrentMeta, TorrentMetaInfo, TorrentMetaInfoFile, TorrentMetaWrapped, TorrentMetaInfo};
+use magnetite_common::TorrentId;
+
+pub mod config;
 
 use crate::CARGO_PKG_VERSION;
 
 const TORRENT_ID_LENGTH: usize = 20;
 
-#[derive(Debug, Fail, Clone)]
+#[derive(Error, Debug, Clone)]
 pub enum MagnetiteError {
-    #[fail(display = "message truncated")]
+    #[error("message truncated")]
     Truncated,
-    #[fail(display = "protocol violation")]
+    #[error("protocol violation")]
     ProtocolViolation,
-    #[fail(display = "storage engine corruption")]
+    #[error("storage engine corruption")]
     StorageEngineCorruption,
-    #[fail(display = "bad handshake: {:?}", reason)]
+    #[error("bad handshake: {reason:?}")]
     BadHandshake { reason: BadHandshakeReason },
-    #[fail(display = "I/O error: {:?}", kind)]
+    #[error("I/O error: {kind:?}")]
     IoError { kind: io::ErrorKind },
-    #[fail(display = "insufficient space")]
+    #[error("insufficient space")]
     InsufficientSpace,
-    #[fail(display = "completion lost")]
+    #[error("completion lost")]
     CompletionLost,
-    #[fail(display = "internal error: {}", msg)]
+    #[error("internal error: {msg}")]
     InternalError { msg: String },
 }
 

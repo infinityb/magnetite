@@ -5,9 +5,9 @@ use smallvec::Array;
 use smallvec::SmallVec;
 
 use magnetite_common::TorrentId;
+use magnetite_common::proto::{Message, PieceSlice};
 
-use crate::model::proto::{Message, PieceSlice};
-use crate::model::BitField;
+use magnetite_model::BitField;
 
 #[derive(Debug)]
 struct PieceSet {
@@ -303,7 +303,7 @@ struct PeerState {
     peer_bitfield: BitField, // the peer told us they have these pieces
     exposed_bitfield: BitField, // we told the peer we have these pieces
     downloading_current_pieces: SmallVec<[u32; 16]>,
-    
+
     // how many bytes we have outstanding from this peer (download).
     outstanding_bytes: u64,
 

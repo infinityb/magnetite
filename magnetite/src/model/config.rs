@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 
 use magnetite_common::TorrentId;
+use magnetite_model::TorrentMetaWrapped;
 
-use crate::model::{FileError, InternalError, TorrentMetaWrapped};
+use crate::model::{FileError, InternalError};
 use crate::storage::state_wrapper::ContentInfoManager;
 use crate::storage::{
     disk_cache::DiskCacheWrapper, memory_cache::MemoryCacheWrapper, multi_file, piece_file,
-    remote_magnetite::RemoteMagnetite, sha_verify::ShaVerifyMode, state_wrapper,
+    sha_verify::ShaVerifyMode, state_wrapper,
     PieceFileStorageEngine, PieceStorageEngine, PieceStorageEngineDumb, ShaVerify, StateWrapper,
 };
 
@@ -99,7 +100,6 @@ pub enum StorageEngineElement {
     MemoryCache(StorageEngineElementMemoryCache),
     MultiFile,
     PieceFile,
-    RemoteMagnetite(StorageEngineElementRemoteMagnetite),
     ShaValidate(StorageEngineElementShaValidate),
 }
 
@@ -154,7 +154,7 @@ mod validate_mode {
 
 fn build_torrent_map(
     config: &Config,
-) -> Result<HashMap<PathBuf, Arc<TorrentMetaWrapped>>, failure::Error> {
+) -> Result<HashMap<PathBuf, Arc<TorrentMetaWrapped>>, anyhow::Error> {
     let mut path_to_torrent = HashMap::new();
 
     for s in &config.torrents {
@@ -191,7 +191,7 @@ pub fn get_torrent_salsa(crypto_secret: &str, info_hash: &TorrentId) -> Option<(
 fn multi_file(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, anyhow::Error> {
     let mut mf_builder = multi_file::MultiFileStorageEngine::builder();
 
     for s in &config.torrents {
@@ -226,7 +226,7 @@ fn multi_file(
 fn piece_file(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, anyhow::Error> {
     event!(Level::INFO, "configuring PieceFile backend");
     let mut pf_builder = PieceFileStorageEngine::builder();
 
@@ -261,21 +261,10 @@ fn piece_file(
     Ok(boxed.into())
 }
 
-fn remote_magnetite(
-    rm: &StorageEngineElementRemoteMagnetite,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
-    event!(
-        Level::INFO,
-        "configuring RemoteMagnetite backend - {:?}",
-        rm
-    );
-    Ok(Arc::new(RemoteMagnetite::connected(&rm.upstream_server)))
-}
-
 fn build_storage_engine_dumb_helper(
     config: &Config,
     path_to_torrent: &HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, anyhow::Error> {
     let mut se_iter = config.storage_engine.iter();
     let first_engine = se_iter.next().ok_or_else(|| InternalError {
         msg: "must define at least one storage engine",
@@ -294,7 +283,6 @@ fn build_storage_engine_dumb_helper(
             }
             StorageEngineElement::MultiFile => multi_file(config, path_to_torrent)?,
             StorageEngineElement::PieceFile => piece_file(config, path_to_torrent)?,
-            StorageEngineElement::RemoteMagnetite(ref rm) => remote_magnetite(rm)?,
             StorageEngineElement::ShaValidate(..) => {
                 return Err(InvalidRootStorage(InvalidStorage {
                     name: "sha-validate",
@@ -310,12 +298,6 @@ fn build_storage_engine_dumb_helper(
             }
             StorageEngineElement::PieceFile => {
                 return Err(InvalidChainedStorage(InvalidStorage { name: "piece-file" }).into());
-            }
-            StorageEngineElement::RemoteMagnetite(..) => {
-                return Err(InvalidChainedStorage(InvalidStorage {
-                    name: "remote-magnetite",
-                })
-                .into());
             }
             StorageEngineElement::MemoryCache(ref mc) => {
                 event!(Level::INFO, "configuring MemoryCache backend - {:?}", mc);
@@ -359,20 +341,20 @@ fn build_storage_engine_dumb_helper(
 
 fn build_storage_engine_helper(
     _config: &Config,
-) -> Result<Arc<Box<dyn PieceStorageEngine + Send + Sync + 'static>>, failure::Error> {
+) -> Result<Arc<Box<dyn PieceStorageEngine + Send + Sync + 'static>>, anyhow::Error> {
     unimplemented!();
 }
 
 pub fn build_storage_engine_dumb(
     config: &Config,
-) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, failure::Error> {
+) -> Result<Arc<dyn PieceStorageEngineDumb + Send + Sync + 'static>, anyhow::Error> {
     let path_to_torrent = build_torrent_map(config)?;
     build_storage_engine_dumb_helper(config, &path_to_torrent)
 }
 
 pub fn build_storage_engine(
     config: &Config,
-) -> Result<Arc<Box<dyn PieceStorageEngine + Send + Sync + 'static>>, failure::Error> {
+) -> Result<Arc<Box<dyn PieceStorageEngine + Send + Sync + 'static>>, anyhow::Error> {
     let path_to_torrent = build_torrent_map(config)?;
     let dumb = build_storage_engine_dumb_helper(config, &path_to_torrent)?;
 
@@ -407,7 +389,7 @@ pub struct BuiltStates {
     pub path_to_torrent: HashMap<PathBuf, Arc<TorrentMetaWrapped>>,
 }
 
-pub fn build_storage_engine_states(config: &Config) -> Result<BuiltStates, failure::Error> {
+pub fn build_storage_engine_states(config: &Config) -> Result<BuiltStates, anyhow::Error> {
     let path_to_torrent = build_torrent_map(config)?;
     let storage_engine = build_storage_engine_dumb_helper(config, &path_to_torrent)?;
 

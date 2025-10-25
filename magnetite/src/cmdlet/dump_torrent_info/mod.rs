@@ -6,8 +6,8 @@ use clap::{App, Arg, SubCommand};
 use sha1::{Digest, Sha1};
 
 use magnetite_common::TorrentId;
+use magnetite_model::TorrentMeta;
 
-use crate::model::TorrentMeta;
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "dump-torrent-info";
@@ -57,11 +57,11 @@ mod imp {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    pub fn print_path_w_newline(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), failure::Error> {
+    pub fn print_path_w_newline(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), anyhow::Error> {
         let s: &OsStr = p.as_ref();
         let b = s.as_bytes();
         if b.iter().any(|x| *x == b'\n') {
-            return Err(failure::format_err!("file-name contains newline but we are delimiting by newlines."));
+            return Err(anyhow::format_err!("file-name contains newline but we are delimiting by newlines."));
         }
         wri.write_all(b)?;
         wri.write_all(b"\n")?;
@@ -69,7 +69,7 @@ mod imp {
     }
 
 
-    pub fn print_path_w_zero(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), failure::Error> {
+    pub fn print_path_w_zero(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), anyhow::Error> {
         let s: &OsStr = p.as_ref();
         let b = s.as_bytes();
         wri.write_all(b)?;
@@ -78,7 +78,7 @@ mod imp {
     }
 }
 
-pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
     let torrent_file = matches.value_of_os("torrent-file").unwrap();
     let torrent_file = Path::new(torrent_file).to_owned();
 
@@ -92,10 +92,10 @@ pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         if cfg!(windows) {
             eprintln!("I dunno how to delimit paths properly on this chaotic OS - aborting");
 
-            return Err(failure::format_err!("bad argument combination"));
+            return Err(anyhow::format_err!("bad argument combination"));
         }
 
-        let mut writer: fn(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), failure::Error> = imp::print_path_w_newline;
+        let mut writer: fn(wri: &mut dyn std::io::Write, p: &Path) -> Result<(), anyhow::Error> = imp::print_path_w_newline;
         if zero {
            writer = imp::print_path_w_zero;
         }
@@ -104,16 +104,16 @@ pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let tm: TorrentMeta = bencode::from_bytes(&by[..]).unwrap();
         for file in tm.info.files {
             writer(&mut stdout, &file.path)?;
-        } 
+        }
 
         return Ok(());
     }
-    
+
 
     if zero {
         eprintln!("--zero only supported when dumping file-paths for now");
 
-        return Err(failure::format_err!("bad argument combination"));
+        return Err(anyhow::format_err!("bad argument combination"));
     }
 
     let mut infohash = TorrentId::zero();
@@ -124,11 +124,11 @@ pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         let infohash_data = hasher.result();
         infohash.as_mut_bytes().copy_from_slice(&infohash_data[..]);
     } else {
-        return Err(failure::format_err!("bad torrent file"));
+        return Err(anyhow::format_err!("bad torrent file"));
     }
 
     let tm: TorrentMeta = bencode::from_bytes(&by[..]).unwrap();
-    
+
     if matches.get_flag("info-hash") {
         println!("{}", infohash.hex());
         return Ok(())

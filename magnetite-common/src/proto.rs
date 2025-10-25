@@ -219,7 +219,7 @@ impl<'a> Message<'a> {
         Message::Bitfield {
             field_data: BytesCow::Borrowed(bf),
         }
-    } 
+    }
 
     pub fn debug_small<'b>(&'b self) -> MessageDebugSmall<'b, 'a> where 'a: 'b {
         MessageDebugSmall(self)
@@ -545,4 +545,3 @@ impl Handshake {
         Ok((HANDSHAKE_SIZE, hs))
     }
 }
-

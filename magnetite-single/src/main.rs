@@ -8,7 +8,7 @@ use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use bytes::BytesMut;
 use clap::{Arg, ArgAction, value_parser};
-use failure::ResultExt;
+use anyhow::Context;
 // use metrics_runtime::Receiver;
 
 use tracing::{span, event, Level};
@@ -61,7 +61,7 @@ impl<'a> fmt::Display for PieceSliceSmallSlice<'a> {
     }
 }
 
-fn main() -> Result<(), failure::Error> {
+fn main() -> Result<(), anyhow::Error> {
     let mut my_subscriber_builder = FmtSubscriber::builder()
         // .with_ansi(false)
         .json()
@@ -117,8 +117,8 @@ fn main() -> Result<(), failure::Error> {
             if e.downcast_ref::<UnknownInfoHash>().is_some() {
                 return Ok(());
             }
-                
-            let root = e.find_root_cause();
+
+            let root = e.root_cause();
             if root.downcast_ref::<BadHandshake>().is_some() {
                 return Ok(());
             }
@@ -133,7 +133,7 @@ fn main() -> Result<(), failure::Error> {
     })
 }
 
-async fn open_torrent_data_file(info_hash: &TorrentId) -> Result<File, failure::Error> {
+async fn open_torrent_data_file(info_hash: &TorrentId) -> Result<File, anyhow::Error> {
     let span = span!(Level::INFO, "open_torrent_data_file");
     let _guard = span.enter();
 
@@ -143,7 +143,7 @@ async fn open_torrent_data_file(info_hash: &TorrentId) -> Result<File, failure::
     }
 
     let filename = format!("/mnt/media/data/{}/0", info_hash.hex());
-    let file = File::open(&filename).with_context(|_| {
+    let file = File::open(&filename).with_context(|| {
         format!("opening {:?}", filename)
     })?;
 
@@ -169,7 +169,7 @@ impl<'a> PieceDataRequestsDispatcher<'a> {
         file: File,
         torrent: &'a TorrentMetaWrapped,
         piece_data_requests: &'a [PieceSlice]
-    ) -> Result<Self, failure::Error> {
+    ) -> Result<Self, anyhow::Error> {
         Ok(PieceDataRequestsDispatcher {
             file, torrent,
             experimental_avoid_seek: false,
@@ -180,7 +180,7 @@ impl<'a> PieceDataRequestsDispatcher<'a> {
         })
     }
 
-    async fn dispatch(&mut self, wbuf: &mut BytesMut) -> Result<Option<u64>, failure::Error> {
+    async fn dispatch(&mut self, wbuf: &mut BytesMut) -> Result<Option<u64>, anyhow::Error> {
         if let Some(req) = self.piece_data_requests_iter.next() {
             let want_offset = u64::from(req.index) * u64::from(self.torrent.meta.info.piece_length)
                 + u64::from(req.begin);
@@ -213,7 +213,7 @@ impl<'a> PieceDataRequestsDispatcher<'a> {
     }
 }
 
-async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+async fn main2(matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
     use magnetite_single_api::proto::magnetite_client::MagnetiteClient;
     let mut client = MagnetiteClient::connect("http://[::1]:10000").await?;
     let mut rng: StdRng = StdRng::from_rng(&mut rand::thread_rng())?;
@@ -225,13 +225,13 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
     let mut rbuf = BytesMut::new();
     let mut wbuf = BytesMut::new();
-    
+
     let mut sent_handshake = false;
     let mut self_pid;
     if let Some(info_hash) = matches.get_one::<TorrentId>("info-hash") {
         sent_handshake = true;
         self_pid = matches.get_one::<TorrentId>("peer-id").cloned().ok_or_else(|| {
-            failure::format_err!("peer-id and info-hash are mutually inclusive")
+            anyhow::format_err!("peer-id and info-hash are mutually inclusive")
         })?;
 
         let mut hs_buf = [0; HANDSHAKE_SIZE];
@@ -247,12 +247,12 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         })
     });
     let handshake = timeout(HANDSHAKE_TIMEOUT, handshake_read).await
-        .with_context(|_| "handshake timeout expired")?
-        .with_context(|_| "during handshake")?;
+        .with_context(|| "handshake timeout expired")?
+        .with_context(|| "during handshake")?;
 
     if let Some(info_hash) = matches.get_one::<TorrentId>("info-hash") {
         if info_hash != &handshake.info_hash {
-            failure::bail!("peer returned different info-hash in handshake!");
+            anyhow::bail!("peer returned different info-hash in handshake!");
         }
     }
 
@@ -287,11 +287,11 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 bitfield = bf;
             },
             _ => {
-                failure::bail!("no starting bitfield - got {:?}", next_message.item);
+                anyhow::bail!("no starting bitfield - got {:?}", next_message.item);
             }
         }
     } else {
-        failure::bail!("no starting bitfield.");
+        anyhow::bail!("no starting bitfield.");
     }
 
     let span = span!(Level::INFO, "torrent_session_start",
@@ -310,7 +310,7 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
         stream.flush().await?;
     }
 
-    let bitfield = BitField::all(torrent.meta.info.pieces.len() as u32);    
+    let bitfield = BitField::all(torrent.meta.info.pieces.len() as u32);
     serialize(&mut wbuf, &Message::bitfield(bitfield.as_raw_slice()));
 
     let mut piece_data_requests: Vec<PieceSlice> = Vec::new();
@@ -340,9 +340,9 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
             }
 
             if (loop_now - last_rx) > CONNECTION_IDLE_TIMEOUT {
-                failure::bail!("no messages received recently");
+                anyhow::bail!("no messages received recently");
             }
-            
+
             while let Some(v) = deserialize_pop_opt(&mut rbuf)? {
                 event!(Level::DEBUG,
                     message = ?v.debug_small(),
@@ -350,7 +350,7 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
 
                 if let Message::Request(ref ps) = v {
                     if 64 * 1024 < ps.length {
-                        failure::bail!("piece size req too large: {}", ps.length);
+                        anyhow::bail!("piece size req too large: {}", ps.length);
                     }
                     piece_data_requests.push(*ps);
                     if piece_data_requests.len() >= 32 {
@@ -368,7 +368,7 @@ async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
                 let span = span!(Level::INFO, "torrent_data_read");
                 let _guard = span.enter();
 
-                let file = open_torrent_data_file(&handshake.info_hash).await.with_context(|_| {
+                let file = open_torrent_data_file(&handshake.info_hash).await.with_context(|| {
                     format!("opening data {:?}", handshake.info_hash)
                 })?;
 
@@ -460,9 +460,9 @@ async fn read_to_completion<T, F>(
     s: &mut TcpStream,
     buf: &mut BytesMut,
     p: F,
-) -> Result<T, failure::Error>
+) -> Result<T, anyhow::Error>
 where
-    F: Fn(&[u8]) -> IResult<T, failure::Error>,
+    F: Fn(&[u8]) -> IResult<T, anyhow::Error>,
 {
     let mut needed: usize = 0;
     loop {
@@ -481,7 +481,7 @@ where
             IResult::Err(IErr::Incomplete(more_cnt)) => {
                 needed = more_cnt;
                 if length == 0 {
-                    failure::bail!("EOF");
+                    anyhow::bail!("EOF");
                 }
             }
         }

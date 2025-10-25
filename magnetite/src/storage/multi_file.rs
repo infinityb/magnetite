@@ -8,7 +8,7 @@ use bytes::{Bytes, BytesMut};
 use futures::future::FutureExt;
 use lru::LruCache;
 use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 use tracing::{event, Level};
 

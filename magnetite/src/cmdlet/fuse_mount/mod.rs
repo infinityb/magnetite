@@ -252,7 +252,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
 }
 
 #[cfg(not(unix))]
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), anyhow::Error> {
     panic!("The `fuse-mount` feature only works on unix systems!");
 }
 
@@ -280,7 +280,7 @@ impl MagnetiteFuseHost for FuseHost {
 
 #[cfg(unix)]
 #[allow(clippy::cognitive_complexity)] // macro bug around event!()
-pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches<'_>) -> Result<(), anyhow::Error> {
     use crate::model::config::Config;
 
     let config = matches.value_of("config").unwrap();

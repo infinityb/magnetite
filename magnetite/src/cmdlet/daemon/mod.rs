@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use magnetite_common::TorrentId;
 
-use crate::model::TorrentMeta;
+use magnetite_model::TorrentMeta;
 use crate::CARGO_PKG_VERSION;
 
 pub const SUBCOMMAND_NAME: &str = "daemon";
@@ -50,7 +50,7 @@ struct Config {
     mgmt_bind_address: Vec<BindAddress>,
 }
 
-pub async fn main(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+pub async fn main(matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
     let config_file = matches.value_of_os("config").unwrap();
     let config_file = Path::new(config_file).to_owned();
 
@@ -158,5 +158,3 @@ impl<'de> serde::de::Visitor<'de> for BindAddressVisitor {
         return Ok(BindAddress::UnixSocket(PathBuf::from(s)));
     }
 }
-
-

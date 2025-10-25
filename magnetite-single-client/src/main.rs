@@ -3,7 +3,6 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use clap::{Arg, ArgAction, value_parser};
-use failure::ResultExt;
 use tracing::{span, event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
@@ -14,7 +13,7 @@ use magnetite_model::TorrentMetaWrapped;
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
-fn main() -> Result<(), failure::Error> {
+fn main() -> Result<(), anyhow::Error> {
     let mut my_subscriber_builder = FmtSubscriber::builder()
         .json()
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL);
@@ -80,7 +79,7 @@ fn main() -> Result<(), failure::Error> {
 }
 
 
-async fn main2(matches: &clap::ArgMatches) -> Result<(), failure::Error> {
+async fn main2(matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
     use magnetite_single_api::proto::magnetite_client::MagnetiteClient;
     use magnetite_single_api::proto::AddTorrentRequest;
     let mut client = MagnetiteClient::connect("http://[::1]:10000").await?;
@@ -115,4 +114,3 @@ fn print_test_logging() {
     event!(Level::WARN, "logger initialized - warn check");
     event!(Level::ERROR, "logger initialized - error check");
 }
-

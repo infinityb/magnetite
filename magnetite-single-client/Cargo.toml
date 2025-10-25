@@ -10,7 +10,7 @@ magnetite-single-api = { path = "../magnetite-single-api" }
 magnetite-common = { path = "../magnetite-common" }
 magnetite-model = { path = "../magnetite-model" }
 
-failure = "0.1.8"
+anyhow = "1.0.70"
 clap = "4.4.18"
 tracing = { version = "0.1.40", features = ["std"], default-features = false }
 tracing-subscriber = { version = "0.3.18", features = ["json"] }

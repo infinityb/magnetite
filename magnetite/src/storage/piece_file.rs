@@ -11,10 +11,11 @@ use tokio::fs::File as TokioFile;
 use tokio::sync::Mutex;
 
 use magnetite_common::TorrentId;
+use magnetite_model::BitField;
 
 use super::utils::piece_file_pread_exact;
 use super::{GetPieceRequest, PieceStorageEngineDumb};
-use crate::model::{BitField, MagnetiteError, ProtocolViolation};
+use crate::model::{MagnetiteError, ProtocolViolation};
 
 pub struct InProgress {
     // for interior pieces:
